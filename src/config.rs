@@ -55,7 +55,7 @@ pub struct ApiSection {
 }
 
 fn default_api_enabled() -> bool {
-    true
+    false
 }
 
 fn default_api_bind() -> String {
@@ -576,7 +576,7 @@ mod tests {
     #[test]
     fn default_api_config_matches_p2_defaults() {
         let cfg = AppConfig::default();
-        assert!(cfg.api.enabled);
+        assert!(!cfg.api.enabled);
         assert_eq!(cfg.api.bind, "0.0.0.0");
         assert_eq!(cfg.api.port, 8080);
         assert!(!cfg.api.enable_ipv6);
@@ -585,7 +585,8 @@ mod tests {
 
     #[test]
     fn enabled_api_requires_password() {
-        let cfg = AppConfig::default();
+        let mut cfg = AppConfig::default();
+        cfg.api.enabled = true;
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("api.password"));
     }
@@ -593,6 +594,7 @@ mod tests {
     #[test]
     fn api_config_accepts_password() {
         let mut cfg = AppConfig::default();
+        cfg.api.enabled = true;
         cfg.api.password = "secret".to_string();
         assert!(cfg.validate().is_ok());
     }

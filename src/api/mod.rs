@@ -173,6 +173,7 @@ mod tests {
     #[test]
     fn config_check_accepts_json_or_toml_and_rejects_bad_config() {
         let mut cfg = AppConfig::default();
+        cfg.api.enabled = true;
         cfg.api.password = "secret".to_string();
 
         assert!(check_config_payload(CheckConfigPayload::Json(cfg.clone())).is_ok());
