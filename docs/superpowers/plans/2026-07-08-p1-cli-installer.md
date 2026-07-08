@@ -513,6 +513,8 @@ fn redact(secret: &str) -> String {
 }
 ```
 
+Only credential-like fields are redacted in P1. `corp_id`, `agent_id`, `chat_id`, and shell paths are shown because they are identifiers or paths rather than secrets; revisit this in P2 if the web UI exposes config summaries.
+
 - [ ] **Step 4: Add typed config load/save/validation methods**
 
 Add methods without deleting legacy `Config`:
@@ -752,7 +754,7 @@ git commit -m "feat: wire config cli commands"
 
 **Interfaces:**
 - Consumes: `AppConfig` and channel config structs
-- Produces: `wizard::run_setup_wizard(existing: Option<AppConfig>) -> anyhow::Result<AppConfig>`
+- Produces: `wizard::run_setup_wizard(existing: Option<AppConfig>) -> anyhow::Result<Option<AppConfig>>`
 - Produces: `wizard::write_setup_config(config: &AppConfig, path: &Path) -> anyhow::Result<()>`
 
 - [ ] **Step 1: Create `src/wizard.rs`**
@@ -762,7 +764,7 @@ Use `inquire` prompts. The write function must validate before writing.
 ```rust
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use inquire::{Confirm, MultiSelect, Password, Select, Text};
 
 use crate::config::{
@@ -770,8 +772,24 @@ use crate::config::{
     WeComConfig,
 };
 
-pub fn run_setup_wizard(existing: Option<AppConfig>) -> Result<AppConfig> {
-    let mut cfg = existing.unwrap_or_default();
+pub fn run_setup_wizard(existing: Option<AppConfig>) -> Result<Option<AppConfig>> {
+    let mut cfg = match existing {
+        Some(existing_config) => {
+            match Select::new(
+                "Existing config found",
+                vec!["Keep existing", "Edit guided", "Replace from scratch", "Cancel"],
+            )
+            .prompt()?
+            {
+                "Keep existing" => return Ok(None),
+                "Edit guided" => existing_config,
+                "Replace from scratch" => AppConfig::default(),
+                "Cancel" => bail!("setup cancelled"),
+                _ => unreachable!("fixed Select options"),
+            }
+        }
+        None => AppConfig::default(),
+    };
 
     Select::new("Runtime target", vec!["SMS forwarding service"])
         .with_help_message("API and frontend are planned for P2.")
@@ -796,13 +814,21 @@ pub fn run_setup_wizard(existing: Option<AppConfig>) -> Result<AppConfig> {
         add_profiles_for_channel(&mut cfg, item)?;
     }
 
-    cfg.sms.ignore_storage = vec![
-        Text::new("Ignore SMS storage type")
+    cfg.sms.ignore_storage.clear();
+    loop {
+        let storage = Text::new("Ignore SMS storage type")
             .with_default("sm")
-            .prompt()?,
-    ];
+            .with_help_message("Common values: sm, me, mt, sr, bm, ta. Use all for no filtering.")
+            .prompt()?;
+        cfg.sms.ignore_storage.push(storage);
+        if !Confirm::new("Add another ignored storage type?")
+            .with_default(false)
+            .prompt()? {
+            break;
+        }
+    }
 
-    Ok(cfg)
+    Ok(Some(cfg))
 }
 
 pub fn write_setup_config(config: &AppConfig, path: &Path) -> Result<()> {
@@ -897,9 +923,12 @@ Add `mod wizard;` to `src/main.rs`. Replace `None` and `Setup` arms with:
 None => {
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         let existing = config::AppConfig::load(&args.config).ok();
-        let cfg = wizard::run_setup_wizard(existing)?;
-        wizard::write_setup_config(&cfg, &args.config)?;
-        println!("config written: {}", args.config.display());
+        if let Some(cfg) = wizard::run_setup_wizard(existing)? {
+            wizard::write_setup_config(&cfg, &args.config)?;
+            print_setup_next_steps(&args.config);
+        } else {
+            println!("existing config kept: {}", args.config.display());
+        }
         Ok(())
     } else {
         Err(anyhow::anyhow!(
@@ -910,10 +939,24 @@ None => {
 }
 Some(Command::Setup) => {
     let existing = config::AppConfig::load(&args.config).ok();
-    let cfg = wizard::run_setup_wizard(existing)?;
-    wizard::write_setup_config(&cfg, &args.config)?;
-    println!("config written: {}", args.config.display());
+    if let Some(cfg) = wizard::run_setup_wizard(existing)? {
+        wizard::write_setup_config(&cfg, &args.config)?;
+        print_setup_next_steps(&args.config);
+    } else {
+        println!("existing config kept: {}", args.config.display());
+    }
     Ok(())
+}
+```
+
+Add this helper to `src/main.rs`:
+
+```rust
+fn print_setup_next_steps(config_path: &std::path::Path) {
+    println!("config written: {}", config_path.display());
+    println!("check config: sms-relayed --config {} config check", config_path.display());
+    println!("start OpenWrt service: /etc/init.d/sms-relayed start");
+    println!("inspect OpenWrt logs: logread | tail -n 50");
 }
 ```
 
@@ -985,23 +1028,37 @@ pub fn has_verification_keyword(sms_content: &mut String, config: &AppConfig) ->
 pub fn get_sms_code_str(sms_text: &str, config: &AppConfig) -> (String, String, String) {
     let mut content = sms_text.trim().to_string();
     if has_verification_keyword(&mut content, config) {
-        let code = extract_code(&content);
-        let code_from = extract_code_source(&content);
-        let code_str = if code.is_empty() {
-            String::new()
-        } else if code_from.is_empty() {
-            format!("验证码 {}", code)
-        } else {
-            format!("{} 验证码 {}", code_from, code)
-        };
-        (code_str, code, code_from)
-    } else {
-        (String::new(), String::new(), String::new())
+        let code = extract_code(&content).trim().to_string();
+        if !code.is_empty() {
+            let source = extract_code_source(&content);
+            let combined = format!("{}{}", source, code);
+            return (combined, code, source);
+        }
     }
+    (String::new(), String::new(), String::new())
 }
 ```
 
+This preserves the current notification title behavior: `code_str` remains `source + code`, for example `【淘宝】1234`.
+
 - [ ] **Step 2: Change each forwarder to typed profile config**
+
+Use this old-key to new-field mapping while migrating sender implementations:
+
+| Old flat key | New profile field | Notes |
+| --- | --- | --- |
+| `BarkUrl` | `channels.bark.<name>.server_url` | Trim trailing slash where the sender builds URLs. |
+| `BrakKey` | `channels.bark.<name>.key` | Keep old misspelling out of the new config. |
+| `TGBotToken` | `channels.telegram.<name>.bot_token` | |
+| `TGBotChatID` | `channels.telegram.<name>.chat_id` | |
+| `CustomTGBotApi` | `channels.telegram.<name>.api_base` | Delete `IsEnableCustomTGBotApi`; default `api_base` is official Telegram API. |
+| `pushPlusToken` | `channels.pushplus.<name>.token` | |
+| `WeChatQYID` | `channels.wecom.<name>.corp_id` | |
+| `WeChatQYApplicationID` | `channels.wecom.<name>.agent_id` | |
+| `WeChatQYApplicationSecret` | `channels.wecom.<name>.secret` | |
+| `DingTalkAccessToken` | `channels.dingtalk.<name>.access_token` | |
+| `DingTalkSecret` | `channels.dingtalk.<name>.secret` | |
+| `ShellPath` | `channels.shell.<name>.path` | |
 
 Use these signatures:
 
@@ -1137,6 +1194,29 @@ Use `modem_path` in the signal match rule, `Messaging.Create`, and `Messaging.De
 Define storage filtering as:
 
 ```rust
+let ignored_storage: Vec<StorageType> = config
+    .sms
+    .ignore_storage
+    .iter()
+    .map(|s| StorageType::from_config(s))
+    .collect();
+
+// Pass `&ignored_storage` to `get_sms_content`.
+async fn get_sms_content(
+    connection: &Connection,
+    sms_path: &str,
+    storage_filters: &[StorageType],
+    profiles: &[ChannelProfile],
+    config: &AppConfig,
+) -> Result<()> {
+    // Existing property loading stays the same. After reading `storage`:
+    if should_ignore_storage(storage, storage_filters) {
+        warn!("已过滤不转发");
+        return Ok(());
+    }
+    // Existing retry and forward flow stays the same.
+}
+
 fn should_ignore_storage(storage: u32, filters: &[StorageType]) -> bool {
     filters
         .iter()
@@ -1145,6 +1225,8 @@ fn should_ignore_storage(storage: u32, filters: &[StorageType]) -> bool {
 ```
 
 This preserves current semantics: `StorageType::All` means "do not filter anything". In a multi-value list, `all` is ignored rather than causing every message to be filtered.
+
+Change `StorageType::from_config` so unknown values do not become `All`. Add a `None` variant or equivalent sentinel, log a warning for the unknown string, and make it match no storage value. This prevents `ignore_storage = ["sm", "typo"]` from silently changing filter behavior.
 
 - [ ] **Step 5: Create runtime module**
 
@@ -1236,10 +1318,10 @@ git commit -m "feat: migrate runtime to typed profiles"
 Run:
 
 ```bash
-rg "crate::config::Config|\\bConfig::|crate::cli::Channel|\\bChannel::|setup::|mode::|mod setup|mod mode" src
+rg --glob '!src/web.rs' "crate::config::Config|\\bConfig::|crate::cli::Channel|\\bChannel::|setup::|mode::|mod setup|mod mode" src
 ```
 
-Expected: only hits are inside `src/config.rs` for the old `Config` declaration and inside `src/cli.rs` for the transitional `Channel` declaration.
+Expected: only hits are inside `src/config.rs` for the old `Config` declaration and inside `src/cli.rs` for the transitional `Channel` declaration. `src/web.rs` is a P2 carryover file and is intentionally excluded because P1 does not compile `mod web;`.
 
 - [ ] **Step 2: Delete old config implementation and transitional channel bridge**
 
@@ -1404,7 +1486,7 @@ USE_PROCD=1
 
 start_service() {
   procd_open_instance
-  procd_set_param command $BIN_DIR/sms-relayed run --config $CONFIG_DIR/config.toml
+  procd_set_param command "$BIN_DIR/sms-relayed" run --config "$CONFIG_DIR/config.toml"
   procd_set_param respawn
   procd_close_instance
 }
@@ -1519,7 +1601,25 @@ test -z "$missing"
 
 Expected: all shell commands exit 0 and sourcing `install.sh` does not run `main`.
 
-- [ ] **Step 6: Verify installer syntax and root override**
+- [ ] **Step 6: Verify service writers through isolated root**
+
+Run:
+
+```bash
+tmp="$(mktemp -d)"
+SMS_RELAYED_TEST=1 SMS_RELAYED_ROOT="$tmp" . ./install.sh
+write_openwrt_service
+test -f "$tmp/etc/init.d/sms-relayed"
+grep "procd_open_instance" "$tmp/etc/init.d/sms-relayed"
+grep 'procd_set_param command "/usr/bin/sms-relayed" run --config "/etc/sms-relayed/config.toml"' "$tmp/etc/init.d/sms-relayed"
+write_systemd_service
+test -f "$tmp/etc/systemd/system/sms-relayed.service"
+grep "ExecStart=/usr/bin/sms-relayed run --config /etc/sms-relayed/config.toml" "$tmp/etc/systemd/system/sms-relayed.service"
+```
+
+Expected: both service files are generated under `$tmp`, and neither command writes to real `/etc`.
+
+- [ ] **Step 7: Verify installer syntax and root override**
 
 Run:
 
@@ -1535,7 +1635,7 @@ test -d "$tmp/etc/sms-relayed"
 
 Expected: syntax passes; ShellCheck passes if present; root override does not write to real `/etc`.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add install.sh
@@ -1672,5 +1772,10 @@ git commit -m "docs: update p1 cli installer usage"
   - `mmcli` absence is a warning.
   - `SMS_RELAYED_ROOT` supports isolated-root installer smoke tests.
   - Storage filtering defines `all` as "do not filter anything".
+  - Task 6 excludes P2 carryover `src/web.rs` from legacy-reference checks.
+  - Existing config setup supports keep, guided edit, replace, and cancel.
+  - Installer tests directly exercise OpenWrt and systemd service writers.
+  - Forwarder migration includes an old-key to new-profile-field mapping.
+  - SMS code title formatting preserves current `source + code` behavior.
   - Wizard validates config before saving.
   - ShellCheck is included when available.
