@@ -31,26 +31,4 @@ pub enum ConfigCommand {
     Show,
 }
 
-// Transitional bridge for modules migrated in Task 5.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Channel {
-    PushPlus,
-    WeCom,
-    Telegram,
-    DingTalk,
-    Bark,
-    Shell,
-}
 
-impl Channel {
-    pub fn name(&self) -> &str {
-        match self {
-            Channel::PushPlus => "PushPlus",
-            Channel::WeCom => "WeCom",
-            Channel::Telegram => "Telegram",
-            Channel::DingTalk => "DingTalk",
-            Channel::Bark => "Bark",
-            Channel::Shell => "Shell",
-        }
-    }
-}
