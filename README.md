@@ -295,6 +295,16 @@ ShellExample/sendbypushplus.sh
 - 服务运行用户需要有系统 D-Bus 上的 ModemManager 访问权限；最简单的方式是用 `sudo` 或以 root 运行。
 - P2 Web API 和前端管理后台已实现（v1.1+）：SMS 历史存储、搜索、导出、密码保护、配置编辑。
 
+## License
+
+sms-relayed is licensed under the GNU General Public License version 3 only
+(`GPL-3.0-only`). See [LICENSE](LICENSE).
+
+The "sms-relayed" name, project logos, and official release names are covered by
+the separate [Trademark Policy](TRADEMARKS.md). You may include this software in
+hardware products and may truthfully describe that inclusion, but modified or
+third-party builds must not be presented as official sms-relayed releases.
+
 ## 参考
 
 - [原 C++ 上游项目](https://github.com/lkiuyu/DbusSmsForwardCPlus)
