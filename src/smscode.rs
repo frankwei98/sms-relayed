@@ -54,8 +54,8 @@ pub fn extract_code_source(sms_content: &str) -> String {
     let contents = extract_bracket_content(sms_content);
     for content in &contents {
         let parts: Vec<&str> = sms_content.split(content).collect();
-        if parts.first().map_or(false, |p| p.ends_with('【'))
-            || parts.last().map_or(false, |p| p.starts_with('】'))
+        if parts.first().is_some_and(|p| p.ends_with('【'))
+            || parts.last().is_some_and(|p| p.starts_with('】'))
         {
             return format!("【{}】", content);
         }

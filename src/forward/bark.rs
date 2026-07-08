@@ -27,7 +27,12 @@ pub async fn send(
         tel_number, sms_date, device_name, sms_text
     );
 
-    let mut url = format!("{}/{}/{}", bark_url, bark_key, util::url_encode_form(&content));
+    let mut url = format!(
+        "{}/{}/{}",
+        bark_url,
+        bark_key,
+        util::url_encode_form(&content)
+    );
     if !code_str.is_empty() {
         url.push_str(&format!(
             "?group={}&title={}&autoCopy=1&copy={}",

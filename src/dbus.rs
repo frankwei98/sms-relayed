@@ -13,10 +13,12 @@ use crate::forward;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendTarget {
     Command,
+    #[allow(dead_code)]
     Api,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum StorageType {
     Unknown = 0,
     Sm = 1,
@@ -39,7 +41,10 @@ impl StorageType {
             "bm" => StorageType::Bm,
             "ta" => StorageType::Ta,
             _ => {
-                warn!("unknown storage type: {}; storage will not be filtered by this entry", s);
+                warn!(
+                    "unknown storage type: {}; storage will not be filtered by this entry",
+                    s
+                );
                 StorageType::Unknown
             }
         }
@@ -124,11 +129,17 @@ pub async fn monitor_dbus(
         let msg = msg?;
         let header = msg.header();
 
-        let interface = header.interface().map(|s| s.to_string()).unwrap_or_default();
+        let interface = header
+            .interface()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
         let member = header.member().map(|s| s.to_string()).unwrap_or_default();
 
         if interface == MM_MESSAGING_INTERFACE && member.as_str() == "Added" {
-            if let Ok(body) = msg.body().deserialize::<(zbus::zvariant::ObjectPath, bool)>() {
+            if let Ok(body) = msg
+                .body()
+                .deserialize::<(zbus::zvariant::ObjectPath, bool)>()
+            {
                 let sms_path = body.0.to_string();
                 let is_received = body.1;
                 if is_received {
@@ -224,7 +235,7 @@ pub async fn send_sms(
     let sms_path_str = sms_path.as_str();
 
     if target == SendTarget::Command {
-        print!("短信创建成功，是否发送？(1.发送短信,其他按键退出程序)\n");
+        println!("短信创建成功，是否发送？(1.发送短信,其他按键退出程序)");
         io::stdout().flush().unwrap();
         let mut input = String::new();
         io::stdin().read_line(&mut input).unwrap();

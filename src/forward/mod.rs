@@ -20,28 +20,97 @@ pub async fn forward_sms(
 ) -> Result<()> {
     let device_name = resolve_device_name(config);
     let sms_date = sms_date.replace('T', " ");
-    println!("发信电话:{}\n时间:{}\n短信内容:{}", tel_number, sms_date, sms_text);
+    println!(
+        "发信电话:{}\n时间:{}\n短信内容:{}",
+        tel_number, sms_date, sms_text
+    );
 
     let mut failures = 0usize;
     for profile in profiles {
         let result = match profile {
-            ChannelProfile::PushPlus { config: profile_config, .. } => {
-                pushplus::send(tel_number, sms_text, &sms_date, &device_name, profile_config, config).await
+            ChannelProfile::PushPlus {
+                config: profile_config,
+                ..
+            } => {
+                pushplus::send(
+                    tel_number,
+                    sms_text,
+                    &sms_date,
+                    &device_name,
+                    profile_config,
+                    config,
+                )
+                .await
             }
-            ChannelProfile::WeCom { config: profile_config, .. } => {
-                wecom::send(tel_number, sms_text, &sms_date, &device_name, profile_config, config).await
+            ChannelProfile::WeCom {
+                config: profile_config,
+                ..
+            } => {
+                wecom::send(
+                    tel_number,
+                    sms_text,
+                    &sms_date,
+                    &device_name,
+                    profile_config,
+                    config,
+                )
+                .await
             }
-            ChannelProfile::Telegram { config: profile_config, .. } => {
-                telegram::send(tel_number, sms_text, &sms_date, &device_name, profile_config, config).await
+            ChannelProfile::Telegram {
+                config: profile_config,
+                ..
+            } => {
+                telegram::send(
+                    tel_number,
+                    sms_text,
+                    &sms_date,
+                    &device_name,
+                    profile_config,
+                    config,
+                )
+                .await
             }
-            ChannelProfile::DingTalk { config: profile_config, .. } => {
-                dingtalk::send(tel_number, sms_text, &sms_date, &device_name, profile_config, config).await
+            ChannelProfile::DingTalk {
+                config: profile_config,
+                ..
+            } => {
+                dingtalk::send(
+                    tel_number,
+                    sms_text,
+                    &sms_date,
+                    &device_name,
+                    profile_config,
+                    config,
+                )
+                .await
             }
-            ChannelProfile::Bark { config: profile_config, .. } => {
-                bark::send(tel_number, sms_text, &sms_date, &device_name, profile_config, config).await
+            ChannelProfile::Bark {
+                config: profile_config,
+                ..
+            } => {
+                bark::send(
+                    tel_number,
+                    sms_text,
+                    &sms_date,
+                    &device_name,
+                    profile_config,
+                    config,
+                )
+                .await
             }
-            ChannelProfile::Shell { config: profile_config, .. } => {
-                shell::send(tel_number, sms_text, &sms_date, &device_name, profile_config, config).await
+            ChannelProfile::Shell {
+                config: profile_config,
+                ..
+            } => {
+                shell::send(
+                    tel_number,
+                    sms_text,
+                    &sms_date,
+                    &device_name,
+                    profile_config,
+                    config,
+                )
+                .await
             }
         };
         if let Err(e) = result {

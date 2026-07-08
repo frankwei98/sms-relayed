@@ -145,12 +145,30 @@ pub struct ProfileRef {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelProfile {
-    Bark { name: String, config: BarkConfig },
-    Telegram { name: String, config: TelegramConfig },
-    PushPlus { name: String, config: PushPlusConfig },
-    WeCom { name: String, config: WeComConfig },
-    DingTalk { name: String, config: DingTalkConfig },
-    Shell { name: String, config: ShellConfig },
+    Bark {
+        name: String,
+        config: BarkConfig,
+    },
+    Telegram {
+        name: String,
+        config: TelegramConfig,
+    },
+    PushPlus {
+        name: String,
+        config: PushPlusConfig,
+    },
+    WeCom {
+        name: String,
+        config: WeComConfig,
+    },
+    DingTalk {
+        name: String,
+        config: DingTalkConfig,
+    },
+    Shell {
+        name: String,
+        config: ShellConfig,
+    },
 }
 
 impl Default for AppConfig {
@@ -326,17 +344,15 @@ impl AppConfig {
     fn profile_for_ref(&self, reference: &ProfileRef) -> Result<ChannelProfile> {
         match reference.channel_type {
             ChannelType::Bark => {
-                let cfg = self
-                    .channels
-                    .bark
-                    .get(&reference.name)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "enabled profile bark.{} does not exist",
-                            reference.name
-                        )
-                    })?;
-                require("channels.bark", &reference.name, "server_url", &cfg.server_url)?;
+                let cfg = self.channels.bark.get(&reference.name).ok_or_else(|| {
+                    anyhow::anyhow!("enabled profile bark.{} does not exist", reference.name)
+                })?;
+                require(
+                    "channels.bark",
+                    &reference.name,
+                    "server_url",
+                    &cfg.server_url,
+                )?;
                 require("channels.bark", &reference.name, "key", &cfg.key)?;
                 Ok(ChannelProfile::Bark {
                     name: reference.name.clone(),
@@ -344,34 +360,30 @@ impl AppConfig {
                 })
             }
             ChannelType::Telegram => {
-                let cfg = self
-                    .channels
-                    .telegram
-                    .get(&reference.name)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "enabled profile telegram.{} does not exist",
-                            reference.name
-                        )
-                    })?;
-                require("channels.telegram", &reference.name, "bot_token", &cfg.bot_token)?;
-                require("channels.telegram", &reference.name, "chat_id", &cfg.chat_id)?;
+                let cfg = self.channels.telegram.get(&reference.name).ok_or_else(|| {
+                    anyhow::anyhow!("enabled profile telegram.{} does not exist", reference.name)
+                })?;
+                require(
+                    "channels.telegram",
+                    &reference.name,
+                    "bot_token",
+                    &cfg.bot_token,
+                )?;
+                require(
+                    "channels.telegram",
+                    &reference.name,
+                    "chat_id",
+                    &cfg.chat_id,
+                )?;
                 Ok(ChannelProfile::Telegram {
                     name: reference.name.clone(),
                     config: cfg.clone(),
                 })
             }
             ChannelType::PushPlus => {
-                let cfg = self
-                    .channels
-                    .pushplus
-                    .get(&reference.name)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "enabled profile pushplus.{} does not exist",
-                            reference.name
-                        )
-                    })?;
+                let cfg = self.channels.pushplus.get(&reference.name).ok_or_else(|| {
+                    anyhow::anyhow!("enabled profile pushplus.{} does not exist", reference.name)
+                })?;
                 require("channels.pushplus", &reference.name, "token", &cfg.token)?;
                 Ok(ChannelProfile::PushPlus {
                     name: reference.name.clone(),
@@ -379,16 +391,9 @@ impl AppConfig {
                 })
             }
             ChannelType::WeCom => {
-                let cfg = self
-                    .channels
-                    .wecom
-                    .get(&reference.name)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "enabled profile wecom.{} does not exist",
-                            reference.name
-                        )
-                    })?;
+                let cfg = self.channels.wecom.get(&reference.name).ok_or_else(|| {
+                    anyhow::anyhow!("enabled profile wecom.{} does not exist", reference.name)
+                })?;
                 require("channels.wecom", &reference.name, "corp_id", &cfg.corp_id)?;
                 require("channels.wecom", &reference.name, "agent_id", &cfg.agent_id)?;
                 require("channels.wecom", &reference.name, "secret", &cfg.secret)?;
@@ -398,16 +403,9 @@ impl AppConfig {
                 })
             }
             ChannelType::DingTalk => {
-                let cfg = self
-                    .channels
-                    .dingtalk
-                    .get(&reference.name)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "enabled profile dingtalk.{} does not exist",
-                            reference.name
-                        )
-                    })?;
+                let cfg = self.channels.dingtalk.get(&reference.name).ok_or_else(|| {
+                    anyhow::anyhow!("enabled profile dingtalk.{} does not exist", reference.name)
+                })?;
                 require(
                     "channels.dingtalk",
                     &reference.name,
@@ -421,16 +419,9 @@ impl AppConfig {
                 })
             }
             ChannelType::Shell => {
-                let cfg = self
-                    .channels
-                    .shell
-                    .get(&reference.name)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "enabled profile shell.{} does not exist",
-                            reference.name
-                        )
-                    })?;
+                let cfg = self.channels.shell.get(&reference.name).ok_or_else(|| {
+                    anyhow::anyhow!("enabled profile shell.{} does not exist", reference.name)
+                })?;
                 require("channels.shell", &reference.name, "path", &cfg.path)?;
                 Ok(ChannelProfile::Shell {
                     name: reference.name.clone(),

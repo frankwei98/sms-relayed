@@ -68,11 +68,7 @@ pub async fn send(
         "duplicate_check_interval": 1800
     });
 
-    let msg_resp = client
-        .post(&msg_url)
-        .json(&msg_body)
-        .send()
-        .await?;
+    let msg_resp = client.post(&msg_url).json(&msg_body).send().await?;
     let msg_json: serde_json::Value = msg_resp.json().await?;
     if msg_json["errcode"].as_i64() == Some(0) && msg_json["errmsg"].as_str() == Some("ok") {
         info!("企业微信转发成功");

@@ -4,8 +4,7 @@ use anyhow::{bail, Result};
 use inquire::{Confirm, MultiSelect, Password, Select, Text};
 
 use crate::config::{
-    AppConfig, BarkConfig, DingTalkConfig, PushPlusConfig, ShellConfig, TelegramConfig,
-    WeComConfig,
+    AppConfig, BarkConfig, DingTalkConfig, PushPlusConfig, ShellConfig, TelegramConfig, WeComConfig,
 };
 
 pub fn run_setup_wizard(existing: Option<AppConfig>) -> Result<Option<AppConfig>> {
@@ -59,9 +58,7 @@ pub fn run_setup_wizard(existing: Option<AppConfig>) -> Result<Option<AppConfig>
     loop {
         let storage = Text::new("Ignore SMS storage type")
             .with_default("sm")
-            .with_help_message(
-                "Common values: sm, me, mt, sr, bm, ta. Use all for no filtering.",
-            )
+            .with_help_message("Common values: sm, me, mt, sr, bm, ta. Use all for no filtering.")
             .prompt()?;
         cfg.sms.ignore_storage.push(storage);
         if !Confirm::new("Add another ignored storage type?")
@@ -102,8 +99,9 @@ fn add_profiles_for_channel(cfg: &mut AppConfig, label: &str) -> Result<()> {
                 cfg.forward.enabled.push(format!("bark.{}", name));
             }
             "Telegram" => {
-                let bot_token =
-                    Password::new("Telegram bot token").without_confirmation().prompt()?;
+                let bot_token = Password::new("Telegram bot token")
+                    .without_confirmation()
+                    .prompt()?;
                 let chat_id = Text::new("Telegram chat id").prompt()?;
                 let api_base = Text::new("Telegram API base")
                     .with_default("https://api.telegram.org")
@@ -119,7 +117,9 @@ fn add_profiles_for_channel(cfg: &mut AppConfig, label: &str) -> Result<()> {
                 cfg.forward.enabled.push(format!("telegram.{}", name));
             }
             "PushPlus" => {
-                let token = Password::new("PushPlus token").without_confirmation().prompt()?;
+                let token = Password::new("PushPlus token")
+                    .without_confirmation()
+                    .prompt()?;
                 cfg.channels
                     .pushplus
                     .insert(name.clone(), PushPlusConfig { token });
@@ -128,8 +128,9 @@ fn add_profiles_for_channel(cfg: &mut AppConfig, label: &str) -> Result<()> {
             "WeCom" => {
                 let corp_id = Text::new("WeCom corp id").prompt()?;
                 let agent_id = Text::new("WeCom agent id").prompt()?;
-                let secret =
-                    Password::new("WeCom app secret").without_confirmation().prompt()?;
+                let secret = Password::new("WeCom app secret")
+                    .without_confirmation()
+                    .prompt()?;
                 cfg.channels.wecom.insert(
                     name.clone(),
                     WeComConfig {
@@ -142,10 +143,12 @@ fn add_profiles_for_channel(cfg: &mut AppConfig, label: &str) -> Result<()> {
                 cfg.forward.enabled.push(format!("wecom.{}", name));
             }
             "DingTalk" => {
-                let access_token =
-                    Password::new("DingTalk access token").without_confirmation().prompt()?;
-                let secret =
-                    Password::new("DingTalk signing secret").without_confirmation().prompt()?;
+                let access_token = Password::new("DingTalk access token")
+                    .without_confirmation()
+                    .prompt()?;
+                let secret = Password::new("DingTalk signing secret")
+                    .without_confirmation()
+                    .prompt()?;
                 cfg.channels.dingtalk.insert(
                     name.clone(),
                     DingTalkConfig {

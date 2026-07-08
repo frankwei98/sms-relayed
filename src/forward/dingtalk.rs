@@ -16,7 +16,7 @@ fn sign(secret: &str, timestamp_ms: i64) -> String {
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC key error");
     mac.update(string_to_sign.as_bytes());
     let result = mac.finalize().into_bytes();
-    base64::engine::general_purpose::STANDARD.encode(&result)
+    base64::engine::general_purpose::STANDARD.encode(result)
 }
 
 pub async fn send(
