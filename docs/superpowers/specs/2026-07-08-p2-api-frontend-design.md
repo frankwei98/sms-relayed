@@ -109,7 +109,7 @@ Forwarding failure does not change the SMS record status. The message was receiv
 5. On failure, update the row to `status = failed` and store the error string.
 6. Broadcast `message.created` and `message.updated` SSE events as state changes.
 
-CLI sends may also be written into the same table with `source = cli`, but P2 must at least persist Web/API sends.
+CLI sends must also be written into the same table with `source = cli`, using the same status progression as Web/API sends where practical.
 
 ## Authentication
 
@@ -122,6 +122,8 @@ Login uses cookie sessions:
 - `GET /api/auth/me` reports the current auth state.
 
 All `/api/*` routes except login and `auth/me` require a valid session cookie. Session tokens should be random, stored server-side in memory, and invalidated on process restart.
+
+The cookie name is `sms-relayed-session`. Sessions expire after 7 days, and the cookie should be HttpOnly with SameSite=Lax. Use Secure when the request is served over HTTPS, but do not require HTTPS for the local OpenWrt deployment.
 
 ## API Design
 
@@ -281,7 +283,7 @@ Config check performs the same parse/validate process without writing. It should
 - Introduce an API module for Axum routes, auth/session middleware, SSE broadcaster, and static frontend serving.
 - Decouple SMS sending behind a small interface so API tests can mock sends without real D-Bus.
 - Keep phone numbers and SMS bodies out of logs unless explicitly needed for user-requested diagnostics.
-- Frontend assets should be packaged with the release in the simplest OpenWrt-friendly way. Prefer embedding or a deterministic install path over requiring a separate web server.
+- Frontend assets are embedded in the Rust binary. The release should not require a separate web server or a separately installed `frontend/dist` directory.
 
 ## Testing and Verification
 
@@ -320,6 +322,3 @@ Manual acceptance:
 These can be decided during planning without changing product scope:
 
 - Exact Rust SQLite crate (`rusqlite` vs `sqlx`) based on OpenWrt cross-compilation constraints.
-- Whether frontend assets are embedded in the binary or installed next to it.
-- Exact session cookie name and session expiration duration.
-- Whether CLI sends are persisted in P2 or added immediately after Web/API persistence.
