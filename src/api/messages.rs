@@ -58,13 +58,13 @@ pub fn routes() -> Router<ApiState> {
         .route("/api/messages", get(list_messages))
         .route("/api/conversations", get(list_conversations))
         .route("/api/messages/send", post(send_message))
-        .route("/api/messages/:id/read", post(mark_read))
-        .route("/api/messages/:id/unread", post(mark_unread))
+        .route("/api/messages/{id}/read", post(mark_read))
+        .route("/api/messages/{id}/unread", post(mark_unread))
         .route(
-            "/api/conversations/:phone_number/read",
+            "/api/conversations/{phone_number}/read",
             post(mark_conversation_read),
         )
-        .route("/api/messages/:id", delete(delete_message))
+        .route("/api/messages/{id}", delete(delete_message))
         .route("/api/messages/delete", post(delete_many))
         .route("/api/messages/export", get(export_messages))
         .route("/api/events", get(events))
@@ -229,4 +229,12 @@ fn now_string() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn routes_build_without_panicking() {
+        let _ = super::routes();
+    }
 }
