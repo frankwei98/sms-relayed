@@ -26,6 +26,67 @@ sms-relayed 是一个面向 Linux 随身 WiFi、4G/5G 模组设备和 OpenWrt/De
 - 支持 TOML 配置文件和多 profile 转发。
 - 支持 OpenWrt procd 和 systemd 服务管理。
 
+- 支持 SQLite 短信历史存储、Web API 管理后台、密码保护（P2 功能）。
+- 默认 Web 管理地址：`http://<router-ip>:8080/`。
+
+## Web API 和前端管理后台 (P2)
+
+从 v1.1 开始，sms-relayed 包含一个可选的 Web API 和 React 前端管理控制台，用于短信历史管理、发送、搜索、导出和配置编辑。
+
+### 启用
+
+通过 `setup` 向导启用 Web API，或在配置文件中设置：
+
+```toml
+[api]
+enabled = true
+bind = "0.0.0.0"
+port = 8080
+enable_ipv6 = false
+password = "your-password"
+database_path = "/etc/sms-relayed/sms-relayed.sqlite"
+```
+
+`api.enabled = true` 且 `api.password` 为空时，服务将拒绝启动。
+
+### 功能
+
+- 密码登录，7 天会话 cookie（HttpOnly、SameSite=Lax）。
+- SMS 收件箱/发件箱列表，按号码分组会话，未读计数。
+- 搜索：手机号、正文全文、方向（接收/发送）、状态、未读、时间范围。
+- 标记已读/未读，单条和批量删除。
+- 导出为 CSV 或 JSON。
+- 发送短信（通过 ModemManager）。
+- 配置全量编辑：`app`、`sms`、`forward`、`channels`、`api` 各节。
+- 配置验证（JSON 和 TOML 均支持）。
+- 配置保存后需要重启服务。
+- SSE 实时事件推送（新短信、状态更新、配置变更）。
+- 前端资产嵌入在二进制文件中，无需独立 Web 服务器。
+
+### 路由
+
+| 路径 | 方法 | 说明 |
+|------|------|------|
+| `/api/auth/login` | POST | 登录 |
+| `/api/auth/logout` | POST | 登出 |
+| `/api/auth/me` | GET | 当前认证状态 |
+| `/api/messages` | GET | 消息列表（分页、筛选） |
+| `/api/messages/send` | POST | 发送短信 |
+| `/api/messages/:id/read` | POST | 标记已读 |
+| `/api/messages/:id/unread` | POST | 标记未读 |
+| `/api/conversations` | GET | 会话列表 |
+| `/api/conversations/:phone_number/read` | POST | 标记号码下所有未读为已读 |
+| `/api/messages/:id` | DELETE | 删除单条 |
+| `/api/messages/delete` | POST | 批量删除 |
+| `/api/messages/export` | GET | 导出（CSV/JSON，忽略分页 limit） |
+| `/api/events` | GET | SSE 事件流 |
+| `/api/config` | GET/PUT | 获取/保存配置 |
+| `/api/config/check` | POST | 校验配置 |
+| `/api/status` | GET | 运行时状态 |
+| `/api/service/restart` | POST | 重启服务 |
+| `/login` | - | 前端登录页 |
+| `/config` | - | 前端配置编辑页 |
+
 ## Quick Start
 
 OpenWrt first-run install:
@@ -232,7 +293,7 @@ ShellExample/sendbypushplus.sh
 - 默认 modem 路径为 `/org/freedesktop/ModemManager1/Modem/0`，可在配置中修改。
 - 配置文件中保存了通知渠道 token 和机器人 secret，程序会自动限制文件权限为 600。
 - 服务运行用户需要有系统 D-Bus 上的 ModemManager 访问权限；最简单的方式是用 `sudo` 或以 root 运行。
-- P2 计划增加 API 和前端功能：SMS 历史、网页回复、密码保护。P1 不包含这些功能。
+- P2 Web API 和前端管理后台已实现（v1.1+）：SMS 历史存储、搜索、导出、密码保护、配置编辑。
 
 ## 参考
 

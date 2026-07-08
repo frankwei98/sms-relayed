@@ -19,6 +19,20 @@ pub enum SendTarget {
     Cli,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendSmsOutcome {
+    pub modem_sms_path: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReceivedSms {
+    pub phone_number: String,
+    pub body: String,
+    pub timestamp: String,
+    pub storage: u32,
+    pub modem_sms_path: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum StorageType {
@@ -100,6 +114,19 @@ pub async fn monitor_dbus(
     profiles: &[ChannelProfile],
     config: &AppConfig,
 ) -> Result<()> {
+    monitor_dbus_with_handler(modem_path, profiles, config, |_| async { Ok(()) }).await
+}
+
+pub async fn monitor_dbus_with_handler<F, Fut>(
+    modem_path: &str,
+    profiles: &[ChannelProfile],
+    config: &AppConfig,
+    mut on_received: F,
+) -> Result<()>
+where
+    F: FnMut(ReceivedSms) -> Fut + Send,
+    Fut: std::future::Future<Output = Result<()>> + Send,
+{
     println!("短信转发模式正在启动，正在连接系统 D-Bus。");
     info!("正在运行. 按下 Ctrl-C 停止.");
     let connection = Connection::system().await?;
@@ -148,9 +175,15 @@ pub async fn monitor_dbus(
                 let is_received = body.1;
                 if is_received {
                     info!("SmsPath:\n{}", sms_path);
-                    if let Err(e) =
-                        get_sms_content(&connection, &sms_path, &ignored_storage, profiles, config)
-                            .await
+                    if let Err(e) = get_sms_content(
+                        &connection,
+                        &sms_path,
+                        &ignored_storage,
+                        profiles,
+                        config,
+                        &mut on_received,
+                    )
+                    .await
                     {
                         error!("处理短信失败: {}", e);
                     }
@@ -167,13 +200,18 @@ fn should_ignore_storage(storage: u32, filters: &[StorageType]) -> bool {
         .any(|filter| !matches!(filter, StorageType::All) && filter.should_ignore(storage))
 }
 
-async fn get_sms_content(
+async fn get_sms_content<F, Fut>(
     connection: &Connection,
     sms_path: &str,
     storage_filters: &[StorageType],
     profiles: &[ChannelProfile],
     config: &AppConfig,
-) -> Result<()> {
+    on_received: &mut F,
+) -> Result<()>
+where
+    F: FnMut(ReceivedSms) -> Fut + Send,
+    Fut: std::future::Future<Output = Result<()>> + Send,
+{
     let mut retries = 0;
     loop {
         let reply = connection
@@ -198,7 +236,20 @@ async fn get_sms_content(
         }
 
         if !smscontent.is_empty() {
-            forward::forward_sms(profiles, &telnum, &smscontent, &smsdate, config).await?;
+            let received = ReceivedSms {
+                phone_number: telnum,
+                body: smscontent,
+                timestamp: smsdate,
+                storage,
+                modem_sms_path: sms_path.to_string(),
+            };
+            let phone_number = received.phone_number.clone();
+            let body = received.body.clone();
+            let timestamp = received.timestamp.clone();
+            if let Err(e) = on_received(received).await {
+                error!("处理短信失败: {}", e);
+            }
+            forward::forward_sms(profiles, &phone_number, &body, &timestamp, config).await?;
             return Ok(());
         } else {
             retries += 1;
@@ -220,7 +271,7 @@ pub async fn send_sms(
     tel_number: &str,
     sms_text: &str,
     target: SendTarget,
-) -> Result<()> {
+) -> Result<SendSmsOutcome> {
     let mut properties = HashMap::new();
     properties.insert("text", Value::from(sms_text));
     properties.insert("number", Value::from(tel_number));
@@ -256,7 +307,9 @@ pub async fn send_sms(
             println!("短信缓存已清理，按任意键退出程序");
             let mut temp = String::new();
             io::stdin().read_line(&mut temp).unwrap();
-            return Ok(());
+            return Ok(SendSmsOutcome {
+                modem_sms_path: sms_path_str.to_string(),
+            });
         }
     } else if target == SendTarget::Cli {
         // Confirmation already handled by runtime::send_interactive; skip prompt.
@@ -272,5 +325,23 @@ pub async fn send_sms(
         )
         .await?;
     println!("短信已发送");
-    Ok(())
+    Ok(SendSmsOutcome {
+        modem_sms_path: sms_path_str.to_string(),
+    })
+}
+
+pub async fn send_sms_via_system(
+    modem_path: &str,
+    tel_number: &str,
+    sms_text: &str,
+) -> Result<SendSmsOutcome> {
+    let connection = Connection::system().await?;
+    send_sms(
+        &connection,
+        modem_path,
+        tel_number,
+        sms_text,
+        SendTarget::Api,
+    )
+    .await
 }

@@ -27,3 +27,13 @@ futures-util = "0.3"
 toml = "0.8"
 inquire = "0.7"
 is-terminal = "0.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
+time = { version = "0.3", features = ["formatting", "parsing", "serde", "macros"] }
+uuid = { version = "1", features = ["v4"] }
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+http = "1"
+headers = "0.4"
+rust-embed = { version = "8", features = ["axum"] }
+mime_guess = "2"
+csv = "1"
+tokio-stream = { version = "0.1", features = ["sync"] }

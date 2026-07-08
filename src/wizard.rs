@@ -35,6 +35,29 @@ pub fn run_setup_wizard(existing: Option<AppConfig>) -> Result<Option<AppConfig>
         .with_help_message("API and frontend are planned for P2.")
         .prompt()?;
 
+    cfg.api.enabled = Confirm::new("Enable Web API and frontend?")
+        .with_default(true)
+        .with_help_message("Provides a browser console for SMS history and config.")
+        .prompt()?;
+    if cfg.api.enabled {
+        cfg.api.password = Password::new("Web password")
+            .with_help_message("Stored in config.toml; file permissions are restricted.")
+            .prompt()?;
+        cfg.api.bind = Text::new("Web bind address")
+            .with_default(&cfg.api.bind)
+            .prompt()?;
+        cfg.api.port = Text::new("Web port")
+            .with_default(&cfg.api.port.to_string())
+            .prompt()?
+            .parse()?;
+        cfg.api.enable_ipv6 = Confirm::new("Enable IPv6 listener?")
+            .with_default(cfg.api.enable_ipv6)
+            .prompt()?;
+        cfg.api.database_path = Text::new("SQLite database path")
+            .with_default(&cfg.api.database_path)
+            .prompt()?;
+    }
+
     cfg.app.device_name = Text::new("Device display name")
         .with_default(&cfg.app.device_name)
         .with_help_message("Use *Host*Name* to read hostname dynamically.")

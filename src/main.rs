@@ -1,12 +1,14 @@
+mod api;
+mod assets;
 mod cli;
 mod config;
-mod api;
 mod dbus;
+mod events;
 mod forward;
 mod message;
 mod runtime;
-mod storage;
 mod smscode;
+mod storage;
 mod util;
 mod wizard;
 

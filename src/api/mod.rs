@@ -1,3 +1,139 @@
+pub mod auth;
+pub mod config;
+pub mod messages;
+pub mod service;
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
+
+use axum::http::StatusCode;
+use axum::middleware;
+use axum::response::{IntoResponse, Response};
+use axum::routing::Router;
+use axum::Json;
+use serde::Serialize;
+
+use crate::config::AppConfig;
+use crate::events::EventBus;
+use crate::storage::MessageStore;
+
+#[derive(Clone)]
+pub struct ApiState {
+    pub config: Arc<AppConfig>,
+    pub config_path: PathBuf,
+    pub store: MessageStore,
+    pub events: EventBus,
+    pub started_at: Instant,
+    pub sessions: auth::SessionStore,
+}
+
+#[derive(Debug)]
+pub struct ApiError {
+    pub status: StatusCode,
+    pub code: &'static str,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+struct ErrorBody<'a> {
+    error: ErrorDetail<'a>,
+}
+
+#[derive(Serialize)]
+struct ErrorDetail<'a> {
+    code: &'a str,
+    message: &'a str,
+}
+
+impl ApiError {
+    pub fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, "unauthorized", message)
+    }
+
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, "bad_request", message)
+    }
+
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, "not_found", message)
+    }
+
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let body = ErrorBody {
+            error: ErrorDetail {
+                code: self.code,
+                message: &self.message,
+            },
+        };
+        (self.status, Json(body)).into_response()
+    }
+}
+
+pub type ApiResult<T> = Result<T, ApiError>;
+
+pub fn router(state: ApiState) -> Router {
+    let sessions = state.sessions.clone();
+    let protected = Router::new()
+        .merge(messages::routes())
+        .merge(config::routes())
+        .merge(service::routes())
+        .layer(middleware::from_fn(
+            move |req: axum::extract::Request, next: middleware::Next| {
+                let sessions = sessions.clone();
+                async move {
+                    let token = auth::session_token(req.headers());
+                    if !sessions.is_valid(&token) {
+                        return ApiError::unauthorized("authentication required").into_response();
+                    }
+                    next.run(req).await
+                }
+            },
+        ));
+
+    let auth_routes = auth::routes();
+
+    Router::new()
+        .merge(auth_routes)
+        .merge(protected)
+        .with_state(state)
+        .fallback(crate::assets::serve)
+}
+
+pub async fn serve(state: ApiState) -> anyhow::Result<()> {
+    let addr = format!("{}:{}", state.config.api.bind, state.config.api.port);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    log::info!("web api listening on {}", addr);
+    axum::serve(listener, router(state)).await?;
+    Ok(())
+}
+
+impl From<anyhow::Error> for ApiError {
+    fn from(err: anyhow::Error) -> Self {
+        ApiError::internal(err.to_string())
+    }
+}
+
+impl From<rusqlite::Error> for ApiError {
+    fn from(err: rusqlite::Error) -> Self {
+        ApiError::internal(err.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::auth::SessionStore;

@@ -38,9 +38,49 @@ pub struct ForwardSection {
     pub enabled: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApiSection {
+    #[serde(default = "default_api_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_api_bind")]
+    pub bind: String,
+    #[serde(default = "default_api_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub enable_ipv6: bool,
+    #[serde(default)]
+    pub password: String,
+    #[serde(default = "default_database_path")]
+    pub database_path: String,
+}
+
+fn default_api_enabled() -> bool {
+    true
+}
+
+fn default_api_bind() -> String {
+    "0.0.0.0".to_string()
+}
+
+fn default_api_port() -> u16 {
+    8080
+}
+
+fn default_database_path() -> String {
+    "/etc/sms-relayed/sms-relayed.sqlite".to_string()
+}
+
+impl Default for ApiSection {
+    fn default() -> Self {
+        Self {
+            enabled: default_api_enabled(),
+            bind: default_api_bind(),
+            port: default_api_port(),
+            enable_ipv6: false,
+            password: String::new(),
+            database_path: default_database_path(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -319,6 +359,20 @@ impl AppConfig {
             let parsed = ProfileRef::parse(reference)?;
             self.profile_for_ref(&parsed)?;
         }
+        if self.api.enabled {
+            if self.api.password.trim().is_empty() {
+                bail!("api.password is required when api.enabled is true");
+            }
+            if self.api.bind.trim().is_empty() {
+                bail!("api.bind is required when api.enabled is true");
+            }
+            if self.api.port == 0 {
+                bail!("api.port must be between 1 and 65535");
+            }
+            if self.api.database_path.trim().is_empty() {
+                bail!("api.database_path is required when api.enabled is true");
+            }
+        }
         Ok(())
     }
 
@@ -526,10 +580,7 @@ mod tests {
         assert_eq!(cfg.api.bind, "0.0.0.0");
         assert_eq!(cfg.api.port, 8080);
         assert!(!cfg.api.enable_ipv6);
-        assert_eq!(
-            cfg.api.database_path,
-            "/etc/sms-relayed/sms-relayed.sqlite"
-        );
+        assert_eq!(cfg.api.database_path, "/etc/sms-relayed/sms-relayed.sqlite");
     }
 
     #[test]
