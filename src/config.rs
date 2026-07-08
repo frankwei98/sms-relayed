@@ -518,4 +518,39 @@ mod tests {
         assert!(summary.contains("1234...cdef"));
         assert!(!summary.contains("1234567890abcdef"));
     }
+
+    #[test]
+    fn default_api_config_matches_p2_defaults() {
+        let cfg = AppConfig::default();
+        assert!(cfg.api.enabled);
+        assert_eq!(cfg.api.bind, "0.0.0.0");
+        assert_eq!(cfg.api.port, 8080);
+        assert!(!cfg.api.enable_ipv6);
+        assert_eq!(
+            cfg.api.database_path,
+            "/etc/sms-relayed/sms-relayed.sqlite"
+        );
+    }
+
+    #[test]
+    fn enabled_api_requires_password() {
+        let cfg = AppConfig::default();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("api.password"));
+    }
+
+    #[test]
+    fn api_config_accepts_password() {
+        let mut cfg = AppConfig::default();
+        cfg.api.password = "secret".to_string();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn disabled_api_does_not_require_password() {
+        let mut cfg = AppConfig::default();
+        cfg.api.enabled = false;
+        cfg.api.password.clear();
+        assert!(cfg.validate().is_ok());
+    }
 }
