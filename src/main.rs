@@ -4,6 +4,9 @@ mod dbus;
 mod forward;
 mod smscode;
 mod util;
+mod wizard;
+
+use std::path::Path;
 
 use anyhow::Result;
 use clap::Parser;
@@ -18,7 +21,13 @@ async fn main() -> Result<()> {
     match args.command {
         None => {
             if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-                println!("setup wizard is added in Task 4");
+                let existing = config::AppConfig::load(&args.config).ok();
+                if let Some(cfg) = wizard::run_setup_wizard(existing)? {
+                    wizard::write_setup_config(&cfg, &args.config)?;
+                    print_setup_next_steps(&args.config);
+                } else {
+                    println!("existing config kept: {}", args.config.display());
+                }
                 Ok(())
             } else {
                 Err(anyhow::anyhow!(
@@ -28,7 +37,13 @@ async fn main() -> Result<()> {
             }
         }
         Some(Command::Setup) => {
-            println!("setup wizard is added in Task 4");
+            let existing = config::AppConfig::load(&args.config).ok();
+            if let Some(cfg) = wizard::run_setup_wizard(existing)? {
+                wizard::write_setup_config(&cfg, &args.config)?;
+                print_setup_next_steps(&args.config);
+            } else {
+                println!("existing config kept: {}", args.config.display());
+            }
             Ok(())
         }
         Some(Command::Run) => Err(anyhow::anyhow!("runtime is connected in Task 5")),
@@ -48,4 +63,14 @@ async fn main() -> Result<()> {
             }
         },
     }
+}
+
+fn print_setup_next_steps(config_path: &Path) {
+    println!("config written: {}", config_path.display());
+    println!(
+        "check config: sms-relayed --config {} config check",
+        config_path.display()
+    );
+    println!("start OpenWrt service: /etc/init.d/sms-relayed start");
+    println!("inspect OpenWrt logs: logread | tail -n 50");
 }
