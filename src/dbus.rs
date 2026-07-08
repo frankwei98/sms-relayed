@@ -15,6 +15,8 @@ pub enum SendTarget {
     Command,
     #[allow(dead_code)]
     Api,
+    #[allow(dead_code)]
+    Cli,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +30,7 @@ pub enum StorageType {
     Bm = 5,
     Ta = 6,
     All = 100,
+    NoMatch = 999,
 }
 
 impl StorageType {
@@ -40,19 +43,20 @@ impl StorageType {
             "sr" => StorageType::Sr,
             "bm" => StorageType::Bm,
             "ta" => StorageType::Ta,
+            "all" => StorageType::All,
             _ => {
                 warn!(
                     "unknown storage type: {}; storage will not be filtered by this entry",
                     s
                 );
-                StorageType::Unknown
+                StorageType::NoMatch
             }
         }
     }
 
     fn should_ignore(&self, storage: u32) -> bool {
         match self {
-            StorageType::All => false,
+            StorageType::All | StorageType::NoMatch => false,
             _ => *self as u32 == storage,
         }
     }
@@ -254,6 +258,8 @@ pub async fn send_sms(
             io::stdin().read_line(&mut temp).unwrap();
             return Ok(());
         }
+    } else if target == SendTarget::Cli {
+        // Confirmation already handled by runtime::send_interactive; skip prompt.
     }
 
     let _reply = connection

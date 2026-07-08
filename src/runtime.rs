@@ -28,7 +28,7 @@ pub async fn send_interactive(config_path: &Path) -> Result<()> {
         &config.app.modem_path,
         tel_number.trim(),
         sms_text.trim(),
-        SendTarget::Command,
+        SendTarget::Cli,
     )
     .await
 }
