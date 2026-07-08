@@ -4,14 +4,15 @@
 
 **Goal:** Build the P1 OpenWrt-first CLI, TOML config, multi-profile forwarding model, and POSIX installer described in `docs/superpowers/specs/2026-07-08-p1-cli-installer-design.md`.
 
-**Architecture:** Convert the current flat `config.txt` and mode flags into typed TOML config plus explicit `clap` subcommands. Keep ModemManager access and channel senders small and testable by passing typed profile config into forwarding and passing `modem_path` into D-Bus calls. Keep `install.sh` independent and POSIX `sh` compatible so it works on OpenWrt BusyBox.
+**Architecture:** Migrate in compile-safe layers. First add new CLI/config types while keeping old `Channel` and flat `Config` available for existing modules. Then wire config commands and wizard. Then migrate runtime, D-Bus, SMS code extraction, and all forwarders in one task because those signatures are coupled. Finish by deleting the legacy setup path and adding the installer/docs.
 
-**Tech Stack:** Rust 2021, Tokio, clap, serde, toml, inquire, zbus, reqwest, axum retained but API not started in P1, POSIX `sh`, OpenWrt procd, systemd.
+**Tech Stack:** Rust 2021, Tokio, clap, serde, toml, inquire, is-terminal, zbus, reqwest, POSIX `sh`, OpenWrt procd, systemd.
 
 ## Global Constraints
 
 - Default config path is `/etc/sms-relayed/config.toml`.
-- Do not implement compatibility with old `config.txt`.
+- Do not implement compatibility with old `config.txt` as a user-facing format.
+- Keep old internal structs only as transitional compile bridges; remove them before final verification.
 - Use `inquire` for the interactive setup wizard; do not use a full-screen TUI.
 - `sms-relayed run` must be non-interactive.
 - `sms-relayed` with no subcommand may enter the wizard only when stdin and stdout are TTYs.
@@ -22,26 +23,27 @@
 - P1 supports existing channel types: Bark, Telegram, PushPlus, WeCom, DingTalk, Shell.
 - P1 does not implement API/frontend, SMS history storage, or web password protection.
 - `armv7l` is best-effort asset lookup only; `aarch64` is primary.
+- Every task below must end with a compiling workspace unless the step explicitly says it is the failing-test step.
 
 ---
 
 ## File Structure
 
 - Modify `Cargo.toml`: add `toml`, `inquire`, and `is-terminal`.
-- Modify `src/main.rs`: thin async dispatcher from parsed CLI to runtime/wizard/config actions.
-- Replace `src/cli.rs`: subcommand definitions and CLI constants only.
-- Replace `src/config.rs`: typed TOML config structs, defaults, load/save, validation, profile resolution, and redaction.
+- Modify `src/cli.rs`: add the new subcommand CLI while preserving transitional `Channel` for old modules.
+- Modify `src/config.rs`: add typed TOML config while preserving transitional old `Config` until runtime migration is complete.
 - Create `src/wizard.rs`: `inquire` prompt flow that returns `AppConfig`.
 - Create `src/runtime.rs`: validates config, starts forwarding, and implements interactive send flow.
-- Modify `src/dbus.rs`: accept modem path from config for monitor/send operations.
-- Replace or shrink `src/setup.rs` and `src/mode.rs`: remove old numeric stdin setup path from runtime. Delete modules if no longer referenced.
-- Modify `src/forward/mod.rs` and `src/forward/*.rs`: dispatch by typed `ChannelProfile`, not flat string keys.
-- Create `install.sh`: POSIX installer.
+- Modify `src/dbus.rs`: accept `modem_path`, `ChannelProfile`, and multi-storage filters.
+- Modify `src/forward/mod.rs` and `src/forward/*.rs`: dispatch by typed `ChannelProfile`.
+- Modify `src/smscode.rs`: read code keywords from typed `AppConfig`.
+- Remove `src/setup.rs`, `src/mode.rs`, and `mod web;` from P1 runtime. Keep `web.rs` on disk for P2 if desired, but do not compile it from `main.rs` in P1.
+- Create `install.sh`: POSIX installer with release asset resolution, OpenWrt service, systemd service, and safe non-TTY behavior.
 - Modify `README.md`: update quick start, installer, config, and service docs.
 
 ---
 
-### Task 1: Dependencies and CLI Skeleton
+### Task 1: Dependencies and Compile-Safe CLI Skeleton
 
 **Files:**
 - Modify: `Cargo.toml`
@@ -50,12 +52,12 @@
 
 **Interfaces:**
 - Produces: `cli::Args`, `cli::Command`, `cli::ConfigCommand`, `cli::DEFAULT_CONFIG_PATH`
-- Produces: command parsing for `setup`, `run`, `send`, `config check`, `config show`
-- Later tasks consume these command enums in `main.rs` and `runtime.rs`
+- Preserves transitional bridge: `cli::Channel` for current `dbus.rs` and `forward/*`
+- Removes from runtime entry: old numeric setup path, old `RunMode`, and old `preprocess_args`
 
 - [ ] **Step 1: Add dependencies**
 
-Edit `Cargo.toml` dependencies:
+Add to `Cargo.toml`:
 
 ```toml
 toml = "0.8"
@@ -63,9 +65,7 @@ inquire = "0.7"
 is-terminal = "0.4"
 ```
 
-- [ ] **Step 2: Replace CLI definitions**
-
-Replace `src/cli.rs` with:
+- [ ] **Step 2: Replace `src/cli.rs` with new CLI plus transitional channel bridge**
 
 ```rust
 use std::path::PathBuf;
@@ -100,11 +100,35 @@ pub enum ConfigCommand {
     Check,
     Show,
 }
+
+// Transitional bridge for modules migrated in Task 5.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Channel {
+    PushPlus,
+    WeCom,
+    Telegram,
+    DingTalk,
+    Bark,
+    Shell,
+}
+
+impl Channel {
+    pub fn name(&self) -> &str {
+        match self {
+            Channel::PushPlus => "PushPlus",
+            Channel::WeCom => "WeCom",
+            Channel::Telegram => "Telegram",
+            Channel::DingTalk => "DingTalk",
+            Channel::Bark => "Bark",
+            Channel::Shell => "Shell",
+        }
+    }
+}
 ```
 
-- [ ] **Step 3: Write a compile-only initial dispatcher**
+- [ ] **Step 3: Replace `src/main.rs` with the new dispatcher shell**
 
-Replace `src/main.rs` with an initial dispatcher that compiles before runtime and wizard modules are connected:
+Do not import `setup`, `mode`, or `web`. Those are outside the P1 runtime.
 
 ```rust
 mod cli;
@@ -113,7 +137,6 @@ mod dbus;
 mod forward;
 mod smscode;
 mod util;
-mod web;
 
 use anyhow::Result;
 use clap::Parser;
@@ -141,8 +164,8 @@ async fn main() -> Result<()> {
             println!("setup wizard is added in Task 4");
             Ok(())
         }
-        Some(Command::Run) => Err(anyhow::anyhow!("runtime is connected in Task 6")),
-        Some(Command::Send) => Err(anyhow::anyhow!("send is connected in Task 6")),
+        Some(Command::Run) => Err(anyhow::anyhow!("runtime is connected in Task 5")),
+        Some(Command::Send) => Err(anyhow::anyhow!("send is connected in Task 5")),
         Some(Command::Config { command }) => match command {
             ConfigCommand::Check => Err(anyhow::anyhow!("config check is connected in Task 3")),
             ConfigCommand::Show => Err(anyhow::anyhow!("config show is connected in Task 3")),
@@ -151,7 +174,7 @@ async fn main() -> Result<()> {
 }
 ```
 
-- [ ] **Step 4: Verify help output**
+- [ ] **Step 4: Verify**
 
 Run:
 
@@ -172,85 +195,85 @@ git commit -m "feat: add p1 cli command skeleton"
 
 ---
 
-### Task 2: Typed TOML Config
+### Task 2: Typed TOML Config Beside Legacy Config
 
 **Files:**
 - Modify: `src/config.rs`
-- Test: `src/config.rs`
 
 **Interfaces:**
-- Consumes: `cli::DEFAULT_CONFIG_PATH`
-- Produces: `config::AppConfig`
-- Produces: `AppConfig::default()`
-- Produces: `AppConfig::load(path: &Path) -> anyhow::Result<Self>`
-- Produces: `AppConfig::save_secure(&self, path: &Path) -> anyhow::Result<()>`
-- Produces: `AppConfig::validate(&self) -> anyhow::Result<()>`
-- Produces: `AppConfig::redacted_summary(&self) -> String`
-- Produces: `ProfileRef::parse(input: &str) -> anyhow::Result<ProfileRef>`
-- Produces: `ChannelProfile` enum used by forwarding tasks
+- Produces: `AppConfig`, `AppSection`, `SmsSection`, `ForwardSection`, `ChannelsSection`
+- Produces: `BarkConfig`, `TelegramConfig`, `PushPlusConfig`, `WeComConfig`, `DingTalkConfig`, `ShellConfig`
+- Produces: `ChannelType`, `ProfileRef`, `ChannelProfile`
+- Produces: `AppConfig::load`, `save_secure`, `validate`, `enabled_profiles`, `redacted_summary`
+- Preserves transitional bridge: old `Config` struct and methods for modules migrated in Task 5
 
-- [ ] **Step 1: Write config tests**
+- [ ] **Step 1: Add tests to `src/config.rs` without deleting old tests yet**
 
-Replace the tests in `src/config.rs` with tests for the new model:
+Append these tests inside the existing `#[cfg(test)] mod tests` block:
 
 ```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[test]
+fn default_app_config_has_expected_modem_and_sms_defaults() {
+    let cfg = AppConfig::default();
+    assert_eq!(cfg.app.modem_path, "/org/freedesktop/ModemManager1/Modem/0");
+    assert_eq!(cfg.sms.ignore_storage, vec!["sm"]);
+    assert!(cfg.sms.code_keywords.contains(&"验证码".to_string()));
+}
 
-    #[test]
-    fn default_config_has_expected_modem_and_sms_defaults() {
-        let cfg = AppConfig::default();
-        assert_eq!(cfg.app.modem_path, "/org/freedesktop/ModemManager1/Modem/0");
-        assert_eq!(cfg.sms.ignore_storage, vec!["sm"]);
-        assert!(cfg.sms.code_keywords.contains(&"验证码".to_string()));
-    }
+#[test]
+fn parses_profile_refs() {
+    let r = ProfileRef::parse("bark.personal").unwrap();
+    assert_eq!(r.channel_type, ChannelType::Bark);
+    assert_eq!(r.name, "personal");
+}
 
-    #[test]
-    fn parses_profile_refs() {
-        let r = ProfileRef::parse("bark.personal").unwrap();
-        assert_eq!(r.channel_type, ChannelType::Bark);
-        assert_eq!(r.name, "personal");
-    }
+#[test]
+fn validates_enabled_profile_exists() {
+    let mut cfg = AppConfig::default();
+    cfg.forward.enabled = vec!["bark.personal".to_string()];
+    let err = cfg.validate().unwrap_err().to_string();
+    assert!(err.contains("bark.personal"));
+}
 
-    #[test]
-    fn rejects_unknown_profile_ref_type() {
-        let err = ProfileRef::parse("unknown.main").unwrap_err().to_string();
-        assert!(err.contains("unknown channel type"));
-    }
+#[test]
+fn validates_required_bark_fields() {
+    let mut cfg = AppConfig::default();
+    cfg.forward.enabled = vec!["bark.personal".to_string()];
+    cfg.channels.bark.insert("personal".to_string(), BarkConfig::default());
+    let err = cfg.validate().unwrap_err().to_string();
+    assert!(err.contains("channels.bark.personal.key"));
+}
 
-    #[test]
-    fn validates_enabled_profile_exists() {
-        let mut cfg = AppConfig::default();
-        cfg.forward.enabled = vec!["bark.personal".to_string()];
-        let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("bark.personal"));
-    }
+#[test]
+fn validates_multiple_profiles_of_same_type() {
+    let mut cfg = AppConfig::default();
+    cfg.forward.enabled = vec!["bark.personal".to_string(), "bark.ops".to_string()];
+    cfg.channels.bark.insert("personal".to_string(), BarkConfig {
+        server_url: "https://api.day.app".to_string(),
+        key: "personal-key".to_string(),
+    });
+    cfg.channels.bark.insert("ops".to_string(), BarkConfig {
+        server_url: "https://api.day.app".to_string(),
+        key: "ops-key".to_string(),
+    });
+    assert_eq!(cfg.enabled_profiles().unwrap().len(), 2);
+}
 
-    #[test]
-    fn validates_required_bark_fields() {
-        let mut cfg = AppConfig::default();
-        cfg.forward.enabled = vec!["bark.personal".to_string()];
-        cfg.channels.bark.insert("personal".to_string(), BarkConfig::default());
-        let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("channels.bark.personal.key"));
-    }
-
-    #[test]
-    fn redacts_secret_values() {
-        let mut cfg = AppConfig::default();
-        cfg.channels.telegram.insert(
-            "main".to_string(),
-            TelegramConfig {
-                bot_token: "1234567890abcdef".to_string(),
-                chat_id: "42".to_string(),
-                api_base: "https://api.telegram.org".to_string(),
-            },
-        );
-        let summary = cfg.redacted_summary();
-        assert!(summary.contains("1234...cdef"));
-        assert!(!summary.contains("1234567890abcdef"));
-    }
+#[test]
+fn redacts_secret_values() {
+    let mut cfg = AppConfig::default();
+    cfg.channels.telegram.insert(
+        "main".to_string(),
+        TelegramConfig {
+            bot_token: "1234567890abcdef".to_string(),
+            chat_id: "42".to_string(),
+            api_base: "https://api.telegram.org".to_string(),
+        },
+    );
+    cfg.forward.enabled = vec!["telegram.main".to_string()];
+    let summary = cfg.redacted_summary();
+    assert!(summary.contains("1234...cdef"));
+    assert!(!summary.contains("1234567890abcdef"));
 }
 ```
 
@@ -262,19 +285,15 @@ Run:
 cargo test config::
 ```
 
-Expected: fails because `AppConfig`, `ProfileRef`, and channel config types do not exist.
+Expected: fails because new typed config does not exist.
 
-- [ ] **Step 3: Add config structs and validation**
+- [ ] **Step 3: Add typed config types and defaults**
 
-Replace `src/config.rs` with typed TOML config. Include these public types:
+Add these types above the legacy `Config` struct:
 
 ```rust
 use std::collections::BTreeMap;
-use std::fs;
-use std::io::Write;
-use std::path::Path;
 
-use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -336,6 +355,7 @@ pub struct BarkConfig {
 pub struct TelegramConfig {
     pub bot_token: String,
     pub chat_id: String,
+    #[serde(default = "default_telegram_api_base")]
     pub api_base: String,
 }
 
@@ -349,6 +369,7 @@ pub struct WeComConfig {
     pub corp_id: String,
     pub agent_id: String,
     pub secret: String,
+    #[serde(default = "default_wecom_to_user")]
     pub to_user: String,
 }
 
@@ -361,6 +382,35 @@ pub struct DingTalkConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ShellConfig {
     pub path: String,
+}
+
+fn default_telegram_api_base() -> String {
+    "https://api.telegram.org".to_string()
+}
+
+fn default_wecom_to_user() -> String {
+    "@all".to_string()
+}
+
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        Self {
+            bot_token: String::new(),
+            chat_id: String::new(),
+            api_base: default_telegram_api_base(),
+        }
+    }
+}
+
+impl Default for WeComConfig {
+    fn default() -> Self {
+        Self {
+            corp_id: String::new(),
+            agent_id: String::new(),
+            secret: String::new(),
+            to_user: default_wecom_to_user(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,7 +440,7 @@ pub enum ChannelProfile {
 }
 ```
 
-Add defaults:
+Add `Default for AppConfig`, `ProfileRef::parse`, `ChannelProfile::redacted_line`, and helper `redact` exactly as follows:
 
 ```rust
 impl Default for AppConfig {
@@ -417,9 +467,55 @@ impl Default for AppConfig {
         }
     }
 }
+
+impl ProfileRef {
+    pub fn parse(input: &str) -> Result<Self> {
+        let (channel, name) = input
+            .split_once('.')
+            .ok_or_else(|| anyhow::anyhow!("profile reference must be type.name: {}", input))?;
+        let channel_type = match channel {
+            "bark" => ChannelType::Bark,
+            "telegram" => ChannelType::Telegram,
+            "pushplus" => ChannelType::PushPlus,
+            "wecom" => ChannelType::WeCom,
+            "dingtalk" => ChannelType::DingTalk,
+            "shell" => ChannelType::Shell,
+            other => bail!("unknown channel type: {}", other),
+        };
+        if name.trim().is_empty() {
+            bail!("profile name is required: {}", input);
+        }
+        Ok(Self { channel_type, name: name.to_string() })
+    }
+}
+
+impl ChannelProfile {
+    pub fn redacted_line(&self) -> String {
+        match self {
+            ChannelProfile::Bark { name, config } => format!("bark.{} key={}", name, redact(&config.key)),
+            ChannelProfile::Telegram { name, config } => format!("telegram.{} bot_token={} chat_id={}", name, redact(&config.bot_token), config.chat_id),
+            ChannelProfile::PushPlus { name, config } => format!("pushplus.{} token={}", name, redact(&config.token)),
+            ChannelProfile::WeCom { name, config } => format!("wecom.{} corp_id={} secret={}", name, config.corp_id, redact(&config.secret)),
+            ChannelProfile::DingTalk { name, config } => format!("dingtalk.{} access_token={} secret={}", name, redact(&config.access_token), redact(&config.secret)),
+            ChannelProfile::Shell { name, config } => format!("shell.{} path={}", name, config.path),
+        }
+    }
+}
+
+fn redact(secret: &str) -> String {
+    if secret.chars().count() <= 8 {
+        "****".to_string()
+    } else {
+        let prefix: String = secret.chars().take(4).collect();
+        let suffix: String = secret.chars().rev().take(4).collect::<String>().chars().rev().collect();
+        format!("{}...{}", prefix, suffix)
+    }
+}
 ```
 
-Add these methods after the defaults. The validation helper must return exact missing-field messages such as `channels.bark.personal.key is required`.
+- [ ] **Step 4: Add typed config load/save/validation methods**
+
+Add methods without deleting legacy `Config`:
 
 ```rust
 impl AppConfig {
@@ -535,81 +631,23 @@ fn require(section: &str, name: &str, field: &str, value: &str) -> Result<()> {
     }
     Ok(())
 }
-
-fn redact(secret: &str) -> String {
-    if secret.chars().count() <= 8 {
-        "****".to_string()
-    } else {
-        let prefix: String = secret.chars().take(4).collect();
-        let suffix: String = secret.chars().rev().take(4).collect::<String>().chars().rev().collect();
-        format!("{}...{}", prefix, suffix)
-    }
-}
-
-impl ProfileRef {
-    pub fn parse(input: &str) -> Result<Self> {
-        let (channel, name) = input
-            .split_once('.')
-            .ok_or_else(|| anyhow::anyhow!("profile reference must be type.name: {}", input))?;
-        let channel_type = match channel {
-            "bark" => ChannelType::Bark,
-            "telegram" => ChannelType::Telegram,
-            "pushplus" => ChannelType::PushPlus,
-            "wecom" => ChannelType::WeCom,
-            "dingtalk" => ChannelType::DingTalk,
-            "shell" => ChannelType::Shell,
-            other => bail!("unknown channel type: {}", other),
-        };
-        if name.trim().is_empty() {
-            bail!("profile name is required: {}", input);
-        }
-        Ok(Self {
-            channel_type,
-            name: name.to_string(),
-        })
-    }
-}
-
-impl ChannelProfile {
-    pub fn redacted_line(&self) -> String {
-        match self {
-            ChannelProfile::Bark { name, config } => {
-                format!("bark.{} key={}", name, redact(&config.key))
-            }
-            ChannelProfile::Telegram { name, config } => {
-                format!("telegram.{} bot_token={} chat_id={}", name, redact(&config.bot_token), config.chat_id)
-            }
-            ChannelProfile::PushPlus { name, config } => {
-                format!("pushplus.{} token={}", name, redact(&config.token))
-            }
-            ChannelProfile::WeCom { name, config } => {
-                format!("wecom.{} corp_id={} secret={}", name, config.corp_id, redact(&config.secret))
-            }
-            ChannelProfile::DingTalk { name, config } => {
-                format!("dingtalk.{} access_token={} secret={}", name, redact(&config.access_token), redact(&config.secret))
-            }
-            ChannelProfile::Shell { name, config } => {
-                format!("shell.{} path={}", name, config.path)
-            }
-        }
-    }
-}
 ```
 
-- [ ] **Step 4: Run config tests**
+- [ ] **Step 5: Verify**
 
 Run:
 
 ```bash
 cargo test config::
+cargo check
 ```
 
-Expected: all config tests pass.
+Expected: tests and check pass. Existing modules still compile because legacy `Config` remains.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/config.rs Cargo.toml Cargo.lock
+git add Cargo.toml Cargo.lock src/config.rs
 git commit -m "feat: add typed toml config"
 ```
 
@@ -619,13 +657,12 @@ git commit -m "feat: add typed toml config"
 
 **Files:**
 - Modify: `src/main.rs`
-- Test: `src/main.rs` through command execution
 
 **Interfaces:**
 - Consumes: `AppConfig::load`, `AppConfig::validate`, `AppConfig::redacted_summary`
 - Produces: working `sms-relayed config check` and `sms-relayed config show`
 
-- [ ] **Step 1: Wire config commands in `main.rs`**
+- [ ] **Step 1: Wire config commands in `src/main.rs`**
 
 Replace the `ConfigCommand` match arms:
 
@@ -646,7 +683,7 @@ Some(Command::Config { command }) => match command {
 },
 ```
 
-- [ ] **Step 2: Create a valid temp config**
+- [ ] **Step 2: Verify valid and invalid config behavior**
 
 Run:
 
@@ -662,24 +699,25 @@ ignore_storage = ["sm"]
 code_keywords = ["验证码", "verification", "code"]
 
 [forward]
-enabled = ["bark.personal"]
+enabled = ["bark.personal", "bark.ops"]
 
 [channels.bark.personal]
 server_url = "https://api.day.app"
 key = "abcdef1234567890"
+
+[channels.bark.ops]
+server_url = "https://api.day.app"
+key = "opsabcdef123456"
 EOF
 cargo run -- --config "$tmp/config.toml" config check
 cargo run -- --config "$tmp/config.toml" config show
 ```
 
-Expected: first command prints `config ok`; second command prints `bark.personal` and a redacted key, not `abcdef1234567890`.
-
-- [ ] **Step 3: Verify missing field fails**
+Expected: check prints `config ok`; show prints both `bark.personal` and `bark.ops`; full keys are not printed.
 
 Run:
 
 ```bash
-tmp="$(mktemp -d)"
 cat > "$tmp/bad.toml" <<'EOF'
 [app]
 device_name = "test-device"
@@ -690,18 +728,14 @@ ignore_storage = ["sm"]
 code_keywords = ["验证码"]
 
 [forward]
-enabled = ["bark.personal"]
-
-[channels.bark.personal]
-server_url = "https://api.day.app"
-key = ""
+enabled = ["bark.missing"]
 EOF
 cargo run -- --config "$tmp/bad.toml" config check
 ```
 
-Expected: exits non-zero and includes `channels.bark.personal.key is required`.
+Expected: exits non-zero and includes `enabled profile bark.missing does not exist`.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
 git add src/main.rs
@@ -710,7 +744,7 @@ git commit -m "feat: wire config cli commands"
 
 ---
 
-### Task 4: Wizard Flow with `inquire`
+### Task 4: Interactive Setup Wizard
 
 **Files:**
 - Create: `src/wizard.rs`
@@ -721,15 +755,9 @@ git commit -m "feat: wire config cli commands"
 - Produces: `wizard::run_setup_wizard(existing: Option<AppConfig>) -> anyhow::Result<AppConfig>`
 - Produces: `wizard::write_setup_config(config: &AppConfig, path: &Path) -> anyhow::Result<()>`
 
-- [ ] **Step 1: Add module and interfaces**
+- [ ] **Step 1: Create `src/wizard.rs`**
 
-Add to `src/main.rs` module list:
-
-```rust
-mod wizard;
-```
-
-Create `src/wizard.rs` with:
+Use `inquire` prompts. The write function must validate before writing.
 
 ```rust
 use std::path::Path;
@@ -738,19 +766,16 @@ use anyhow::Result;
 use inquire::{Confirm, MultiSelect, Password, Select, Text};
 
 use crate::config::{
-    AppConfig, BarkConfig, ChannelType, DingTalkConfig, PushPlusConfig, ShellConfig,
-    TelegramConfig, WeComConfig,
+    AppConfig, BarkConfig, DingTalkConfig, PushPlusConfig, ShellConfig, TelegramConfig,
+    WeComConfig,
 };
 
 pub fn run_setup_wizard(existing: Option<AppConfig>) -> Result<AppConfig> {
     let mut cfg = existing.unwrap_or_default();
 
-    let target = Select::new("Runtime target", vec!["SMS forwarding service"])
+    Select::new("Runtime target", vec!["SMS forwarding service"])
         .with_help_message("API and frontend are planned for P2.")
         .prompt()?;
-    if target != "SMS forwarding service" {
-        unreachable!("only one runtime target is exposed in P1");
-    }
 
     cfg.app.device_name = Text::new("Device display name")
         .with_default(&cfg.app.device_name)
@@ -781,11 +806,12 @@ pub fn run_setup_wizard(existing: Option<AppConfig>) -> Result<AppConfig> {
 }
 
 pub fn write_setup_config(config: &AppConfig, path: &Path) -> Result<()> {
+    config.validate()?;
     config.save_secure(path)
 }
 ```
 
-Add this helper in `src/wizard.rs`:
+Add `add_profiles_for_channel` with these exact mappings:
 
 ```rust
 fn add_profiles_for_channel(cfg: &mut AppConfig, label: &str) -> Result<()> {
@@ -863,9 +889,9 @@ fn profile_count(cfg: &AppConfig, label: &str) -> usize {
 }
 ```
 
-- [ ] **Step 2: Wire no-subcommand and setup**
+- [ ] **Step 2: Wire setup commands**
 
-In `src/main.rs`, replace the initial setup branches:
+Add `mod wizard;` to `src/main.rs`. Replace `None` and `Setup` arms with:
 
 ```rust
 None => {
@@ -891,25 +917,20 @@ Some(Command::Setup) => {
 }
 ```
 
-- [ ] **Step 3: Verify non-TTY behavior**
+- [ ] **Step 3: Verify non-TTY behavior and compile**
 
 Run:
 
 ```bash
 cargo run -- < /dev/null
-```
-
-Expected: exits non-zero and includes `no subcommand in non-interactive mode`.
-
-- [ ] **Step 4: Compile wizard**
-
-Run:
-
-```bash
 cargo check
 ```
 
-Expected: passes.
+Expected: first command exits non-zero and includes `no subcommand in non-interactive mode`; `cargo check` passes.
+
+- [ ] **Step 4: Manual OpenWrt console note**
+
+Record in the task handoff whether wizard prompts were tested through SSH, serial console, or not tested yet. If not tested on the Qualcomm 410 board, leave a note for Task 8/9 manual validation rather than changing code blindly.
 
 - [ ] **Step 5: Commit**
 
@@ -920,9 +941,13 @@ git commit -m "feat: add interactive setup wizard"
 
 ---
 
-### Task 5: Forwarding Profiles
+### Task 5: Runtime, D-Bus, SMS Code, and Forwarding Migration
 
 **Files:**
+- Create: `src/runtime.rs`
+- Modify: `src/main.rs`
+- Modify: `src/dbus.rs`
+- Modify: `src/smscode.rs`
 - Modify: `src/forward/mod.rs`
 - Modify: `src/forward/bark.rs`
 - Modify: `src/forward/telegram.rs`
@@ -930,32 +955,90 @@ git commit -m "feat: add interactive setup wizard"
 - Modify: `src/forward/wecom.rs`
 - Modify: `src/forward/dingtalk.rs`
 - Modify: `src/forward/shell.rs`
-- Modify: `src/smscode.rs`
 
 **Interfaces:**
-- Consumes: `ChannelProfile`
+- Produces: `runtime::run_forwarding(config_path: &Path) -> anyhow::Result<()>`
+- Produces: `runtime::send_interactive(config_path: &Path) -> anyhow::Result<()>`
+- Produces: `dbus::SendTarget`, introduced so command-send and future P2 API-send can share D-Bus code without stringly typed targets.
+- Produces: `dbus::monitor_dbus(modem_path: &str, profiles: &[ChannelProfile], config: &AppConfig) -> anyhow::Result<()>`
+- Produces: `dbus::send_sms(connection: &zbus::Connection, modem_path: &str, tel_number: &str, sms_text: &str, target: SendTarget) -> anyhow::Result<()>`
 - Produces: `forward::forward_sms(profiles: &[ChannelProfile], tel_number: &str, sms_text: &str, sms_date: &str, config: &AppConfig) -> anyhow::Result<()>`
-- Produces: channel senders that accept typed configs
 
-- [ ] **Step 1: Update SMS code keyword access**
+- [ ] **Step 1: Update SMS code extraction to typed config**
 
-Change `src/smscode.rs` to accept `&AppConfig` and read:
+Change `src/smscode.rs` imports and keyword access:
 
 ```rust
-let keys = config.sms.code_keywords.iter().map(String::as_str);
+use crate::config::AppConfig;
+
+pub fn has_verification_keyword(sms_content: &mut String, config: &AppConfig) -> bool {
+    for keyword in &config.sms.code_keywords {
+        if sms_content.contains(keyword) {
+            let replacement = format!("{} ", keyword);
+            *sms_content = sms_content.replacen(keyword, &replacement, 1);
+            return true;
+        }
+    }
+    false
+}
+
+pub fn get_sms_code_str(sms_text: &str, config: &AppConfig) -> (String, String, String) {
+    let mut content = sms_text.trim().to_string();
+    if has_verification_keyword(&mut content, config) {
+        let code = extract_code(&content);
+        let code_from = extract_code_source(&content);
+        let code_str = if code.is_empty() {
+            String::new()
+        } else if code_from.is_empty() {
+            format!("验证码 {}", code)
+        } else {
+            format!("{} 验证码 {}", code_from, code)
+        };
+        (code_str, code, code_from)
+    } else {
+        (String::new(), String::new(), String::new())
+    }
+}
 ```
 
-Keep public function:
+- [ ] **Step 2: Change each forwarder to typed profile config**
+
+Use these signatures:
 
 ```rust
-pub fn get_sms_code_str(sms_text: &str, config: &AppConfig) -> (String, String, String)
+// bark.rs
+pub async fn send(
+    tel_number: &str,
+    sms_text: &str,
+    sms_date: &str,
+    device_name: &str,
+    profile: &BarkConfig,
+    app_config: &AppConfig,
+) -> Result<()>
+
+// telegram.rs
+pub async fn send(
+    tel_number: &str,
+    sms_text: &str,
+    sms_date: &str,
+    device_name: &str,
+    profile: &TelegramConfig,
+    app_config: &AppConfig,
+) -> Result<()>
 ```
 
-- [ ] **Step 2: Rewrite forward dispatcher**
+Apply the same parameter order to PushPlus, WeCom, DingTalk, and Shell. Replace flat `config.get_or_empty(...)` reads with fields from `profile`. Keep SMS-code calls using `smscode::get_sms_code_str(sms_text, app_config)`.
 
-Replace `src/forward/mod.rs` dispatcher imports and signature with:
+- [ ] **Step 3: Replace `src/forward/mod.rs` dispatcher**
 
 ```rust
+pub mod bark;
+pub mod dingtalk;
+pub mod pushplus;
+pub mod shell;
+pub mod telegram;
+pub mod wecom;
+
 use anyhow::Result;
 use log::error;
 
@@ -973,30 +1056,36 @@ pub async fn forward_sms(
     let sms_date = sms_date.replace('T', " ");
     println!("发信电话:{}\n时间:{}\n短信内容:{}", tel_number, sms_date, sms_text);
 
+    let mut failures = 0usize;
     for profile in profiles {
         let result = match profile {
-            ChannelProfile::PushPlus { name: _, config: profile_config } => {
+            ChannelProfile::PushPlus { config: profile_config, .. } => {
                 pushplus::send(tel_number, sms_text, &sms_date, &device_name, profile_config, config).await
             }
-            ChannelProfile::WeCom { name: _, config: profile_config } => {
+            ChannelProfile::WeCom { config: profile_config, .. } => {
                 wecom::send(tel_number, sms_text, &sms_date, &device_name, profile_config, config).await
             }
-            ChannelProfile::Telegram { name: _, config: profile_config } => {
+            ChannelProfile::Telegram { config: profile_config, .. } => {
                 telegram::send(tel_number, sms_text, &sms_date, &device_name, profile_config, config).await
             }
-            ChannelProfile::DingTalk { name: _, config: profile_config } => {
+            ChannelProfile::DingTalk { config: profile_config, .. } => {
                 dingtalk::send(tel_number, sms_text, &sms_date, &device_name, profile_config, config).await
             }
-            ChannelProfile::Bark { name: _, config: profile_config } => {
+            ChannelProfile::Bark { config: profile_config, .. } => {
                 bark::send(tel_number, sms_text, &sms_date, &device_name, profile_config, config).await
             }
-            ChannelProfile::Shell { name: _, config: profile_config } => {
+            ChannelProfile::Shell { config: profile_config, .. } => {
                 shell::send(tel_number, sms_text, &sms_date, &device_name, profile_config, config).await
             }
         };
         if let Err(e) = result {
+            failures += 1;
             error!("profile forward failed: {}", e);
         }
+    }
+
+    if failures == profiles.len() && !profiles.is_empty() {
+        error!("all forwarding profiles failed for this SMS");
     }
     Ok(())
 }
@@ -1011,69 +1100,13 @@ fn resolve_device_name(config: &AppConfig) -> String {
 }
 ```
 
-- [ ] **Step 3: Change each sender signature**
+- [ ] **Step 4: Parameterize D-Bus**
 
-For Bark, use:
-
-```rust
-pub async fn send(
-    tel_number: &str,
-    sms_text: &str,
-    sms_date: &str,
-    device_name: &str,
-    profile: &BarkConfig,
-    app_config: &AppConfig,
-) -> Result<()>
-```
-
-Replace flat config access:
+In `src/dbus.rs`, remove dependency on `cli::Channel` and flat `Config`. Add:
 
 ```rust
-let bark_url = profile.server_url.trim_end_matches('/');
-let bark_key = profile.key.as_str();
-let (code_str, code, _) = smscode::get_sms_code_str(sms_text, app_config);
-```
+use crate::config::{AppConfig, ChannelProfile};
 
-Apply the same pattern for Telegram, PushPlus, WeCom, DingTalk, and Shell using their typed config structs.
-
-- [ ] **Step 4: Compile forwarding changes**
-
-Run:
-
-```bash
-cargo check
-```
-
-Expected: passes after all old `Config` imports are removed from forwarders.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/forward src/smscode.rs
-git commit -m "feat: route forwarding through channel profiles"
-```
-
----
-
-### Task 6: Modem Path and Runtime
-
-**Files:**
-- Create: `src/runtime.rs`
-- Modify: `src/main.rs`
-- Modify: `src/dbus.rs`
-
-**Interfaces:**
-- Consumes: `AppConfig::enabled_profiles()`
-- Produces: `runtime::run_forwarding(config_path: &Path) -> anyhow::Result<()>`
-- Produces: `runtime::send_interactive(config_path: &Path) -> anyhow::Result<()>`
-- Produces: `dbus::monitor_dbus(modem_path: &str, profiles: &[ChannelProfile], config: &AppConfig) -> anyhow::Result<()>`
-- Produces: `dbus::send_sms(connection: &zbus::Connection, modem_path: &str, tel_number: &str, sms_text: &str, target: SendTarget) -> anyhow::Result<()>`
-
-- [ ] **Step 1: Add `SendTarget` and parameterize D-Bus calls**
-
-In `src/dbus.rs`, replace `MODEM_PATH` usage with a parameter. Add:
-
-```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendTarget {
     Command,
@@ -1081,7 +1114,7 @@ pub enum SendTarget {
 }
 ```
 
-Change signatures:
+Change monitor/send signatures:
 
 ```rust
 pub async fn monitor_dbus(
@@ -1099,24 +1132,21 @@ pub async fn send_sms(
 ) -> Result<()>
 ```
 
-Use `modem_path` in `AddMatch`, `Messaging.Create`, and `Messaging.Delete`.
+Use `modem_path` in the signal match rule, `Messaging.Create`, and `Messaging.Delete`.
 
-- [ ] **Step 2: Support multiple ignored storage values**
-
-Replace single `StorageType` config parsing with:
+Define storage filtering as:
 
 ```rust
-let ignored_storage: Vec<StorageType> = config
-    .sms
-    .ignore_storage
-    .iter()
-    .map(|s| StorageType::from_config(s))
-    .collect();
+fn should_ignore_storage(storage: u32, filters: &[StorageType]) -> bool {
+    filters
+        .iter()
+        .any(|filter| !matches!(filter, StorageType::All) && filter.should_ignore(storage))
+}
 ```
 
-Pass `&[StorageType]` into `get_sms_content` and ignore when any storage filter matches.
+This preserves current semantics: `StorageType::All` means "do not filter anything". In a multi-value list, `all` is ignored rather than causing every message to be filtered.
 
-- [ ] **Step 3: Create runtime module**
+- [ ] **Step 5: Create runtime module**
 
 Create `src/runtime.rs`:
 
@@ -1157,120 +1187,115 @@ pub async fn send_interactive(config_path: &Path) -> Result<()> {
 }
 ```
 
-- [ ] **Step 4: Wire runtime commands**
+- [ ] **Step 6: Wire runtime commands and stop compiling P2 web module**
 
-Add `mod runtime;` to `src/main.rs`. Replace `Run` and `Send` arms:
+Add `mod runtime;` to `src/main.rs`. Replace:
 
 ```rust
 Some(Command::Run) => runtime::run_forwarding(&args.config).await,
 Some(Command::Send) => runtime::send_interactive(&args.config).await,
 ```
 
-- [ ] **Step 5: Compile**
+Ensure `mod web;` is not present in `src/main.rs`. `web.rs` can remain on disk for P2, but it must not be compiled in P1.
+
+- [ ] **Step 7: Verify**
 
 Run:
 
 ```bash
 cargo check
+cargo test
 ```
 
-Expected: passes.
+Expected: both pass. If this task fails, do not add compatibility shims in `dbus` or `forward`; finish the typed migration in this same task.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add src/main.rs src/runtime.rs src/dbus.rs
-git commit -m "feat: add runtime with configurable modem path"
+git add src/main.rs src/runtime.rs src/dbus.rs src/smscode.rs src/forward
+git commit -m "feat: migrate runtime to typed profiles"
 ```
 
 ---
 
-### Task 7: Remove Old Setup/Mode Wiring and Keep Web Out of P1 Runtime
+### Task 6: Remove Legacy Setup and Flat Config
 
 **Files:**
-- Modify: `src/main.rs`
-- Delete if unused: `src/setup.rs`
-- Delete if unused: `src/mode.rs`
-- Modify: `src/web.rs`
+- Modify: `src/config.rs`
+- Modify: `src/cli.rs`
+- Delete: `src/setup.rs`
+- Delete: `src/mode.rs`
 
 **Interfaces:**
-- Consumes: new runtime path
-- Produces: no references to old numeric setup flow
-- Produces: `web.rs` either compiles with new `dbus::send_sms` signature or is feature-neutral dead code
+- Removes: old flat `Config`
+- Removes: transitional `cli::Channel`
+- Removes: old stdin numeric setup flow
 
-- [ ] **Step 1: Remove old modules from `main.rs`**
-
-Ensure these are absent from `src/main.rs`:
-
-```rust
-mod mode;
-mod setup;
-```
-
-- [ ] **Step 2: Update `web.rs` to compile without enabling P1 API**
-
-Change the API send call to pass modem path and `SendTarget::Api` if `web.rs` remains compiled:
-
-```rust
-dbus::send_sms(
-    &state.dbus_connection,
-    &state.modem_path,
-    &params.telnum,
-    &params.smstext,
-    dbus::SendTarget::Api,
-)
-.await
-```
-
-Add `modem_path: String` to `AppState` and populate it from config. If `web.rs` still depends on old config keys, remove `mod web;` from `main.rs` for P1 because the API is outside this phase.
-
-- [ ] **Step 3: Delete unused old files**
+- [ ] **Step 1: Confirm no legacy references remain**
 
 Run:
 
 ```bash
-rg "setup::|mode::|mod setup|mod mode" src
+rg "crate::config::Config|\\bConfig::|crate::cli::Channel|\\bChannel::|setup::|mode::|mod setup|mod mode" src
 ```
 
-If there are no hits, delete:
+Expected: only hits are inside `src/config.rs` for the old `Config` declaration and inside `src/cli.rs` for the transitional `Channel` declaration.
+
+- [ ] **Step 2: Delete old config implementation and transitional channel bridge**
+
+Remove from `src/config.rs`:
+
+- `CONFIG_KEYS`
+- old `pub struct Config`
+- old `impl Config`
+- old flat-config tests
+
+Remove from `src/cli.rs`:
+
+- transitional `pub enum Channel`
+- `impl Channel`
+
+- [ ] **Step 3: Delete old setup files**
+
+Run:
 
 ```bash
 git rm src/setup.rs src/mode.rs
 ```
 
-- [ ] **Step 4: Compile**
+- [ ] **Step 4: Verify**
 
 Run:
 
 ```bash
 cargo check
+cargo test
 ```
 
-Expected: passes without old setup/mode references.
+Expected: both pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main.rs src/web.rs
+git add src/config.rs src/cli.rs
 git add -u src/setup.rs src/mode.rs
-git commit -m "refactor: remove legacy setup flow"
+git commit -m "refactor: remove legacy setup and config"
 ```
 
 ---
 
-### Task 8: POSIX Installer
+### Task 7: POSIX OpenWrt-First Installer
 
 **Files:**
 - Create: `install.sh`
 
 **Interfaces:**
-- Produces: `install.sh` with POSIX `sh` compatibility
-- Produces: OpenWrt init script generation
-- Produces: systemd service generation
+- Produces: POSIX `sh` installer
+- Produces: release asset lookup without `jq`
+- Produces: OpenWrt init script and systemd service
+- Produces: safe behavior when non-TTY or config is missing
 
-- [ ] **Step 1: Create installer script**
-
-Create `install.sh` with these top-level functions:
+- [ ] **Step 1: Create `install.sh` header and environment**
 
 ```sh
 #!/bin/sh
@@ -1278,17 +1303,23 @@ set -eu
 
 REPO="frankwei98/sms-relayed"
 VERSION="${SMS_RELAYED_VERSION:-latest}"
+ROOT="${SMS_RELAYED_ROOT:-}"
 BIN_DIR="${SMS_RELAYED_BIN_DIR:-/usr/bin}"
 CONFIG_DIR="${SMS_RELAYED_CONFIG_DIR:-/etc/sms-relayed}"
 START_SERVICE="${SMS_RELAYED_START:-1}"
 CONFIG_ONLY="${SMS_RELAYED_CONFIG_ONLY:-0}"
 
+target_path() {
+  printf '%s%s\n' "$ROOT" "$1"
+}
+
 log() { printf '%s\n' "$*"; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 ```
 
-Implement:
+- [ ] **Step 2: Add architecture and download helpers**
 
 ```sh
 detect_suffix() {
@@ -1300,11 +1331,7 @@ detect_suffix() {
     *) die "unsupported architecture: $arch" ;;
   esac
 }
-```
 
-Add these functions to `install.sh`:
-
-```sh
 fetch_url() {
   url="$1"
   if have curl; then
@@ -1328,6 +1355,15 @@ download_file() {
   fi
 }
 
+resolve_asset_url_from_json() {
+  suffix="$1"
+  tr ',' '\n' |
+    grep -o '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*"' |
+    sed 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"//; s/"$//' |
+    grep "$suffix" |
+    head -n 1
+}
+
 resolve_asset_url() {
   suffix="$1"
   if [ "$VERSION" = "latest" ]; then
@@ -1335,23 +1371,33 @@ resolve_asset_url() {
   else
     api="https://api.github.com/repos/$REPO/releases/tags/$VERSION"
   fi
-  fetch_url "$api" | sed -n 's/.*"browser_download_url": "\(.*\)".*/\1/p' | grep "$suffix" | head -n 1
+  fetch_url "$api" | resolve_asset_url_from_json "$suffix"
 }
+```
 
+This intentionally avoids `jq` because OpenWrt images usually do not include it.
+
+- [ ] **Step 3: Add install and service writers**
+
+```sh
 install_binary() {
   suffix="$(detect_suffix)"
   url="$(resolve_asset_url "$suffix")"
   [ -n "$url" ] || die "no release asset found for $suffix in version $VERSION"
-  mkdir -p "$BIN_DIR"
+
+  real_bin_dir="$(target_path "$BIN_DIR")"
+  mkdir -p "$real_bin_dir"
   tmp="${TMPDIR:-/tmp}/sms-relayed.$$"
   download_file "$url" "$tmp"
   chmod +x "$tmp"
-  mv "$tmp" "$BIN_DIR/sms-relayed"
-  log "installed $BIN_DIR/sms-relayed"
+  mv "$tmp" "$real_bin_dir/sms-relayed"
+  log "installed $real_bin_dir/sms-relayed"
 }
 
 write_openwrt_service() {
-  cat > /etc/init.d/sms-relayed <<EOF
+  init_dir="$(target_path /etc/init.d)"
+  mkdir -p "$init_dir"
+  cat > "$init_dir/sms-relayed" <<EOF
 #!/bin/sh /etc/rc.common
 START=99
 USE_PROCD=1
@@ -1363,11 +1409,13 @@ start_service() {
   procd_close_instance
 }
 EOF
-  chmod +x /etc/init.d/sms-relayed
+  chmod +x "$init_dir/sms-relayed"
 }
 
 write_systemd_service() {
-  cat > /etc/systemd/system/sms-relayed.service <<EOF
+  systemd_dir="$(target_path /etc/systemd/system)"
+  mkdir -p "$systemd_dir"
+  cat > "$systemd_dir/sms-relayed.service" <<EOF
 [Unit]
 Description=sms-relayed
 After=network-online.target ModemManager.service
@@ -1383,71 +1431,111 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 }
+```
+
+- [ ] **Step 4: Add safe setup/start control flow**
+
+```sh
+warn_environment() {
+  have mmcli || warn "mmcli not found; install or enable ModemManager before expecting SMS forwarding to work"
+}
 
 run_setup_if_tty() {
+  real_bin="$(target_path "$BIN_DIR")/sms-relayed"
+  if [ ! -x "$real_bin" ]; then
+    warn "binary not installed at $real_bin; skipping setup"
+    return
+  fi
   if [ -t 0 ] && [ -t 1 ]; then
-    "$BIN_DIR/sms-relayed" setup --config "$CONFIG_DIR/config.toml"
+    "$real_bin" setup --config "$CONFIG_DIR/config.toml"
   else
     log "non-interactive shell detected; run: $BIN_DIR/sms-relayed setup --config $CONFIG_DIR/config.toml"
   fi
 }
-```
 
-Add `main` with this control flow:
+start_service_if_ready() {
+  [ "$START_SERVICE" = "1" ] || return
+  [ "$CONFIG_ONLY" != "1" ] || return
+  real_config="$(target_path "$CONFIG_DIR")/config.toml"
+  if [ ! -f "$real_config" ]; then
+    warn "config missing at $real_config; not starting service"
+    return
+  fi
+  if [ -x "$(target_path /etc/init.d/sms-relayed)" ]; then
+    if [ -z "$ROOT" ]; then
+      /etc/init.d/sms-relayed enable
+      /etc/init.d/sms-relayed start
+    else
+      log "SMS_RELAYED_ROOT is set; service file generated but not started"
+    fi
+  elif have systemctl && [ -z "$ROOT" ]; then
+    systemctl enable --now sms-relayed
+  fi
+}
 
-```sh
 main() {
-  mkdir -p "$CONFIG_DIR"
-  chmod 700 "$CONFIG_DIR" 2>/dev/null || true
+  warn_environment
+  mkdir -p "$(target_path "$CONFIG_DIR")"
+  chmod 700 "$(target_path "$CONFIG_DIR")" 2>/dev/null || true
 
   if [ "$CONFIG_ONLY" != "1" ]; then
     install_binary
-    if [ -d /etc/init.d ] && [ -f /etc/rc.common ]; then
+    if [ -d "$(target_path /etc/init.d)" ] && [ -f "$(target_path /etc/rc.common)" ]; then
       write_openwrt_service
-    elif have systemctl; then
+    elif have systemctl || [ -n "$ROOT" ]; then
       write_systemd_service
-      systemctl daemon-reload || true
+      if [ -z "$ROOT" ] && have systemctl; then
+        systemctl daemon-reload || true
+      fi
     else
-      log "no supported service manager detected"
+      warn "no supported service manager detected"
     fi
   fi
 
   run_setup_if_tty
-
-  if [ "$START_SERVICE" = "1" ] && [ "$CONFIG_ONLY" != "1" ]; then
-    if [ -x /etc/init.d/sms-relayed ]; then
-      /etc/init.d/sms-relayed enable
-      /etc/init.d/sms-relayed start
-    elif have systemctl; then
-      systemctl enable --now sms-relayed
-    fi
-  fi
+  start_service_if_ready
 }
 
-main "$@"
+if [ "${SMS_RELAYED_TEST:-0}" != "1" ]; then
+  main "$@"
+fi
 ```
 
-- [ ] **Step 2: Make POSIX syntax pass**
+- [ ] **Step 5: Add installer asset parser fixture test**
+
+Run:
+
+```bash
+tmp="$(mktemp -d)"
+cat > "$tmp/release.json" <<'EOF'
+{"assets":[{"browser_download_url":"https://example.invalid/sms-relayed-abc-linux-musl-x64"},{"browser_download_url":"https://example.invalid/sms-relayed-abc-linux-musl-aarch64"}]}
+EOF
+SMS_RELAYED_TEST=1 . ./install.sh
+url="$(resolve_asset_url_from_json linux-musl-aarch64 < "$tmp/release.json")"
+test "$url" = "https://example.invalid/sms-relayed-abc-linux-musl-aarch64"
+missing="$(resolve_asset_url_from_json linux-musl-armv7l < "$tmp/release.json" || true)"
+test -z "$missing"
+```
+
+Expected: all shell commands exit 0 and sourcing `install.sh` does not run `main`.
+
+- [ ] **Step 6: Verify installer syntax and root override**
 
 Run:
 
 ```bash
 sh -n install.sh
+if command -v shellcheck >/dev/null 2>&1; then shellcheck -s sh install.sh; fi
+tmp="$(mktemp -d)"
+mkdir -p "$tmp/etc/init.d"
+touch "$tmp/etc/rc.common"
+SMS_RELAYED_ROOT="$tmp" SMS_RELAYED_START=0 sh install.sh || true
+test -d "$tmp/etc/sms-relayed"
 ```
 
-Expected: no output, exit 0.
+Expected: syntax passes; ShellCheck passes if present; root override does not write to real `/etc`.
 
-- [ ] **Step 3: Smoke architecture mapping**
-
-Run the config-only path:
-
-```bash
-SMS_RELAYED_START=0 SMS_RELAYED_CONFIG_ONLY=1 sh install.sh
-```
-
-Expected on the local machine: either prints config-only flow or fails before writing root paths with a clear permissions message. It must not produce a shell syntax error.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add install.sh
@@ -1456,18 +1544,18 @@ git commit -m "feat: add openwrt-first installer"
 
 ---
 
-### Task 9: README and Final Verification
+### Task 8: README and Final Verification
 
 **Files:**
 - Modify: `README.md`
 
 **Interfaces:**
-- Consumes: final CLI, config, and installer behavior
-- Produces: user-facing docs for P1
+- Produces: P1 user docs
+- Produces: final verification evidence
 
-- [ ] **Step 1: Update README quick start**
+- [ ] **Step 1: Update README for P1 commands**
 
-Replace old quick-start commands with:
+Document:
 
 ````markdown
 ## Quick Start
@@ -1487,9 +1575,9 @@ sudo sms-relayed run
 ```
 ````
 
-- [ ] **Step 2: Document TOML config**
+- [ ] **Step 2: Document TOML profiles and service commands**
 
-Add a config section matching the P1 config model:
+Include:
 
 ````markdown
 Default config path:
@@ -1499,11 +1587,8 @@ Default config path:
 ```
 
 Profiles are enabled by `forward.enabled` entries like `bark.personal`.
-````
 
-- [ ] **Step 3: Document services**
-
-Add OpenWrt commands:
+OpenWrt:
 
 ```sh
 /etc/init.d/sms-relayed enable
@@ -1511,14 +1596,15 @@ Add OpenWrt commands:
 /etc/init.d/sms-relayed status
 ```
 
-Add systemd commands:
+systemd:
 
 ```sh
 systemctl enable --now sms-relayed
 systemctl status sms-relayed
 ```
+````
 
-- [ ] **Step 4: Run full verification**
+- [ ] **Step 3: Full verification**
 
 Run:
 
@@ -1528,10 +1614,31 @@ cargo test
 cargo clippy -- -D warnings
 cargo build --release
 sh -n install.sh
+if command -v shellcheck >/dev/null 2>&1; then shellcheck -s sh install.sh; fi
+cargo run -- < /dev/null
 git status --short
 ```
 
-Expected: formatting, tests, clippy, build, and shell syntax checks pass. `git status --short` shows only intended README changes before commit.
+Expected:
+
+- Rust formatting, tests, clippy, and release build pass.
+- Installer syntax passes.
+- ShellCheck passes if present.
+- Non-TTY no-subcommand exits non-zero and includes `no subcommand in non-interactive mode`.
+- `git status --short` shows only intended README changes before commit.
+
+- [ ] **Step 4: Manual OpenWrt verification**
+
+On the Qualcomm 410 OpenWrt board, verify through SSH first:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/frankwei98/sms-relayed/main/install.sh | sh
+sms-relayed config check
+/etc/init.d/sms-relayed start
+logread | tail -n 50
+```
+
+If serial-console setup is used, note whether `inquire` arrow-key prompts work correctly. If serial console has raw-mode issues, do not redesign the CLI immediately; record the terminal type and failure mode first.
 
 - [ ] **Step 5: Commit**
 
@@ -1544,17 +1651,26 @@ git commit -m "docs: update p1 cli installer usage"
 
 ## Self-Review Checklist
 
+- Compile-safe ordering:
+  - Task 1 preserves `Channel`.
+  - Task 2 preserves old flat `Config`.
+  - Task 5 migrates D-Bus, runtime, forwarders, and SMS code together because those signatures are coupled.
+  - Task 6 removes transitional bridges only after migration.
 - Spec coverage:
-  - CLI subcommands: Task 1, Task 3, Task 4, Task 6.
+  - CLI subcommands: Tasks 1, 3, 4, 5.
   - `inquire` wizard: Task 4.
-  - TOML config: Task 2.
-  - Multi-profile forwarding: Task 2 and Task 5.
-  - Configurable modem path: Task 2 and Task 6.
-  - OpenWrt-first installer: Task 8.
-  - systemd support: Task 8 and Task 9.
-  - P2 exclusion: Task 7 and README updates.
-- Placeholder scan: no open requirement slots are intentionally left in this plan.
-- Type consistency:
-  - `AppConfig`, `ProfileRef`, `ChannelProfile`, and channel config names are introduced in Task 2 before use.
-  - `runtime` signatures are introduced before `main.rs` uses them.
-  - `dbus::SendTarget` is introduced before `web.rs` and runtime use it.
+  - TOML config and multi-profile model: Task 2.
+  - Configurable `modem_path`: Tasks 2 and 5.
+  - OpenWrt-first installer: Task 7.
+  - systemd support: Task 7.
+  - P2 exclusion: `mod web;` is absent from P1 `main.rs`; API/frontend remain out of scope.
+- Feedback incorporated:
+  - No per-task `cargo check` gate depends on removed types before their consumers migrate.
+  - GitHub release asset parsing avoids `jq` and avoids greedy full-line JSON matching.
+  - Installer skips setup when binary is absent.
+  - Installer skips service start when config is missing.
+  - `mmcli` absence is a warning.
+  - `SMS_RELAYED_ROOT` supports isolated-root installer smoke tests.
+  - Storage filtering defines `all` as "do not filter anything".
+  - Wizard validates config before saving.
+  - ShellCheck is included when available.
