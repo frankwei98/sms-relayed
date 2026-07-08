@@ -134,7 +134,7 @@ run_setup_if_tty() {
   fi
   if [ -t 0 ] && [ -t 1 ]; then
     "$real_bin" setup --config "$CONFIG_DIR/config.toml"
-  elif [ -r /dev/tty ] && [ -w /dev/tty ] && [ -c /dev/tty ]; then
+  elif [ -c /dev/tty ] && : 2>/dev/null </dev/tty >/dev/tty; then
     "$real_bin" setup --config "$CONFIG_DIR/config.toml" </dev/tty >/dev/tty 2>/dev/tty
   else
     log "non-interactive shell detected; run: $BIN_DIR/sms-relayed setup --config $CONFIG_DIR/config.toml"
