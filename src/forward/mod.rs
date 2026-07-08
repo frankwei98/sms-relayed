@@ -8,55 +8,56 @@ pub mod wecom;
 use anyhow::Result;
 use log::error;
 
-use crate::cli::Channel;
-use crate::config::Config;
+use crate::config::{AppConfig, ChannelProfile};
 use crate::util;
 
 pub async fn forward_sms(
-    channels: &[Channel],
+    profiles: &[ChannelProfile],
     tel_number: &str,
     sms_text: &str,
     sms_date: &str,
-    config: &Config,
+    config: &AppConfig,
 ) -> Result<()> {
     let device_name = resolve_device_name(config);
     let sms_date = sms_date.replace('T', " ");
-    let body = format!(
-        "发信电话:{}\n时间:{}\n短信内容:{}",
-        tel_number, sms_date, sms_text
-    );
-    println!("{}", body);
+    println!("发信电话:{}\n时间:{}\n短信内容:{}", tel_number, sms_date, sms_text);
 
-    for channel in channels {
-        let result = match channel {
-            Channel::PushPlus => {
-                pushplus::send(tel_number, sms_text, &sms_date, &device_name, config).await
+    let mut failures = 0usize;
+    for profile in profiles {
+        let result = match profile {
+            ChannelProfile::PushPlus { config: profile_config, .. } => {
+                pushplus::send(tel_number, sms_text, &sms_date, &device_name, profile_config, config).await
             }
-            Channel::WeCom => {
-                wecom::send(tel_number, sms_text, &sms_date, &device_name, config).await
+            ChannelProfile::WeCom { config: profile_config, .. } => {
+                wecom::send(tel_number, sms_text, &sms_date, &device_name, profile_config, config).await
             }
-            Channel::Telegram => {
-                telegram::send(tel_number, sms_text, &sms_date, &device_name, config).await
+            ChannelProfile::Telegram { config: profile_config, .. } => {
+                telegram::send(tel_number, sms_text, &sms_date, &device_name, profile_config, config).await
             }
-            Channel::DingTalk => {
-                dingtalk::send(tel_number, sms_text, &sms_date, &device_name, config).await
+            ChannelProfile::DingTalk { config: profile_config, .. } => {
+                dingtalk::send(tel_number, sms_text, &sms_date, &device_name, profile_config, config).await
             }
-            Channel::Bark => {
-                bark::send(tel_number, sms_text, &sms_date, &device_name, config).await
+            ChannelProfile::Bark { config: profile_config, .. } => {
+                bark::send(tel_number, sms_text, &sms_date, &device_name, profile_config, config).await
             }
-            Channel::Shell => {
-                shell::send(tel_number, sms_text, &sms_date, &device_name, config).await
+            ChannelProfile::Shell { config: profile_config, .. } => {
+                shell::send(tel_number, sms_text, &sms_date, &device_name, profile_config, config).await
             }
         };
         if let Err(e) = result {
-            error!("{}转发失败: {}", channel.name(), e);
+            failures += 1;
+            error!("profile forward failed: {}", e);
         }
+    }
+
+    if failures == profiles.len() && !profiles.is_empty() {
+        error!("all forwarding profiles failed for this SMS");
     }
     Ok(())
 }
 
-fn resolve_device_name(config: &Config) -> String {
-    let name = config.get_or_empty("ForwardDeviceName");
+fn resolve_device_name(config: &AppConfig) -> String {
+    let name = config.app.device_name.as_str();
     if name == "*Host*Name*" || name.is_empty() {
         util::hostname()
     } else {

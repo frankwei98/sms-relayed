@@ -1,6 +1,6 @@
 use regex::Regex;
 
-use crate::config::Config;
+use crate::config::AppConfig;
 
 pub fn extract_bracket_content(input: &str) -> Vec<String> {
     let mut result = Vec::new();
@@ -19,14 +19,10 @@ pub fn extract_bracket_content(input: &str) -> Vec<String> {
     result
 }
 
-pub fn has_verification_keyword(sms_content: &mut String, config: &Config) -> bool {
-    let keys_str = config
-        .get("smsCodeKey")
-        .unwrap_or("验证码±verification±code±인증±代码±随机码");
-    let keywords: Vec<&str> = keys_str.split('±').collect();
-    for keyword in &keywords {
+pub fn has_verification_keyword(sms_content: &mut String, config: &AppConfig) -> bool {
+    for keyword in &config.sms.code_keywords {
         if sms_content.contains(keyword) {
-            let replacement = format!(" {} ", keyword);
+            let replacement = format!("{} ", keyword);
             *sms_content = sms_content.replacen(keyword, &replacement, 1);
             return true;
         }
@@ -67,7 +63,7 @@ pub fn extract_code_source(sms_content: &str) -> String {
     String::new()
 }
 
-pub fn get_sms_code_str(sms_text: &str, config: &Config) -> (String, String, String) {
+pub fn get_sms_code_str(sms_text: &str, config: &AppConfig) -> (String, String, String) {
     let mut content = sms_text.trim().to_string();
     if has_verification_keyword(&mut content, config) {
         let code = extract_code(&content).trim().to_string();

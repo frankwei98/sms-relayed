@@ -1,7 +1,7 @@
 use anyhow::Result;
 use log::{error, info};
 
-use crate::config::Config;
+use crate::config::{AppConfig, WeComConfig};
 use crate::smscode;
 
 pub async fn send(
@@ -9,25 +9,21 @@ pub async fn send(
     sms_text: &str,
     sms_date: &str,
     device_name: &str,
-    config: &Config,
+    profile: &WeComConfig,
+    app_config: &AppConfig,
 ) -> Result<()> {
-    let corpid = config
-        .get("WeChatQYID")
-        .ok_or_else(|| anyhow::anyhow!("WeChatQYID未配置"))?;
-    let corpsecret = config
-        .get("WeChatQYApplicationSecret")
-        .ok_or_else(|| anyhow::anyhow!("WeChatQYApplicationSecret未配置"))?;
-    let agentid: i64 = config
-        .get("WeChatQYApplicationID")
-        .ok_or_else(|| anyhow::anyhow!("WeChatQYApplicationID未配置"))?
+    let corpid = profile.corp_id.as_str();
+    let corpsecret = profile.secret.as_str();
+    let agentid: i64 = profile
+        .agent_id
         .parse()
-        .map_err(|_| anyhow::anyhow!("WeChatQYApplicationID格式错误"))?;
+        .map_err(|_| anyhow::anyhow!("agent_id format error"))?;
 
     let mut content = format!(
         "短信转发\n发信电话:{}\n时间:{}\n转发设备:{}\n短信内容:{}",
         tel_number, sms_date, device_name, sms_text
     );
-    let (code_str, _, _) = smscode::get_sms_code_str(sms_text, config);
+    let (code_str, _, _) = smscode::get_sms_code_str(sms_text, app_config);
     if !code_str.is_empty() {
         content = format!("{}\n{}", code_str, content);
     }
@@ -58,7 +54,7 @@ pub async fn send(
         access_token
     );
     let msg_body = serde_json::json!({
-        "touser": "@all",
+        "touser": profile.to_user,
         "toparty": "",
         "totag": "",
         "msgtype": "text",

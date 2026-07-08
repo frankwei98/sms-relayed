@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod dbus;
 mod forward;
+mod runtime;
 mod smscode;
 mod util;
 mod wizard;
@@ -46,8 +47,8 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Some(Command::Run) => Err(anyhow::anyhow!("runtime is connected in Task 5")),
-        Some(Command::Send) => Err(anyhow::anyhow!("send is connected in Task 5")),
+        Some(Command::Run) => runtime::run_forwarding(&args.config).await,
+        Some(Command::Send) => runtime::send_interactive(&args.config).await,
         Some(Command::Config { command }) => match command {
             ConfigCommand::Check => {
                 let cfg = config::AppConfig::load(&args.config)?;

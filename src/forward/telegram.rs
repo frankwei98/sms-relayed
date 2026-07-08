@@ -1,7 +1,7 @@
 use anyhow::Result;
 use log::{error, info};
 
-use crate::config::Config;
+use crate::config::{AppConfig, TelegramConfig};
 use crate::smscode;
 use crate::util;
 
@@ -10,26 +10,18 @@ pub async fn send(
     sms_text: &str,
     sms_date: &str,
     device_name: &str,
-    config: &Config,
+    profile: &TelegramConfig,
+    app_config: &AppConfig,
 ) -> Result<()> {
-    let token = config
-        .get("TGBotToken")
-        .ok_or_else(|| anyhow::anyhow!("TGBotToken未配置"))?;
-    let chat_id = config
-        .get("TGBotChatID")
-        .ok_or_else(|| anyhow::anyhow!("TGBotChatID未配置"))?;
-
-    let base_url = if config.get_or_empty("IsEnableCustomTGBotApi") == "true" {
-        config.get_or_empty("CustomTGBotApi").to_string()
-    } else {
-        "https://api.telegram.org".to_string()
-    };
+    let token = profile.bot_token.as_str();
+    let chat_id = profile.chat_id.as_str();
+    let base_url = profile.api_base.trim_end_matches('/');
 
     let content = format!(
         "发信电话:{}\n时间:{}\n转发设备:{}\n短信内容:{}",
         tel_number, sms_date, device_name, sms_text
     );
-    let (code_str, _, _) = smscode::get_sms_code_str(sms_text, config);
+    let (code_str, _, _) = smscode::get_sms_code_str(sms_text, app_config);
     let text = if code_str.is_empty() {
         format!("短信转发\n{}", content)
     } else {

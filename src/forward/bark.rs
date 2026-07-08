@@ -1,7 +1,7 @@
 use anyhow::Result;
 use log::{error, info};
 
-use crate::config::Config;
+use crate::config::{AppConfig, BarkConfig};
 use crate::smscode;
 use crate::util;
 
@@ -10,16 +10,13 @@ pub async fn send(
     sms_text: &str,
     sms_date: &str,
     device_name: &str,
-    config: &Config,
+    profile: &BarkConfig,
+    app_config: &AppConfig,
 ) -> Result<()> {
-    let bark_url = config
-        .get("BarkUrl")
-        .ok_or_else(|| anyhow::anyhow!("BarkUrl未配置"))?;
-    let bark_key = config
-        .get("BrakKey")
-        .ok_or_else(|| anyhow::anyhow!("BrakKey未配置"))?;
+    let bark_url = profile.server_url.trim_end_matches('/');
+    let bark_key = profile.key.as_str();
 
-    let (code_str, code, _) = smscode::get_sms_code_str(sms_text, config);
+    let (code_str, code, _) = smscode::get_sms_code_str(sms_text, app_config);
     let title = if code_str.is_empty() {
         format!("短信转发{}", tel_number)
     } else {

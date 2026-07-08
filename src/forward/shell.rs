@@ -1,7 +1,7 @@
 use anyhow::Result;
 use log::{error, info};
 
-use crate::config::Config;
+use crate::config::{AppConfig, ShellConfig};
 use crate::smscode;
 
 pub async fn send(
@@ -9,13 +9,12 @@ pub async fn send(
     sms_text: &str,
     sms_date: &str,
     device_name: &str,
-    config: &Config,
+    profile: &ShellConfig,
+    app_config: &AppConfig,
 ) -> Result<()> {
-    let shell_path = config
-        .get("ShellPath")
-        .ok_or_else(|| anyhow::anyhow!("ShellPath未配置"))?;
+    let shell_path = profile.path.as_str();
 
-    let (_, code, code_from) = smscode::get_sms_code_str(sms_text, config);
+    let (_, code, code_from) = smscode::get_sms_code_str(sms_text, app_config);
 
     let cmd = format!(
         "{} \"{}\" \"{}\" \"{}\" \"{}\" \"{}\" \"{}\"",

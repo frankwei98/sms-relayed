@@ -7,11 +7,16 @@ use log::{error, info, warn};
 use zbus::zvariant::{OwnedValue, Value};
 use zbus::Connection;
 
-use crate::cli::Channel;
-use crate::config::Config;
+use crate::config::{AppConfig, ChannelProfile};
 use crate::forward;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendTarget {
+    Command,
+    Api,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageType {
     Unknown = 0,
     Sm = 1,
@@ -24,7 +29,7 @@ pub enum StorageType {
 }
 
 impl StorageType {
-    fn from_config(s: &str) -> Self {
+    pub fn from_config(s: &str) -> Self {
         match s {
             "unknown" => StorageType::Unknown,
             "sm" => StorageType::Sm,
@@ -33,7 +38,10 @@ impl StorageType {
             "sr" => StorageType::Sr,
             "bm" => StorageType::Bm,
             "ta" => StorageType::Ta,
-            _ => StorageType::All,
+            _ => {
+                warn!("unknown storage type: {}; storage will not be filtered by this entry", s);
+                StorageType::Unknown
+            }
         }
     }
 
@@ -45,7 +53,6 @@ impl StorageType {
     }
 }
 
-const MODEM_PATH: &str = "/org/freedesktop/ModemManager1/Modem/0";
 const MM_SMS_INTERFACE: &str = "org.freedesktop.ModemManager1.Sms";
 const MM_MESSAGING_INTERFACE: &str = "org.freedesktop.ModemManager1.Modem.Messaging";
 const DBUS_PROPERTIES_INTERFACE: &str = "org.freedesktop.DBus.Properties";
@@ -79,15 +86,18 @@ fn extract_u32(props: &HashMap<String, OwnedValue>, key: &str) -> u32 {
         .unwrap_or(100)
 }
 
-pub async fn monitor_dbus(channels: &[Channel], config: &Config) -> Result<()> {
+pub async fn monitor_dbus(
+    modem_path: &str,
+    profiles: &[ChannelProfile],
+    config: &AppConfig,
+) -> Result<()> {
     println!("短信转发模式正在启动，正在连接系统 D-Bus。");
     info!("正在运行. 按下 Ctrl-C 停止.");
     let connection = Connection::system().await?;
 
-    // Add match rule for SMS Added signals
     let match_rule = format!(
         "type='signal',path='{}',interface='{}'",
-        MODEM_PATH, MM_MESSAGING_INTERFACE
+        modem_path, MM_MESSAGING_INTERFACE
     );
     connection
         .call_method(
@@ -100,7 +110,14 @@ pub async fn monitor_dbus(channels: &[Channel], config: &Config) -> Result<()> {
         .await?;
 
     println!("短信转发监听已就绪。按 Ctrl-C 停止。");
-    let storage_filter = StorageType::from_config(config.get_or_empty("forwardIgnoreStorageType"));
+
+    let ignored_storage: Vec<StorageType> = config
+        .sms
+        .ignore_storage
+        .iter()
+        .map(|s| StorageType::from_config(s))
+        .collect();
+
     let mut stream = zbus::MessageStream::from(connection.clone());
 
     while let Some(msg) = stream.next().await {
@@ -111,14 +128,13 @@ pub async fn monitor_dbus(channels: &[Channel], config: &Config) -> Result<()> {
         let member = header.member().map(|s| s.to_string()).unwrap_or_default();
 
         if interface == MM_MESSAGING_INTERFACE && member.as_str() == "Added" {
-            // Extract args: object_path (arg0), is_received (arg1 bool)
             if let Ok(body) = msg.body().deserialize::<(zbus::zvariant::ObjectPath, bool)>() {
                 let sms_path = body.0.to_string();
                 let is_received = body.1;
                 if is_received {
                     info!("SmsPath:\n{}", sms_path);
                     if let Err(e) =
-                        get_sms_content(&connection, &sms_path, storage_filter, channels, config)
+                        get_sms_content(&connection, &sms_path, &ignored_storage, profiles, config)
                             .await
                     {
                         error!("处理短信失败: {}", e);
@@ -130,12 +146,18 @@ pub async fn monitor_dbus(channels: &[Channel], config: &Config) -> Result<()> {
     Ok(())
 }
 
+fn should_ignore_storage(storage: u32, filters: &[StorageType]) -> bool {
+    filters
+        .iter()
+        .any(|filter| !matches!(filter, StorageType::All) && filter.should_ignore(storage))
+}
+
 async fn get_sms_content(
     connection: &Connection,
     sms_path: &str,
-    storage_filter: StorageType,
-    channels: &[Channel],
-    config: &Config,
+    storage_filters: &[StorageType],
+    profiles: &[ChannelProfile],
+    config: &AppConfig,
 ) -> Result<()> {
     let mut retries = 0;
     loop {
@@ -155,13 +177,13 @@ async fn get_sms_content(
         let smsdate = extract_string(&props, "Timestamp");
         let storage = extract_u32(&props, "Storage");
 
-        if storage_filter.should_ignore(storage) {
+        if should_ignore_storage(storage, storage_filters) {
             warn!("已过滤不转发");
             return Ok(());
         }
 
         if !smscontent.is_empty() {
-            forward::forward_sms(channels, &telnum, &smscontent, &smsdate, config).await?;
+            forward::forward_sms(profiles, &telnum, &smscontent, &smsdate, config).await?;
             return Ok(());
         } else {
             retries += 1;
@@ -179,11 +201,11 @@ async fn get_sms_content(
 
 pub async fn send_sms(
     connection: &Connection,
+    modem_path: &str,
     tel_number: &str,
     sms_text: &str,
-    target: &str,
+    target: SendTarget,
 ) -> Result<()> {
-    // Create SMS via ModemManager Messaging.Create
     let mut properties = HashMap::new();
     properties.insert("text", Value::from(sms_text));
     properties.insert("number", Value::from(tel_number));
@@ -191,7 +213,7 @@ pub async fn send_sms(
     let reply = connection
         .call_method(
             Some(MM_DESTINATION),
-            MODEM_PATH,
+            modem_path,
             Some(MM_MESSAGING_INTERFACE),
             "Create",
             &(&properties,),
@@ -201,17 +223,16 @@ pub async fn send_sms(
     let sms_path: zbus::zvariant::OwnedObjectPath = reply.body().deserialize()?;
     let sms_path_str = sms_path.as_str();
 
-    if target == "command" {
+    if target == SendTarget::Command {
         print!("短信创建成功，是否发送？(1.发送短信,其他按键退出程序)\n");
         io::stdout().flush().unwrap();
         let mut input = String::new();
         io::stdin().read_line(&mut input).unwrap();
         if input.trim() != "1" {
-            // Delete the draft SMS
             let _ = connection
                 .call_method(
                     Some(MM_DESTINATION),
-                    MODEM_PATH,
+                    modem_path,
                     Some(MM_MESSAGING_INTERFACE),
                     "Delete",
                     &(&sms_path,),
@@ -224,7 +245,6 @@ pub async fn send_sms(
         }
     }
 
-    // Send SMS
     let _reply = connection
         .call_method(
             Some(MM_DESTINATION),
