@@ -7,11 +7,30 @@ use crate::config::{
     AppConfig, BarkConfig, DingTalkConfig, PushPlusConfig, ShellConfig, TelegramConfig, WeComConfig,
 };
 
+const EXISTING_CONFIG_PROMPT: &str = "Existing config found";
+const ENABLE_WEB_PROMPT: &str = "Enable Web API and frontend?";
+const ENABLE_WEB_HELP: &str = "Serves the browser dashboard and HTTP API from this device.";
+const WEB_PASSWORD_PROMPT: &str = "Web dashboard password";
+const WEB_PASSWORD_HELP: &str =
+    "Required when Web API is enabled. Stored in config.toml with restricted file permissions.";
+const WEB_BIND_PROMPT: &str = "Web bind address";
+const WEB_PORT_PROMPT: &str = "Web port";
+const WEB_IPV6_PROMPT: &str = "Enable IPv6 listener?";
+const WEB_DATABASE_PROMPT: &str = "SMS history database path";
+const DEVICE_NAME_PROMPT: &str = "Device display name";
+const DEVICE_NAME_HELP: &str = "Use *Host*Name* to show the current system hostname.";
+const MODEM_PATH_PROMPT: &str = "ModemManager modem path";
+const PUSH_CHANNELS_PROMPT: &str = "Push channels";
+const IGNORE_STORAGE_PROMPT: &str = "Ignore SMS storage type";
+const IGNORE_STORAGE_HELP: &str =
+    "Common values: sm, me, mt, sr, bm, ta. Use all for no filtering.";
+const ADD_STORAGE_PROMPT: &str = "Add another ignored storage type?";
+
 pub fn run_setup_wizard(existing: Option<AppConfig>) -> Result<Option<AppConfig>> {
     let mut cfg = match existing {
         Some(existing_config) => {
             match Select::new(
-                "Existing config found",
+                EXISTING_CONFIG_PROMPT,
                 vec![
                     "Keep existing",
                     "Edit guided",
@@ -31,44 +50,40 @@ pub fn run_setup_wizard(existing: Option<AppConfig>) -> Result<Option<AppConfig>
         None => AppConfig::default(),
     };
 
-    Select::new("Runtime target", vec!["SMS forwarding service"])
-        .with_help_message("API and frontend are planned for P2.")
-        .prompt()?;
-
-    cfg.api.enabled = Confirm::new("Enable Web API and frontend?")
+    cfg.api.enabled = Confirm::new(ENABLE_WEB_PROMPT)
         .with_default(true)
-        .with_help_message("Provides a browser console for SMS history and config.")
+        .with_help_message(ENABLE_WEB_HELP)
         .prompt()?;
     if cfg.api.enabled {
-        cfg.api.password = Password::new("Web password")
-            .with_help_message("Stored in config.toml; file permissions are restricted.")
+        cfg.api.password = Password::new(WEB_PASSWORD_PROMPT)
+            .with_help_message(WEB_PASSWORD_HELP)
             .prompt()?;
-        cfg.api.bind = Text::new("Web bind address")
+        cfg.api.bind = Text::new(WEB_BIND_PROMPT)
             .with_default(&cfg.api.bind)
             .prompt()?;
-        cfg.api.port = Text::new("Web port")
+        cfg.api.port = Text::new(WEB_PORT_PROMPT)
             .with_default(&cfg.api.port.to_string())
             .prompt()?
             .parse()?;
-        cfg.api.enable_ipv6 = Confirm::new("Enable IPv6 listener?")
+        cfg.api.enable_ipv6 = Confirm::new(WEB_IPV6_PROMPT)
             .with_default(cfg.api.enable_ipv6)
             .prompt()?;
-        cfg.api.database_path = Text::new("SQLite database path")
+        cfg.api.database_path = Text::new(WEB_DATABASE_PROMPT)
             .with_default(&cfg.api.database_path)
             .prompt()?;
     }
 
-    cfg.app.device_name = Text::new("Device display name")
+    cfg.app.device_name = Text::new(DEVICE_NAME_PROMPT)
         .with_default(&cfg.app.device_name)
-        .with_help_message("Use *Host*Name* to read hostname dynamically.")
+        .with_help_message(DEVICE_NAME_HELP)
         .prompt()?;
 
-    cfg.app.modem_path = Text::new("ModemManager modem path")
+    cfg.app.modem_path = Text::new(MODEM_PATH_PROMPT)
         .with_default(&cfg.app.modem_path)
         .prompt()?;
 
     let selected = MultiSelect::new(
-        "Push channels",
+        PUSH_CHANNELS_PROMPT,
         vec!["Bark", "Telegram", "PushPlus", "WeCom", "DingTalk", "Shell"],
     )
     .prompt()?;
@@ -79,12 +94,12 @@ pub fn run_setup_wizard(existing: Option<AppConfig>) -> Result<Option<AppConfig>
 
     cfg.sms.ignore_storage.clear();
     loop {
-        let storage = Text::new("Ignore SMS storage type")
+        let storage = Text::new(IGNORE_STORAGE_PROMPT)
             .with_default("sm")
-            .with_help_message("Common values: sm, me, mt, sr, bm, ta. Use all for no filtering.")
+            .with_help_message(IGNORE_STORAGE_HELP)
             .prompt()?;
         cfg.sms.ignore_storage.push(storage);
-        if !Confirm::new("Add another ignored storage type?")
+        if !Confirm::new(ADD_STORAGE_PROMPT)
             .with_default(false)
             .prompt()?
         {
@@ -208,5 +223,42 @@ fn profile_count(cfg: &AppConfig, label: &str) -> usize {
         "DingTalk" => cfg.channels.dingtalk.len(),
         "Shell" => cfg.channels.shell.len(),
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+fn setup_prompt_texts() -> &'static [&'static str] {
+    &[
+        EXISTING_CONFIG_PROMPT,
+        ENABLE_WEB_PROMPT,
+        ENABLE_WEB_HELP,
+        WEB_PASSWORD_PROMPT,
+        WEB_PASSWORD_HELP,
+        WEB_BIND_PROMPT,
+        WEB_PORT_PROMPT,
+        WEB_IPV6_PROMPT,
+        WEB_DATABASE_PROMPT,
+        DEVICE_NAME_PROMPT,
+        DEVICE_NAME_HELP,
+        MODEM_PATH_PROMPT,
+        PUSH_CHANNELS_PROMPT,
+        IGNORE_STORAGE_PROMPT,
+        IGNORE_STORAGE_HELP,
+        ADD_STORAGE_PROMPT,
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::setup_prompt_texts;
+
+    #[test]
+    fn setup_prompt_texts_do_not_reference_planned_runtime_targets() {
+        let all_text = setup_prompt_texts().join("\n");
+
+        assert!(!all_text.contains("Runtime target"));
+        assert!(!all_text.contains("planned for P2"));
+        assert!(all_text.contains("Enable Web API and frontend?"));
+        assert!(all_text.contains("Serves the browser dashboard and HTTP API"));
     }
 }

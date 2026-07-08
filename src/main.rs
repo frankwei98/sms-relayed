@@ -17,6 +17,7 @@ use std::path::Path;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Args, Command, ConfigCommand};
+use config::AppConfig;
 use is_terminal::IsTerminal;
 
 #[tokio::main]
@@ -30,7 +31,7 @@ async fn main() -> Result<()> {
                 let existing = config::AppConfig::load(&args.config).ok();
                 if let Some(cfg) = wizard::run_setup_wizard(existing)? {
                     wizard::write_setup_config(&cfg, &args.config)?;
-                    print_setup_next_steps(&args.config);
+                    print_setup_next_steps(&args.config, &cfg);
                 } else {
                     println!("existing config kept: {}", args.config.display());
                 }
@@ -46,7 +47,7 @@ async fn main() -> Result<()> {
             let existing = config::AppConfig::load(&args.config).ok();
             if let Some(cfg) = wizard::run_setup_wizard(existing)? {
                 wizard::write_setup_config(&cfg, &args.config)?;
-                print_setup_next_steps(&args.config);
+                print_setup_next_steps(&args.config, &cfg);
             } else {
                 println!("existing config kept: {}", args.config.display());
             }
@@ -71,12 +72,15 @@ async fn main() -> Result<()> {
     }
 }
 
-fn print_setup_next_steps(config_path: &Path) {
+fn print_setup_next_steps(config_path: &Path, cfg: &AppConfig) {
     println!("config written: {}", config_path.display());
     println!(
         "check config: sms-relayed --config {} config check",
         config_path.display()
     );
     println!("start OpenWrt service: /etc/init.d/sms-relayed start");
+    if cfg.api.enabled {
+        println!("open dashboard: http://<device-ip>:{}", cfg.api.port);
+    }
     println!("inspect OpenWrt logs: logread | tail -n 50");
 }
