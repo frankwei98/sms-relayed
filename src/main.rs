@@ -34,8 +34,18 @@ async fn main() -> Result<()> {
         Some(Command::Run) => Err(anyhow::anyhow!("runtime is connected in Task 5")),
         Some(Command::Send) => Err(anyhow::anyhow!("send is connected in Task 5")),
         Some(Command::Config { command }) => match command {
-            ConfigCommand::Check => Err(anyhow::anyhow!("config check is connected in Task 3")),
-            ConfigCommand::Show => Err(anyhow::anyhow!("config show is connected in Task 3")),
+            ConfigCommand::Check => {
+                let cfg = config::AppConfig::load(&args.config)?;
+                cfg.validate()?;
+                println!("config ok: {}", args.config.display());
+                Ok(())
+            }
+            ConfigCommand::Show => {
+                let cfg = config::AppConfig::load(&args.config)?;
+                cfg.validate()?;
+                println!("{}", cfg.redacted_summary());
+                Ok(())
+            }
         },
     }
 }
