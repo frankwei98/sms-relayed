@@ -144,11 +144,11 @@ impl MessageStore {
             values.push(phone.clone());
         }
         if let Some(from) = &filter.from {
-            sql.push_str(" AND phone_number = ?");
+            sql.push_str(" AND timestamp >= ?");
             values.push(from.clone());
         }
         if let Some(to) = &filter.to {
-            sql.push_str(" AND phone_number = ?");
+            sql.push_str(" AND timestamp <= ?");
             values.push(to.clone());
         }
         if let Some(q) = &filter.q {
@@ -266,9 +266,9 @@ impl MessageStore {
             })
             .collect();
         out.sort_by(|a, b| {
-            b.unread_count
-                .cmp(&a.unread_count)
-                .then(b.last_message.timestamp.cmp(&a.last_message.timestamp))
+            b.last_message
+                .timestamp
+                .cmp(&a.last_message.timestamp)
                 .then(b.last_message.id.cmp(&a.last_message.id))
         });
         Ok(out)
@@ -537,12 +537,66 @@ mod tests {
 
         let conversations = store.list_conversations().unwrap();
         assert_eq!(conversations.len(), 2);
-        assert_eq!(conversations[0].phone_number, "+1");
-        assert_eq!(conversations[0].last_message.id, latest.id);
-        assert_eq!(conversations[0].unread_count, 2);
-        assert_eq!(conversations[0].total_count, 2);
-        assert_eq!(conversations[1].phone_number, "+2");
-        assert_eq!(conversations[1].unread_count, 0);
+        assert_eq!(conversations[0].phone_number, "+2");
+        assert_eq!(conversations[0].unread_count, 0);
+        assert_eq!(conversations[1].phone_number, "+1");
+        assert_eq!(conversations[1].last_message.id, latest.id);
+        assert_eq!(conversations[1].unread_count, 2);
+        assert_eq!(conversations[1].total_count, 2);
+    }
+
+    #[test]
+    fn filters_by_timestamp_range() {
+        let store = memory_store();
+        store
+            .insert_message(NewMessage {
+                direction: MessageDirection::Inbound,
+                phone_number: "+1".to_string(),
+                body: "early".to_string(),
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                status: MessageStatus::Received,
+                source: MessageSource::Modem,
+                modem_sms_path: None,
+                read_at: None,
+                error: None,
+            })
+            .unwrap();
+        store
+            .insert_message(NewMessage {
+                direction: MessageDirection::Inbound,
+                phone_number: "+2".to_string(),
+                body: "middle".to_string(),
+                timestamp: "2026-06-15T12:00:00Z".to_string(),
+                status: MessageStatus::Received,
+                source: MessageSource::Modem,
+                modem_sms_path: None,
+                read_at: None,
+                error: None,
+            })
+            .unwrap();
+        store
+            .insert_message(NewMessage {
+                direction: MessageDirection::Inbound,
+                phone_number: "+3".to_string(),
+                body: "late".to_string(),
+                timestamp: "2026-12-31T23:59:59Z".to_string(),
+                status: MessageStatus::Received,
+                source: MessageSource::Modem,
+                modem_sms_path: None,
+                read_at: None,
+                error: None,
+            })
+            .unwrap();
+
+        let rows = store
+            .list_messages(&MessageFilter {
+                from: Some("2026-06-01T00:00:00Z".to_string()),
+                to: Some("2026-07-01T00:00:00Z".to_string()),
+                ..MessageFilter::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].body, "middle");
     }
 
     #[test]

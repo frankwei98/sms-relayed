@@ -2,11 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { Button } from "#/components/ui/button";
 import { apiFetch, type ConversationSummary, type Message } from "#/lib/api";
 import { subscribeEvents } from "#/lib/events";
-import {
-	MessageFilters,
-	MessageList,
-	SendMessageForm,
-} from "./message-filters";
+import { MessageFilters } from "./message-filters";
+import { MessageList } from "./message-list";
+import { SendMessageForm } from "./send-message-form";
 
 export function MessageConsole() {
 	const [conversations, setConversations] = useState<ConversationSummary[]>([]);
@@ -97,27 +95,39 @@ export function MessageConsole() {
 	}
 
 	async function handleMarkRead(id: number) {
-		await apiFetch(`/api/messages/${id}/read`, { method: "POST" });
-		await loadMessages();
-		await loadConversations();
+		try {
+			await apiFetch(`/api/messages/${id}/read`, { method: "POST" });
+			await loadMessages();
+			await loadConversations();
+		} catch (err) {
+			console.error(err);
+		}
 	}
 
 	async function handleMarkUnread(id: number) {
-		await apiFetch(`/api/messages/${id}/unread`, { method: "POST" });
-		await loadMessages();
-		await loadConversations();
+		try {
+			await apiFetch(`/api/messages/${id}/unread`, { method: "POST" });
+			await loadMessages();
+			await loadConversations();
+		} catch (err) {
+			console.error(err);
+		}
 	}
 
 	async function handleDeleteMany() {
 		if (selectedIds.size === 0) return;
 		const ids = Array.from(selectedIds);
-		await apiFetch("/api/messages/delete", {
-			method: "POST",
-			body: JSON.stringify({ ids }),
-		});
-		setSelectedIds(new Set());
-		await loadMessages();
-		await loadConversations();
+		try {
+			await apiFetch("/api/messages/delete", {
+				method: "POST",
+				body: JSON.stringify({ ids }),
+			});
+			setSelectedIds(new Set());
+			await loadMessages();
+			await loadConversations();
+		} catch (err) {
+			console.error(err);
+		}
 	}
 
 	return (

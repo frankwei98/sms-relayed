@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
+import { ChannelEditor } from "#/components/config/channel-editor";
 import { Button } from "#/components/ui/button";
 import { Input } from "#/components/ui/input";
-import { type AppConfig, apiFetch } from "#/lib/api";
+import { Switch } from "#/components/ui/switch";
+import { apiFetch } from "#/lib/api";
+import type { AppConfig } from "#/lib/config-model";
 
 export function ConfigEditor() {
 	const [config, setConfig] = useState<AppConfig | null>(null);
@@ -74,6 +77,8 @@ export function ConfigEditor() {
 		for (const k of keys) {
 			v = (v as Record<string, unknown>)?.[k];
 		}
+		if (Array.isArray(v)) return v.join(", ");
+		if (typeof v === "number" || typeof v === "boolean") return String(v);
 		return (v ?? "") as string;
 	};
 
@@ -100,11 +105,14 @@ export function ConfigEditor() {
 				<div className="flex items-start gap-2">
 					<span className="w-32 text-sm pt-1">ignore_storage</span>
 					<Input
-						value={s("sms.ignore_storage").replace(/[[\]"]/g, "")}
+						value={s("sms.ignore_storage")}
 						onChange={(e) =>
 							update(
 								"sms.ignore_storage",
-								e.target.value.split(",").map((s) => s.trim()),
+								e.target.value
+									.split(",")
+									.map((s) => s.trim())
+									.filter(Boolean),
 							)
 						}
 						className="h-8 flex-1"
@@ -113,11 +121,14 @@ export function ConfigEditor() {
 				<div className="flex items-start gap-2">
 					<span className="w-32 text-sm pt-1">code_keywords</span>
 					<Input
-						value={s("sms.code_keywords").replace(/[[\]"]/g, "")}
+						value={s("sms.code_keywords")}
 						onChange={(e) =>
 							update(
 								"sms.code_keywords",
-								e.target.value.split(",").map((s) => s.trim()),
+								e.target.value
+									.split(",")
+									.map((s) => s.trim())
+									.filter(Boolean),
 							)
 						}
 						className="h-8 flex-1"
@@ -127,38 +138,40 @@ export function ConfigEditor() {
 
 			<section className="space-y-2">
 				<h3 className="font-medium">api</h3>
-				{[
-					"api.enabled",
-					"api.bind",
-					"api.port",
-					"api.enable_ipv6",
-					"api.password",
-					"api.database_path",
-				].map((k) => (
-					<div key={k} className="flex items-center gap-2">
-						<span className="w-32 text-sm">{k.split(".")[1]}</span>
-						{k === "api.enabled" || k === "api.enable_ipv6" ? (
-							<input
-								type="checkbox"
-								checked={s(k) === "true"}
-								onChange={(e) => update(k, e.target.checked)}
-							/>
-						) : k === "api.port" ? (
+				<div className="flex items-center gap-2">
+					<span className="w-32 text-sm">enabled</span>
+					<Switch
+						checked={config.api.enabled}
+						onCheckedChange={(c: boolean) => update("api.enabled", c)}
+					/>
+				</div>
+				{["api.bind", "api.port", "api.password", "api.database_path"].map(
+					(k) => (
+						<div key={k} className="flex items-center gap-2">
+							<span className="w-32 text-sm">{k.split(".")[1]}</span>
 							<Input
 								value={s(k)}
-								onChange={(e) => update(k, Number(e.target.value))}
-								className="h-8 flex-1"
-							/>
-						) : (
-							<Input
-								value={s(k)}
-								onChange={(e) => update(k, e.target.value)}
+								onChange={(e) =>
+									update(
+										k,
+										k.endsWith("port")
+											? Number(e.target.value)
+											: e.target.value,
+									)
+								}
 								className="h-8 flex-1"
 								type={k === "api.password" ? "password" : "text"}
 							/>
-						)}
-					</div>
-				))}
+						</div>
+					),
+				)}
+				<div className="flex items-center gap-2">
+					<span className="w-32 text-sm">enable_ipv6</span>
+					<Switch
+						checked={config.api.enable_ipv6}
+						onCheckedChange={(c: boolean) => update("api.enable_ipv6", c)}
+					/>
+				</div>
 			</section>
 
 			<section className="space-y-2">
@@ -166,7 +179,7 @@ export function ConfigEditor() {
 				<div className="flex items-start gap-2">
 					<span className="w-32 text-sm pt-1">enabled</span>
 					<Input
-						value={s("forward.enabled").replace(/[[\]"]/g, "")}
+						value={s("forward.enabled")}
 						onChange={(e) =>
 							update(
 								"forward.enabled",
@@ -183,35 +196,7 @@ export function ConfigEditor() {
 
 			<section className="space-y-2">
 				<h3 className="font-medium">channels</h3>
-				{(
-					[
-						"bark",
-						"telegram",
-						"pushplus",
-						"wecom",
-						"dingtalk",
-						"shell",
-					] as const
-				).map((channel) => (
-					<div key={channel} className="rounded border p-3">
-						<h4 className="text-sm font-medium capitalize">{channel}</h4>
-						<div className="flex flex-wrap gap-2 mt-1">
-							{Object.keys(config.channels[channel] ?? {}).map((name) => (
-								<span
-									key={name}
-									className="rounded bg-muted px-2 py-0.5 text-xs"
-								>
-									{name}
-								</span>
-							))}
-							{Object.keys(config.channels[channel] ?? {}).length === 0 && (
-								<span className="text-xs text-muted-foreground">
-									No profiles
-								</span>
-							)}
-						</div>
-					</div>
-				))}
+				<ChannelEditor config={config} onUpdate={setConfig} />
 			</section>
 
 			<div className="flex gap-2">
