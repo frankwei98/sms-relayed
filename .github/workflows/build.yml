@@ -27,6 +27,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Enable pnpm
+        run: corepack enable
+
       - name: Set version
         id: version
         run: |
@@ -50,6 +60,12 @@ jobs:
         with:
           workspaces: . -> target
           key: ${{ matrix.target }}
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
 
       - name: Build
         run: cargo zigbuild --release --locked --target "${{ matrix.target }}"
