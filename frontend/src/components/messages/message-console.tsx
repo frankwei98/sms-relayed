@@ -13,7 +13,7 @@ import {
 	Trash2,
 } from "lucide-react";
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "#/components/ui/badge";
 import { Button } from "#/components/ui/button";
 import { Checkbox } from "#/components/ui/checkbox";
@@ -66,6 +66,7 @@ export function MessageConsole() {
 	const [phoneNumber, setPhoneNumber] = useState("");
 	const [body, setBody] = useState("");
 	const [sending, setSending] = useState(false);
+	const markingReadIdsRef = useRef<Set<number>>(new Set());
 
 	const buildParams = useCallback(
 		(phone?: string | null) => {
@@ -101,6 +102,10 @@ export function MessageConsole() {
 		const data = await apiFetch<ConversationSummary[]>("/api/conversations");
 		setConversations(data);
 	}, []);
+
+	const reloadActiveViews = useCallback(async () => {
+		await Promise.all([loadMessages(), loadConversations()]);
+	}, [loadMessages, loadConversations]);
 
 	useEffect(() => {
 		loadConversations();
@@ -142,6 +147,41 @@ export function MessageConsole() {
 			setIsComposingNew(false);
 		}
 	}, [conversations, selectedPhone]);
+
+	useEffect(() => {
+		if (!selectedPhone || isComposingNew) return;
+		const unreadVisibleIds = messages
+			.filter(
+				(message) =>
+					message.phone_number === selectedPhone &&
+					message.direction === "inbound" &&
+					message.read_at === null &&
+					!markingReadIdsRef.current.has(message.id),
+			)
+			.map((message) => message.id);
+		if (unreadVisibleIds.length === 0) return;
+
+		for (const id of unreadVisibleIds) {
+			markingReadIdsRef.current.add(id);
+		}
+
+		Promise.all(
+			unreadVisibleIds.map((id) =>
+				apiFetch(`/api/messages/${id}/read`, { method: "POST" }),
+			),
+		)
+			.then(async () => {
+				await reloadActiveViews();
+			})
+			.catch((err) => {
+				console.error(err);
+			})
+			.finally(() => {
+				for (const id of unreadVisibleIds) {
+					markingReadIdsRef.current.delete(id);
+				}
+			});
+	}, [isComposingNew, messages, reloadActiveViews, selectedPhone]);
 
 	const filteredConversations = useMemo(() => {
 		const needle = q.trim().toLowerCase();
@@ -204,10 +244,6 @@ export function MessageConsole() {
 			else next.add(id);
 			return next;
 		});
-	}
-
-	async function reloadActiveViews() {
-		await Promise.all([loadMessages(), loadConversations()]);
 	}
 
 	async function handleSend() {
