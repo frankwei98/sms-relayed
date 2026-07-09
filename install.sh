@@ -8,6 +8,8 @@ BIN_DIR="${SMS_RELAYED_BIN_DIR:-/usr/bin}"
 CONFIG_DIR="${SMS_RELAYED_CONFIG_DIR:-/etc/sms-relayed}"
 START_SERVICE="${SMS_RELAYED_START:-1}"
 CONFIG_ONLY="${SMS_RELAYED_CONFIG_ONLY:-0}"
+BINARY_INSTALLED=0
+BINARY_UPDATED=0
 
 target_path() {
   printf '%s%s\n' "$ROOT" "$1"
@@ -59,6 +61,50 @@ download_file() {
   fi
 }
 
+binary_version() {
+  bin="$1"
+  if [ ! -x "$bin" ]; then
+    printf '%s\n' "not installed"
+    return
+  fi
+  "$bin" -V 2>/dev/null || printf '%s\n' "unknown"
+}
+
+confirm_update() {
+  installed_version="$1"
+  release_version="$2"
+
+  log "installed version: $installed_version"
+  log "release version: $release_version"
+
+  case "${SMS_RELAYED_UPDATE:-}" in
+    1|yes|YES|true|TRUE)
+      log "SMS_RELAYED_UPDATE=${SMS_RELAYED_UPDATE}; updating existing binary"
+      return 0
+      ;;
+    0|no|NO|false|FALSE)
+      log "SMS_RELAYED_UPDATE=${SMS_RELAYED_UPDATE}; skipping update"
+      return 1
+      ;;
+  esac
+
+  if [ -t 0 ] && [ -t 1 ]; then
+    printf '%s' "Update sms-relayed? [y/N] "
+    read -r answer
+  elif [ -c /dev/tty ] && : 2>/dev/null </dev/tty >/dev/tty; then
+    printf '%s' "Update sms-relayed? [y/N] " >/dev/tty
+    read -r answer </dev/tty
+  else
+    warn "no interactive tty; updating existing binary. Set SMS_RELAYED_UPDATE=0 to skip."
+    return 0
+  fi
+
+  case "$answer" in
+    y|Y|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 resolve_asset_url_from_json() {
   suffix="$1"
   tr ',' '\n' |
@@ -104,11 +150,25 @@ install_binary() {
 
   real_bin_dir="$(target_path "$BIN_DIR")"
   mkdir -p "$real_bin_dir"
-  tmp="${TMPDIR:-/tmp}/sms-relayed.$$"
-  download_file "$url" "$tmp"
-  chmod +x "$tmp"
-  mv "$tmp" "$real_bin_dir/sms-relayed"
-  log "installed $real_bin_dir/sms-relayed"
+  real_bin="$real_bin_dir/sms-relayed"
+  download_tmp="${TMPDIR:-/tmp}/sms-relayed.$$"
+  download_file "$url" "$download_tmp"
+  chmod +x "$download_tmp"
+
+  if [ -e "$real_bin" ]; then
+    installed_version="$(binary_version "$real_bin")"
+    release_version="$(binary_version "$download_tmp")"
+    if ! confirm_update "$installed_version" "$release_version"; then
+      rm -f "$download_tmp"
+      log "skipped update for $real_bin"
+      return
+    fi
+    BINARY_UPDATED=1
+  fi
+
+  mv "$download_tmp" "$real_bin"
+  BINARY_INSTALLED=1
+  log "installed $real_bin"
 }
 
 write_openwrt_service() {
@@ -179,12 +239,21 @@ start_service_if_ready() {
   if [ -x "$(target_path /etc/init.d/sms-relayed)" ]; then
     if [ -z "$ROOT" ]; then
       /etc/init.d/sms-relayed enable
-      /etc/init.d/sms-relayed start
+      if [ "$BINARY_UPDATED" = "1" ]; then
+        /etc/init.d/sms-relayed restart
+      else
+        /etc/init.d/sms-relayed start
+      fi
     else
       log "SMS_RELAYED_ROOT is set; service file generated but not started"
     fi
   elif have systemctl && [ -z "$ROOT" ]; then
-    systemctl enable --now sms-relayed
+    if [ "$BINARY_UPDATED" = "1" ]; then
+      systemctl enable sms-relayed
+      systemctl restart sms-relayed
+    else
+      systemctl enable --now sms-relayed
+    fi
   fi
 }
 
@@ -195,20 +264,24 @@ main() {
 
   if [ "$CONFIG_ONLY" != "1" ]; then
     install_binary
-    if [ -d "$(target_path /etc/init.d)" ] && [ -f "$(target_path /etc/rc.common)" ]; then
-      write_openwrt_service
-    elif have systemctl || [ -n "$ROOT" ]; then
-      write_systemd_service
-      if [ -z "$ROOT" ] && have systemctl; then
-        systemctl daemon-reload || true
+    if [ "$BINARY_INSTALLED" = "1" ]; then
+      if [ -d "$(target_path /etc/init.d)" ] && [ -f "$(target_path /etc/rc.common)" ]; then
+        write_openwrt_service
+      elif have systemctl || [ -n "$ROOT" ]; then
+        write_systemd_service
+        if [ -z "$ROOT" ] && have systemctl; then
+          systemctl daemon-reload || true
+        fi
+      else
+        warn "no supported service manager detected"
       fi
-    else
-      warn "no supported service manager detected"
     fi
   fi
 
-  run_setup_if_tty
-  start_service_if_ready
+  if [ "$BINARY_INSTALLED" = "1" ] || [ "$CONFIG_ONLY" = "1" ]; then
+    run_setup_if_tty
+    start_service_if_ready
+  fi
 }
 
 if [ "${SMS_RELAYED_TEST:-0}" != "1" ]; then
