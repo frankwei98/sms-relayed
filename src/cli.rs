@@ -7,7 +7,7 @@ pub const DEFAULT_CONFIG_PATH: &str = "/etc/sms-relayed/config.toml";
 #[derive(Parser, Debug)]
 #[command(
     name = "sms-relayed",
-    version,
+    version = env!("SMS_RELAYED_BUILD_VERSION"),
     about = "SMS relay for ModemManager devices"
 )]
 pub struct Args {
@@ -33,4 +33,20 @@ pub enum Command {
 pub enum ConfigCommand {
     Check,
     Show,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::Args;
+
+    #[test]
+    fn version_uses_build_metadata() {
+        let command = Args::command();
+        let version = command.get_version().expect("version should be set");
+
+        assert_eq!(version, env!("SMS_RELAYED_BUILD_VERSION"));
+        assert!(version.starts_with(concat!(env!("CARGO_PKG_VERSION"), "+")));
+    }
 }

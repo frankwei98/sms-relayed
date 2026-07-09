@@ -28,6 +28,14 @@ detect_suffix() {
   esac
 }
 
+detect_os() {
+  os="$(uname -s)"
+  case "$os" in
+    Linux) printf '%s\n' "linux" ;;
+    *) die "unsupported system: $os" ;;
+  esac
+}
+
 fetch_url() {
   url="$1"
   if have curl; then
@@ -60,6 +68,12 @@ resolve_asset_url_from_json() {
     head -n 1
 }
 
+resolve_tag_from_json() {
+  grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' |
+    head -n 1 |
+    sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"//; s/"$//'
+}
+
 resolve_asset_url() {
   suffix="$1"
   if [ "$VERSION" = "latest" ]; then
@@ -67,13 +81,26 @@ resolve_asset_url() {
   else
     api="https://api.github.com/repos/$REPO/releases/tags/$VERSION"
   fi
-  fetch_url "$api" | resolve_asset_url_from_json "$suffix"
+  release_json="$(fetch_url "$api")"
+  release_tag="$(printf '%s\n' "$release_json" | resolve_tag_from_json)"
+  asset_url="$(printf '%s\n' "$release_json" | resolve_asset_url_from_json "$suffix")"
+  printf '%s\n%s\n' "$release_tag" "$asset_url"
 }
 
 install_binary() {
+  system="$(detect_os)"
+  arch="$(uname -m)"
   suffix="$(detect_suffix)"
-  url="$(resolve_asset_url "$suffix")"
+  release="$(resolve_asset_url "$suffix")"
+  release_tag="$(printf '%s\n' "$release" | sed -n '1p')"
+  url="$(printf '%s\n' "$release" | sed -n '2p')"
+  [ -n "$release_tag" ] || die "no release tag found for version $VERSION"
   [ -n "$url" ] || die "no release asset found for $suffix in version $VERSION"
+
+  log "detected system: $system"
+  log "detected architecture: $arch ($suffix)"
+  log "github release tag: $release_tag"
+  log "downloading asset: $url"
 
   real_bin_dir="$(target_path "$BIN_DIR")"
   mkdir -p "$real_bin_dir"
