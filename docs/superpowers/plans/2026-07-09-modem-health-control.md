@@ -80,6 +80,7 @@
   - `pub fn parse_modem_json(configured_path: &str, id: Option<String>, raw: &str) -> Result<ModemStatus, ModemError>`
   - `pub fn parse_modem_text(configured_path: &str, id: Option<String>, raw: &str) -> Result<ModemStatus, ModemError>`
   - `pub fn map_list_path_to_id(configured_path: &str, list_output: &str) -> Result<String, ModemError>`
+  - `pub fn path_drift_candidate(configured_path: &str, list_output: &str) -> Option<String>`
 - Consumes: no earlier task output.
 
 - [ ] **Step 1: Add fixture files**
@@ -275,6 +276,23 @@ mod tests {
     fn rejects_missing_path_mapping() {
         let raw = include_str!("../tests/fixtures/mmcli/modem-list.txt");
         let err = map_list_path_to_id("/org/freedesktop/ModemManager1/Modem/99", raw)
+            .unwrap_err();
+        assert_eq!(err.code(), "modem_path_unresolved");
+    }
+
+    #[test]
+    fn reports_single_path_drift_candidate() {
+        let raw = "/org/freedesktop/ModemManager1/Modem/7 [Quectel] EC25\n";
+        assert_eq!(
+            path_drift_candidate("/org/freedesktop/ModemManager1/Modem/0", raw).as_deref(),
+            Some("/org/freedesktop/ModemManager1/Modem/7")
+        );
+    }
+
+    #[test]
+    fn does_not_prefix_match_modem_ids() {
+        let raw = "/org/freedesktop/ModemManager1/Modem/03 [Quectel] EC25\n";
+        let err = map_list_path_to_id("/org/freedesktop/ModemManager1/Modem/0", raw)
             .unwrap_err();
         assert_eq!(err.code(), "modem_path_unresolved");
     }
@@ -491,35 +509,45 @@ pub fn parse_modem_text(
     let mut status = base_status(configured_path, id);
     status.tool.supports_json = false;
     status.health.reasons.push("text_fallback_limited".to_string());
+    let mut section = "";
 
     for line in raw.lines() {
         let line = line.trim();
-        if let Some(value) = line.strip_prefix("|                 path:") {
+        let Some((left, right)) = line.split_once('|') else {
+            continue;
+        };
+        let left = left.trim();
+        if !left.is_empty() {
+            section = left;
+        }
+        let right = right.trim();
+        if let Some(value) = right.strip_prefix("path:") {
             status.resolved.path = Some(value.trim().to_string());
             status.resolved.present = status.resolved.path.as_deref() == Some(configured_path);
-        } else if let Some(value) = line.strip_prefix("|                state:") {
-            status.modem.state = Some(value.trim().to_string());
-        } else if let Some(value) = line.strip_prefix("|        operator name:") {
+        } else if let Some(value) = right.strip_prefix("state:") {
+            match section {
+                "SIM" => status.modem.sim_state = Some(value.trim().to_string()),
+                _ => status.modem.state = Some(value.trim().to_string()),
+            }
+        } else if let Some(value) = right.strip_prefix("operator name:") {
             status.modem.operator_name = Some(value.trim().to_string());
-        } else if let Some(value) = line.strip_prefix("| supported storages:") {
+        } else if let Some(value) = right.strip_prefix("supported storages:") {
             status.messaging.supported_storages = split_csv(value);
             status.messaging.available = !status.messaging.supported_storages.is_empty();
-        } else if let Some(value) = line.strip_prefix("|    default storage:") {
+        } else if let Some(value) = right.strip_prefix("default storage:") {
             status.messaging.default_storage = Some(value.trim().to_string());
-        } else if let Some(value) = line.strip_prefix("|      quality:") {
+        } else if let Some(value) = right.strip_prefix("quality:") {
             status.modem.signal_quality = value
                 .trim()
                 .split('%')
                 .next()
                 .and_then(|n| n.trim().parse::<u8>().ok());
-        } else if line.contains("|                state: ready") {
-            status.modem.sim_state = Some("ready".to_string());
-        } else if let Some(value) = line.strip_prefix("|    access techologies:") {
+        } else if let Some(value) = right
+            .strip_prefix("access techologies:")
+            .or_else(|| right.strip_prefix("access technologies:"))
+        {
             status.modem.access_technologies = split_csv(value);
         }
-    }
-    if status.modem.sim_state.is_none() && raw.contains("SIM") && raw.contains("state: ready") {
-        status.modem.sim_state = Some("ready".to_string());
     }
     status.modem.enabled = status
         .modem
@@ -575,10 +603,13 @@ pub fn map_list_path_to_id(configured_path: &str, list_output: &str) -> Result<S
     let mut matches = Vec::new();
     for line in list_output.lines() {
         let line = line.trim();
-        if !line.starts_with(configured_path) {
+        let Some(path) = line.split_whitespace().next() else {
+            continue;
+        };
+        if path != configured_path {
             continue;
         }
-        let Some(id) = line
+        let Some(id) = path
             .split("/Modem/")
             .nth(1)
             .and_then(|rest| rest.split_whitespace().next())
@@ -593,6 +624,20 @@ pub fn map_list_path_to_id(configured_path: &str, list_output: &str) -> Result<S
             "modem_path_unresolved",
             "configured modem path was not found exactly once",
         )),
+    }
+}
+
+pub fn path_drift_candidate(configured_path: &str, list_output: &str) -> Option<String> {
+    let paths: Vec<String> = list_output
+        .lines()
+        .filter_map(|line| line.trim().split_whitespace().next())
+        .filter(|path| path.starts_with("/org/freedesktop/ModemManager1/Modem/"))
+        .filter(|path| *path != configured_path)
+        .map(ToString::to_string)
+        .collect();
+    match paths.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
     }
 }
 
@@ -764,6 +809,34 @@ mod service_tests {
     }
 
     #[tokio::test]
+    async fn status_reports_path_drift_candidate_when_configured_path_is_stale() {
+        let runner = FakeRunner::new(vec![
+            Ok(out("mmcli 1.22.0\n")),
+            Ok(MmcliOutput {
+                stdout: String::new(),
+                stderr: "not found".to_string(),
+                status_success: false,
+            }),
+            Ok(out("/org/freedesktop/ModemManager1/Modem/7 [Quectel] EC25\n")),
+            Ok(out("/org/freedesktop/ModemManager1/Modem/7 [Quectel] EC25\n")),
+        ]);
+        let service = ModemService::new_with_runner(runner);
+        let status = service
+            .status("/org/freedesktop/ModemManager1/Modem/0")
+            .await;
+
+        assert_eq!(status.health.status, HealthLevel::Degraded);
+        assert_eq!(
+            status.diagnostics.path_drift_candidate.as_deref(),
+            Some("/org/freedesktop/ModemManager1/Modem/7")
+        );
+        assert!(status
+            .health
+            .reasons
+            .contains(&"modem_path_drift_candidate".to_string()));
+    }
+
+    #[tokio::test]
     async fn missing_mmcli_reports_unknown() {
         let runner = FakeRunner::new(vec![Err(ModemError::new("mmcli_probe_failed", "not found"))]);
         let service = ModemService::new_with_runner(runner);
@@ -774,6 +847,27 @@ mod service_tests {
         assert_eq!(status.tool.available, false);
         assert_eq!(status.health.status, HealthLevel::Unknown);
         assert!(status.health.reasons.contains(&"mmcli_probe_failed".to_string()));
+    }
+
+    #[tokio::test]
+    async fn failed_capability_probe_is_not_cached() {
+        let runner = FakeRunner::new(vec![
+            Err(ModemError::new("mmcli_probe_failed", "not found")),
+            Ok(out("mmcli 1.22.0\n")),
+            Ok(out(include_str!("../tests/fixtures/mmcli/healthy.json"))),
+        ]);
+        let service = ModemService::new_with_runner(runner.clone());
+
+        let first = service
+            .status("/org/freedesktop/ModemManager1/Modem/0")
+            .await;
+        let second = service
+            .status("/org/freedesktop/ModemManager1/Modem/0")
+            .await;
+
+        assert_eq!(first.health.status, HealthLevel::Unknown);
+        assert_eq!(second.health.status, HealthLevel::Ok);
+        assert_eq!(runner.calls().len(), 3);
     }
 
     #[tokio::test]
@@ -1013,7 +1107,19 @@ impl ModemService {
                             ),
                         }
                     }
-                    Err(err) => error_status(configured_path, tool, err.code(), err.to_string()),
+                    Err(err) => {
+                        let mut status = error_status(configured_path, tool, err.code(), err.to_string());
+                        if let Ok(candidate) = self.path_drift_candidate(configured_path).await {
+                            status.health.status = HealthLevel::Degraded;
+                            status.health.reasons.clear();
+                            status
+                                .health
+                                .reasons
+                                .push("modem_path_drift_candidate".to_string());
+                            status.diagnostics.path_drift_candidate = Some(candidate);
+                        }
+                        status
+                    }
                 }
             }
             Err(err) => error_status(configured_path, tool, err.code(), err.to_string()),
@@ -1067,6 +1173,7 @@ impl ModemService {
     pub async fn can_reset(&self, session_token: &str) -> Result<(), ModemError> {
         let key = short_hash(session_token);
         let mut guard = self.reset_limits.lock().unwrap();
+        guard.retain(|_, last| last.elapsed() < RESET_RATE_LIMIT);
         if let Some(last) = guard.get(&key) {
             if last.elapsed() < RESET_RATE_LIMIT {
                 return Err(ModemError::new("reset_rate_limited", "reset is rate limited"));
@@ -1086,11 +1193,13 @@ impl ModemService {
                 version_raw: Some(output.stdout.trim().to_string()),
                 supports_json: true,
             },
-            _ => ToolInfo {
-                available: false,
-                version_raw: None,
-                supports_json: false,
-            },
+            _ => {
+                return ToolInfo {
+                    available: false,
+                    version_raw: None,
+                    supports_json: false,
+                };
+            }
         };
         *self.capabilities.lock().unwrap() = Some(tool.clone());
         tool
@@ -1115,6 +1224,15 @@ impl ModemService {
             return Err(ModemError::new("modem_path_unresolved", output.stderr));
         }
         map_list_path_to_id(configured_path, &output.stdout)
+    }
+
+    async fn path_drift_candidate(&self, configured_path: &str) -> Result<String, ModemError> {
+        let output = self.runner.run(&["-L"], MMCLI_TIMEOUT).await?;
+        if !output.status_success {
+            return Err(ModemError::new("modem_path_lost", output.stderr));
+        }
+        path_drift_candidate(configured_path, &output.stdout)
+            .ok_or_else(|| ModemError::new("modem_path_lost", "no single drift candidate"))
     }
 }
 
@@ -1210,9 +1328,39 @@ tower = "0.5"
 Then add tests to `src/api/mod.rs` test module. Use the existing imports and add `axum::body::Body`, `axum::http::{Method, Request}`, and `tower::ServiceExt`.
 
 ```rust
+use std::future::Future;
+use std::pin::Pin;
+use std::time::Duration;
+
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use tower::ServiceExt;
+
+#[derive(Clone, Default)]
+struct ApiTestRunner;
+
+impl crate::modem::MmcliRunner for ApiTestRunner {
+    fn run<'a>(
+        &'a self,
+        args: &'a [&'a str],
+        _timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<crate::modem::MmcliOutput, crate::modem::ModemError>> + Send + 'a>> {
+        Box::pin(async move {
+            if args == &["--version"] {
+                return Ok(crate::modem::MmcliOutput {
+                    stdout: "mmcli 1.22.0\n".to_string(),
+                    stderr: String::new(),
+                    status_success: true,
+                });
+            }
+            Ok(crate::modem::MmcliOutput {
+                stdout: include_str!("../../tests/fixtures/mmcli/healthy.json").to_string(),
+                stderr: String::new(),
+                status_success: true,
+            })
+        })
+    }
+}
 
 fn test_state() -> ApiState {
     let mut cfg = AppConfig::default();
@@ -1225,7 +1373,7 @@ fn test_state() -> ApiState {
         events: crate::events::EventBus::new(),
         started_at: std::time::Instant::now(),
         sessions: SessionStore::default(),
-        modem: crate::modem::ModemService::new(),
+        modem: crate::modem::ModemService::new_with_runner(ApiTestRunner),
     }
 }
 
@@ -1514,6 +1662,8 @@ pub modem: crate::modem::ModemService,
 Modify `router`:
 
 ```rust
+let auth_routes = auth::routes();
+
 let protected = Router::new()
     .merge(messages::routes())
     .merge(config::routes())
@@ -1754,7 +1904,10 @@ export function ModemStatusPanel() {
 			await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
 			const next = await fetchModemStatus();
 			setStatus(next);
-			if (next.resolved.present || next.diagnostics.path_drift_candidate) {
+			if (
+				(next.resolved.present && next.health.status !== "unknown") ||
+				next.diagnostics.path_drift_candidate
+			) {
 				return;
 			}
 		}
@@ -1822,11 +1975,9 @@ export function ModemStatusPanel() {
 					<section className="space-y-2 border-t pt-4">
 						<h3 className="font-medium text-destructive">Danger zone</h3>
 						<Dialog open={resetOpen} onOpenChange={setResetOpen}>
-							<DialogTrigger asChild>
-								<Button variant="destructive" disabled={busy !== null}>
-									<RotateCcw className="size-4" />
-									Reset modem
-								</Button>
+							<DialogTrigger render={<Button variant="destructive" disabled={busy !== null} />}>
+								<RotateCcw className="size-4" />
+								Reset modem
 							</DialogTrigger>
 							<DialogContent>
 								<DialogHeader>
