@@ -8,6 +8,14 @@ import { defineConfig } from "vite";
 
 const config = defineConfig({
 	resolve: { tsconfigPaths: true },
+	server: {
+		proxy: {
+			"/api": {
+				target: "http://192.168.29.201:20721",
+				changeOrigin: true,
+			},
+		},
+	},
 	plugins: [
 		devtools(),
 		tailwindcss(),
