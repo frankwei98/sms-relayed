@@ -123,7 +123,7 @@ EOF
 }
 
 warn_environment() {
-  have mmcli || warn "mmcli not found; install or enable ModemManager before expecting SMS forwarding to work"
+  have mmcli || warn "mmcli not found; SMS relay can still use ModemManager D-Bus, but Web modem status/control and /api/health modem diagnostics will report unknown"
 }
 
 run_setup_if_tty() {

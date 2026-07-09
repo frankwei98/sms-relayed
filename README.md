@@ -63,6 +63,20 @@ database_path = "/etc/sms-relayed/sms-relayed.sqlite"
 - SSE 实时事件推送（新短信、状态更新、配置变更）。
 - 前端资产嵌入在二进制文件中，无需独立 Web 服务器。
 
+### Modem 健康与控制的运行时依赖
+
+Web Modem 页面和 `/api/health` 的 modem 子状态使用 `mmcli`（ModemManager 命令行工具）。
+SMS 收发仍然使用 ModemManager 系统 D-Bus，不受此依赖影响。
+
+如果 `mmcli` 缺失，SmsRelayed 仍可正常启动，但 Web modem 状态/控制和健康检查会报告 `unknown`。
+在目标设备上安装 `mmcli` 即可启用 Web modem 诊断和设备控制功能。
+
+### 公开健康检查的安全说明
+
+`GET /api/health` 公开返回 `service` 和 `modem` 子状态。
+如果服务可在设备网络外访问，请仅在受信网络或置于访问控制之后暴露此接口。
+公开响应已隐去 modem 对象路径、运营商名称、信号值、SIM 标识符、手机号、短信正文和原始命令输出。
+
 ### 路由
 
 | 路径 | 方法 | 说明 |
@@ -86,6 +100,12 @@ database_path = "/etc/sms-relayed/sms-relayed.sqlite"
 | `/api/service/restart` | POST | 重启服务 |
 | `/login` | - | 前端登录页 |
 | `/config` | - | 前端配置编辑页 |
+| `/modem` | - | 前端调制解调器状态和控制页 |
+| `/api/health` | GET | 公开健康检查（service + modem 子状态） |
+| `/api/modem/status` | GET | 调制解调器详细状态（需登录） |
+| `/api/modem/enable` | POST | 启用调制解调器（需登录） |
+| `/api/modem/disable` | POST | 禁用调制解调器（需登录） |
+| `/api/modem/reset` | POST | 重置调制解调器（需登录，需 `{ "confirm": true }`） |
 
 ## Quick Start
 
