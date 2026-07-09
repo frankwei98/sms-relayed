@@ -166,8 +166,7 @@ pub fn parse_modem_json(
     status.modem.operator_name = get_str(modem, &["3gpp", "operator-name"]);
     status.modem.signal_quality = modem
         .pointer("/generic/signal-quality/value")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| u8::try_from(n.min(100)).ok());
+        .and_then(json_u8);
     status.modem.access_technologies = modem
         .pointer("/generic/access-technologies")
         .and_then(|v| v.as_array())
@@ -233,6 +232,32 @@ pub fn parse_messaging_status_text(raw: &str) -> MessagingDetails {
 
     details.available = !details.supported_storages.is_empty();
     details
+}
+
+pub fn parse_sim_status_json(raw: &str) -> Result<Option<String>, ModemError> {
+    let value: Value = serde_json::from_str(raw)
+        .map_err(|e| ModemError::new("mmcli_parse_failed", e.to_string()))?;
+    let sim = value
+        .get("sim")
+        .ok_or_else(|| ModemError::new("mmcli_parse_failed", "missing sim object"))?;
+    Ok(get_str(sim, &["state"]).or_else(|| {
+        get_str(sim, &["properties", "active"]).and_then(|active| sim_state_from_active(&active))
+    }))
+}
+
+pub fn parse_sim_status_text(raw: &str) -> Option<String> {
+    for line in raw.lines() {
+        let Some((_, right)) = line.split_once('|') else {
+            continue;
+        };
+        let Some(value) = right.trim().strip_prefix("active:") else {
+            continue;
+        };
+        if let Some(state) = sim_state_from_active(value.trim()) {
+            return Some(state);
+        }
+    }
+    None
 }
 
 pub fn parse_modem_text(
@@ -387,6 +412,16 @@ fn get_str(value: &Value, path: &[&str]) -> Option<String> {
     current.as_str().map(ToString::to_string)
 }
 
+fn json_u8(value: &Value) -> Option<u8> {
+    if let Some(n) = value.as_u64() {
+        return u8::try_from(n.min(100)).ok();
+    }
+    value
+        .as_str()
+        .and_then(|s| s.parse::<u64>().ok())
+        .and_then(|n| u8::try_from(n.min(100)).ok())
+}
+
 fn storage_values(value: &Value) -> Vec<String> {
     if let Some(items) = value.as_array() {
         return items
@@ -395,6 +430,29 @@ fn storage_values(value: &Value) -> Vec<String> {
             .collect();
     }
     value.as_str().map(split_csv).unwrap_or_default()
+}
+
+fn sim_state_from_active(active: &str) -> Option<String> {
+    match active.trim().to_ascii_lowercase().as_str() {
+        "yes" | "true" | "1" => Some("ready".to_string()),
+        "no" | "false" | "0" => Some("inactive".to_string()),
+        "--" | "" => None,
+        other => Some(other.to_string()),
+    }
+}
+
+fn sim_target_from_modem_json(raw: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(raw).ok()?;
+    let path = value.pointer("/modem/generic/sim")?.as_str()?;
+    sim_id(path).or_else(|| Some(path.to_string()))
+}
+
+fn sim_id(path: &str) -> Option<String> {
+    path.split("/SIM/")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .filter(|id| !id.is_empty())
+        .map(ToString::to_string)
 }
 
 fn push_reason(reasons: &mut Vec<String>, reason: &str) {
@@ -544,6 +602,11 @@ impl ModemService {
 
             match self.runner.run(&args, MMCLI_TIMEOUT).await {
                 Ok(output) if output.status_success => {
+                    let sim_target = if use_json {
+                        sim_target_from_modem_json(&output.stdout)
+                    } else {
+                        None
+                    };
                     let parsed = if use_json {
                         parse_modem_json(configured_path, path_id(configured_path), &output.stdout)
                     } else {
@@ -553,6 +616,8 @@ impl ModemService {
                         Ok(mut status) => {
                             status.tool = tool.clone();
                             self.enrich_messaging_status(&mut status, configured_path, use_json)
+                                .await;
+                            self.enrich_sim_status(&mut status, sim_target.as_deref(), use_json)
                                 .await;
                             status
                         }
@@ -578,6 +643,11 @@ impl ModemService {
                             };
                             match self.runner.run(&retry_args, MMCLI_TIMEOUT).await {
                                 Ok(retry) if retry.status_success => {
+                                    let sim_target = if use_json {
+                                        sim_target_from_modem_json(&retry.stdout)
+                                    } else {
+                                        None
+                                    };
                                     let parsed = if use_json {
                                         parse_modem_json(
                                             configured_path,
@@ -597,6 +667,12 @@ impl ModemService {
                                             self.enrich_messaging_status(
                                                 &mut status,
                                                 id.as_str(),
+                                                use_json,
+                                            )
+                                            .await;
+                                            self.enrich_sim_status(
+                                                &mut status,
+                                                sim_target.as_deref(),
                                                 use_json,
                                             )
                                             .await;
@@ -688,6 +764,51 @@ impl ModemService {
             .health
             .reasons
             .retain(|reason| reason != "messaging_unavailable");
+        if status.health.reasons.is_empty() {
+            status.health.status = HealthLevel::Unknown;
+            classify(status);
+        }
+    }
+
+    async fn enrich_sim_status(
+        &self,
+        status: &mut ModemStatus,
+        target: Option<&str>,
+        use_json: bool,
+    ) {
+        if status.modem.sim_state.is_some() {
+            return;
+        }
+        let Some(target) = target else {
+            return;
+        };
+
+        let args = if use_json {
+            vec!["--sim", target, "--output-json"]
+        } else {
+            vec!["--sim", target]
+        };
+        let Ok(output) = self.runner.run(&args, MMCLI_TIMEOUT).await else {
+            return;
+        };
+        if !output.status_success {
+            return;
+        }
+
+        let sim_state = if use_json {
+            parse_sim_status_json(&output.stdout).ok().flatten()
+        } else {
+            parse_sim_status_text(&output.stdout)
+        };
+        let Some(sim_state) = sim_state else {
+            return;
+        };
+
+        status.modem.sim_state = Some(sim_state);
+        status
+            .health
+            .reasons
+            .retain(|reason| reason != "sim_not_ready");
         if status.health.reasons.is_empty() {
             status.health.status = HealthLevel::Unknown;
             classify(status);
@@ -1055,7 +1176,8 @@ mod service_tests {
               "dbus-path": "/org/freedesktop/ModemManager1/Modem/0",
               "state": "connected",
               "access-technologies": ["lte"],
-              "signal-quality": { "value": 78, "recent": true }
+              "signal-quality": { "value": "78", "recent": "yes" },
+              "sim": "/org/freedesktop/ModemManager1/SIM/0"
             }
           }
         }"#;
@@ -1067,10 +1189,19 @@ mod service_tests {
             }
           }
         }"#;
+        let sim_json = r#"{
+          "sim": {
+            "dbus-path": "/org/freedesktop/ModemManager1/SIM/0",
+            "properties": {
+              "active": "yes"
+            }
+          }
+        }"#;
         let runner = FakeRunner::new(vec![
             Ok(out("mmcli 1.22.0\n")),
             Ok(out(modem_json)),
             Ok(out(messaging_json)),
+            Ok(out(sim_json)),
         ]);
         let service = ModemService::new_with_runner(runner.clone());
         let status = service
@@ -1078,6 +1209,8 @@ mod service_tests {
             .await;
 
         assert_eq!(status.health.status, HealthLevel::Ok);
+        assert_eq!(status.modem.signal_quality, Some(78));
+        assert_eq!(status.modem.sim_state.as_deref(), Some("ready"));
         assert_eq!(status.messaging.supported_storages, vec!["sm", "me"]);
         assert_eq!(status.messaging.default_storage.as_deref(), Some("me"));
         assert!(!status
@@ -1097,6 +1230,11 @@ mod service_tests {
                     "--modem".to_string(),
                     "/org/freedesktop/ModemManager1/Modem/0".to_string(),
                     "--messaging-status".to_string(),
+                    "--output-json".to_string()
+                ],
+                vec![
+                    "--sim".to_string(),
+                    "0".to_string(),
                     "--output-json".to_string()
                 ],
             ]
