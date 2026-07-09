@@ -27,6 +27,15 @@ import {
 	DialogTitle,
 	DialogTrigger,
 } from "#/components/ui/dialog";
+import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuGroup,
+	DropdownMenuItem,
+	DropdownMenuLabel,
+	DropdownMenuSeparator,
+	DropdownMenuTrigger,
+} from "#/components/ui/dropdown-menu";
 import { Input } from "#/components/ui/input";
 import {
 	Select,
@@ -729,7 +738,7 @@ function ThreadPanel({
 						</Button>
 					)}
 					{conversation && (
-						<ThreadActionsDialog
+						<ThreadActionsDropdown
 							selectionMode={selectionMode}
 							setSelectionMode={setSelectionMode}
 							selectedCount={selectedCount}
@@ -785,7 +794,7 @@ function ThreadPanel({
 	);
 }
 
-function ThreadActionsDialog({
+function ThreadActionsDropdown({
 	selectionMode,
 	setSelectionMode,
 	selectedCount,
@@ -801,8 +810,8 @@ function ThreadActionsDialog({
 	onDeleteSelected: () => void;
 }) {
 	return (
-		<Dialog>
-			<DialogTrigger
+		<DropdownMenu>
+			<DropdownMenuTrigger
 				render={
 					<Button
 						type="button"
@@ -813,53 +822,41 @@ function ThreadActionsDialog({
 				}
 			>
 				<MoreHorizontal />
-			</DialogTrigger>
-			<DialogContent>
-				<DialogHeader>
-					<DialogTitle>Conversation actions</DialogTitle>
-					<DialogDescription>
-						Select messages in this thread before applying bulk actions.
-					</DialogDescription>
-				</DialogHeader>
-				<div className="grid gap-2">
-					<Button
-						type="button"
-						variant={selectionMode ? "secondary" : "outline"}
-						onClick={() => setSelectionMode(!selectionMode)}
-					>
+			</DropdownMenuTrigger>
+			<DropdownMenuContent align="end" sideOffset={8} className="w-60">
+				<DropdownMenuGroup>
+					<DropdownMenuLabel>Conversation actions</DropdownMenuLabel>
+					<DropdownMenuSeparator />
+					<DropdownMenuItem onClick={() => setSelectionMode(!selectionMode)}>
 						<CheckCheck />
 						{selectionMode ? "Stop selecting" : "Select messages"}
-					</Button>
-					<Button
-						type="button"
-						variant="outline"
+					</DropdownMenuItem>
+					<DropdownMenuItem
 						disabled={selectedCount === 0}
 						onClick={onMarkSelectedRead}
 					>
 						<CheckCheck />
 						Mark read ({selectedCount})
-					</Button>
-					<Button
-						type="button"
-						variant="outline"
+					</DropdownMenuItem>
+					<DropdownMenuItem
 						disabled={selectedCount === 0}
 						onClick={onMarkSelectedUnread}
 					>
 						<MessageCircle />
 						Mark unread ({selectedCount})
-					</Button>
-					<Button
-						type="button"
+					</DropdownMenuItem>
+					<DropdownMenuSeparator />
+					<DropdownMenuItem
 						variant="destructive"
 						disabled={selectedCount === 0}
 						onClick={onDeleteSelected}
 					>
 						<Trash2 />
 						Delete selected
-					</Button>
-				</div>
-			</DialogContent>
-		</Dialog>
+					</DropdownMenuItem>
+				</DropdownMenuGroup>
+			</DropdownMenuContent>
+		</DropdownMenu>
 	);
 }
 
