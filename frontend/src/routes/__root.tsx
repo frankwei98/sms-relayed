@@ -53,6 +53,11 @@ function RootComponent() {
 		);
 	}
 
+	const mainClassName =
+		location.pathname === "/"
+			? "flex-1 overflow-hidden p-0 md:p-4"
+			: "flex-1 overflow-auto p-6";
+
 	return (
 		<AuthContext.Provider value={{ auth, setAuth }}>
 			<div className="flex h-screen flex-col">
@@ -67,7 +72,7 @@ function RootComponent() {
 						</Link>
 					</nav>
 				</header>
-				<main className="flex-1 overflow-auto p-6">
+				<main className={mainClassName}>
 					<Outlet />
 				</main>
 				<TanStackDevtools
