@@ -1,3 +1,5 @@
+import dayjs from "dayjs";
+import relativeTime from "dayjs/plugin/relativeTime";
 import {
 	Archive,
 	CheckCheck,
@@ -48,6 +50,9 @@ import { Textarea } from "#/components/ui/textarea";
 import { apiFetch, type ConversationSummary, type Message } from "#/lib/api";
 import { subscribeEvents } from "#/lib/events";
 import { cn } from "#/lib/utils";
+
+dayjs.extend(relativeTime);
+dayjs.locale(navigator.language.toLowerCase());
 
 const ALL_DIRECTIONS = "all-directions";
 const ALL_STATUSES = "all-statuses";
@@ -635,7 +640,9 @@ function ConversationCard({
 								active && "text-primary-foreground/75",
 							)}
 						>
-							{formatCompactTime(last.timestamp)}
+							{active
+								? formatAbsoluteLocalTime(last.timestamp)
+								: formatRelativeTime(last.timestamp)}
 						</span>
 						{conversation.unread_count > 0 && (
 							<Badge
@@ -950,7 +957,7 @@ function MessageThread({
 	return (
 		<div className="mx-auto flex max-w-3xl flex-col gap-2">
 			{messages.map((message) => {
-				const day = formatDay(message.timestamp);
+				const day = formatRelativeDay(message.timestamp);
 				const showDay = day !== lastDay;
 				lastDay = day;
 				return (
@@ -1013,7 +1020,7 @@ function MessageBubble({
 						outbound ? "text-primary-foreground/70" : "text-muted-foreground",
 					)}
 				>
-					<span>{formatCompactTime(message.timestamp)}</span>
+					<span>{formatRelativeTime(message.timestamp)}</span>
 					<span>{message.status}</span>
 					{message.error && (
 						<span
@@ -1074,23 +1081,33 @@ function MessageComposer({
 	);
 }
 
-function formatCompactTime(value: string) {
-	const date = new Date(value);
-	if (Number.isNaN(date.getTime())) return value;
-	return new Intl.DateTimeFormat(undefined, {
-		month: "short",
-		day: "numeric",
-		hour: "2-digit",
-		minute: "2-digit",
-	}).format(date);
+function parseTime(value: string) {
+	const normalized = value.replace(/([+-]\d{2})$/, "$1:00");
+	const time = dayjs(normalized);
+	return time.isValid() ? time : null;
 }
 
-function formatDay(value: string) {
-	const date = new Date(value);
-	if (Number.isNaN(date.getTime())) return value;
+function formatRelativeTime(value: string) {
+	return parseTime(value)?.fromNow() ?? value;
+}
+
+function formatRelativeDay(value: string) {
+	const time = parseTime(value);
+	if (!time) return value;
+	const today = dayjs().startOf("day");
+	const day = time.startOf("day");
+	const dayDiff = today.diff(day, "day");
+	if (dayDiff === 0) return "Today";
+	if (dayDiff === 1) return "Yesterday";
+	if (dayDiff > 1) return `${dayDiff} days ago`;
+	return day.fromNow();
+}
+
+function formatAbsoluteLocalTime(value: string) {
+	const time = parseTime(value);
+	if (!time) return value;
 	return new Intl.DateTimeFormat(undefined, {
-		weekday: "short",
-		month: "short",
-		day: "numeric",
-	}).format(date);
+		dateStyle: "medium",
+		timeStyle: "short",
+	}).format(time.toDate());
 }
