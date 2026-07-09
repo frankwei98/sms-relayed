@@ -666,24 +666,12 @@ fn split_csv(value: &str) -> Vec<String> {
 }
 ```
 
-Modify `src/main.rs` module declarations:
+Modify `src/main.rs` module declarations by inserting only `mod modem;` after `mod message;`. Do not add `mod web;`; `src/web.rs` is legacy code that is not part of the current compiled module list.
 
 ```rust
-mod api;
-mod assets;
-mod cli;
-mod config;
-mod dbus;
-mod events;
-mod forward;
 mod message;
 mod modem;
 mod runtime;
-mod smscode;
-mod storage;
-mod util;
-mod web;
-mod wizard;
 ```
 
 - [ ] **Step 5: Run parser/classifier tests**
@@ -1662,6 +1650,7 @@ pub modem: crate::modem::ModemService,
 Modify `router`:
 
 ```rust
+let sessions = state.sessions.clone();
 let auth_routes = auth::routes();
 
 let protected = Router::new()
@@ -1975,7 +1964,7 @@ export function ModemStatusPanel() {
 					<section className="space-y-2 border-t pt-4">
 						<h3 className="font-medium text-destructive">Danger zone</h3>
 						<Dialog open={resetOpen} onOpenChange={setResetOpen}>
-							<DialogTrigger render={<Button variant="destructive" disabled={busy !== null} />}>
+							<DialogTrigger render={<Button type="button" variant="destructive" disabled={busy !== null} />}>
 								<RotateCcw className="size-4" />
 								Reset modem
 							</DialogTrigger>
