@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Button } from "#/components/ui/button";
 import { Input } from "#/components/ui/input";
 import { type AuthState, apiFetch } from "#/lib/api";
+import { useAuth } from "#/lib/auth";
 
 export const Route = createFileRoute("/login")({
 	component: LoginPage,
@@ -10,6 +11,7 @@ export const Route = createFileRoute("/login")({
 
 function LoginPage() {
 	const navigate = useNavigate();
+	const { setAuth } = useAuth();
 	const [password, setPassword] = useState("");
 	const [error, setError] = useState("");
 
@@ -22,6 +24,7 @@ function LoginPage() {
 				body: JSON.stringify({ password }),
 			});
 			if (res.authenticated) {
+				setAuth(res);
 				navigate({ to: "/" });
 			}
 		} catch (err: unknown) {

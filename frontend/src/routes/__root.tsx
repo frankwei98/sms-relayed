@@ -9,6 +9,7 @@ import {
 import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools";
 import { useEffect, useState } from "react";
 import { type AuthState, apiFetch } from "#/lib/api";
+import { AuthContext } from "#/lib/auth";
 
 import "../styles.css";
 
@@ -37,7 +38,7 @@ function RootComponent() {
 
 	if (location.pathname === "/login") {
 		return (
-			<>
+			<AuthContext.Provider value={{ auth, setAuth }}>
 				<Outlet />
 				<TanStackDevtools
 					config={{ position: "bottom-right" }}
@@ -48,35 +49,37 @@ function RootComponent() {
 						},
 					]}
 				/>
-			</>
+			</AuthContext.Provider>
 		);
 	}
 
 	return (
-		<div className="flex h-screen flex-col">
-			<header className="flex items-center gap-4 border-b px-6 py-3">
-				<h1 className="text-lg font-semibold">SMS Relayed</h1>
-				<nav className="flex gap-4">
-					<Link to="/" className="text-sm hover:underline">
-						SMS
-					</Link>
-					<Link to="/config" className="text-sm hover:underline">
-						Config
-					</Link>
-				</nav>
-			</header>
-			<main className="flex-1 overflow-auto p-6">
-				<Outlet />
-			</main>
-			<TanStackDevtools
-				config={{ position: "bottom-right" }}
-				plugins={[
-					{
-						name: "TanStack Router",
-						render: <TanStackRouterDevtoolsPanel />,
-					},
-				]}
-			/>
-		</div>
+		<AuthContext.Provider value={{ auth, setAuth }}>
+			<div className="flex h-screen flex-col">
+				<header className="flex items-center gap-4 border-b px-6 py-3">
+					<h1 className="text-lg font-semibold">SMS Relayed</h1>
+					<nav className="flex gap-4">
+						<Link to="/" className="text-sm hover:underline">
+							SMS
+						</Link>
+						<Link to="/config" className="text-sm hover:underline">
+							Config
+						</Link>
+					</nav>
+				</header>
+				<main className="flex-1 overflow-auto p-6">
+					<Outlet />
+				</main>
+				<TanStackDevtools
+					config={{ position: "bottom-right" }}
+					plugins={[
+						{
+							name: "TanStack Router",
+							render: <TanStackRouterDevtoolsPanel />,
+						},
+					]}
+				/>
+			</div>
+		</AuthContext.Provider>
 	);
 }
