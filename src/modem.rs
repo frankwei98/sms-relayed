@@ -180,18 +180,59 @@ pub fn parse_modem_json(
         .unwrap_or_default();
     status.messaging.supported_storages = modem
         .pointer("/messaging/supported-storages")
-        .and_then(|v| v.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|v| v.as_str().map(ToString::to_string))
-                .collect()
-        })
+        .map(storage_values)
         .unwrap_or_default();
-    status.messaging.default_storage = get_str(modem, &["messaging", "default-storage"]);
+    status.messaging.default_storage = get_str(modem, &["messaging", "default-storage"])
+        .or_else(|| get_str(modem, &["messaging", "default-storages"]));
     status.messaging.available = !status.messaging.supported_storages.is_empty();
     classify(&mut status);
     Ok(status)
+}
+
+pub fn parse_messaging_status_json(raw: &str) -> Result<MessagingDetails, ModemError> {
+    let value: Value = serde_json::from_str(raw)
+        .map_err(|e| ModemError::new("mmcli_parse_failed", e.to_string()))?;
+    let messaging = value
+        .pointer("/modem/messaging")
+        .ok_or_else(|| ModemError::new("mmcli_parse_failed", "missing messaging object"))?;
+    let supported_storages = messaging
+        .get("supported-storages")
+        .map(storage_values)
+        .unwrap_or_default();
+    let default_storage = get_str(messaging, &["default-storage"])
+        .or_else(|| get_str(messaging, &["default-storages"]));
+
+    Ok(MessagingDetails {
+        available: !supported_storages.is_empty(),
+        supported_storages,
+        default_storage,
+    })
+}
+
+pub fn parse_messaging_status_text(raw: &str) -> MessagingDetails {
+    let mut details = MessagingDetails {
+        available: false,
+        supported_storages: Vec::new(),
+        default_storage: None,
+    };
+
+    for line in raw.lines() {
+        let Some((_, right)) = line.split_once('|') else {
+            continue;
+        };
+        let right = right.trim();
+        if let Some(value) = right.strip_prefix("supported storages:") {
+            details.supported_storages = split_csv(value);
+        } else if let Some(value) = right
+            .strip_prefix("default storage:")
+            .or_else(|| right.strip_prefix("default storages:"))
+        {
+            details.default_storage = Some(value.trim().to_string());
+        }
+    }
+
+    details.available = !details.supported_storages.is_empty();
+    details
 }
 
 pub fn parse_modem_text(
@@ -285,10 +326,8 @@ pub fn classify(status: &mut ModemStatus) {
             status.modem.state.as_deref(),
             Some("registered" | "connected")
         );
-        if usable
-            && status.modem.enabled != Some(false)
-            && status.modem.sim_state.as_deref() == Some("ready")
-            && status.messaging.available
+        let sim_usable = matches!(status.modem.sim_state.as_deref(), None | Some("ready"));
+        if usable && status.modem.enabled != Some(false) && sim_usable && status.messaging.available
         {
             status.health.status = HealthLevel::Ok;
         } else {
@@ -346,6 +385,16 @@ fn get_str(value: &Value, path: &[&str]) -> Option<String> {
         current = current.get(*key)?;
     }
     current.as_str().map(ToString::to_string)
+}
+
+fn storage_values(value: &Value) -> Vec<String> {
+    if let Some(items) = value.as_array() {
+        return items
+            .iter()
+            .filter_map(|v| v.as_str().map(ToString::to_string))
+            .collect();
+    }
+    value.as_str().map(split_csv).unwrap_or_default()
 }
 
 fn push_reason(reasons: &mut Vec<String>, reason: &str) {
@@ -500,14 +549,17 @@ impl ModemService {
                     } else {
                         parse_modem_text(configured_path, path_id(configured_path), &output.stdout)
                     };
-                    return parsed
-                        .map(|mut status| {
+                    return match parsed {
+                        Ok(mut status) => {
                             status.tool = tool.clone();
+                            self.enrich_messaging_status(&mut status, configured_path, use_json)
+                                .await;
                             status
-                        })
-                        .unwrap_or_else(|err| {
+                        }
+                        Err(err) => {
                             error_status(configured_path, tool, err.code(), err.to_string())
-                        });
+                        }
+                    };
                 }
                 Ok(output) => {
                     if use_json && is_unknown_option(&output.stderr) && attempt == 0 {
@@ -527,18 +579,36 @@ impl ModemService {
                             match self.runner.run(&retry_args, MMCLI_TIMEOUT).await {
                                 Ok(retry) if retry.status_success => {
                                     let parsed = if use_json {
-                                        parse_modem_json(configured_path, Some(id), &retry.stdout)
+                                        parse_modem_json(
+                                            configured_path,
+                                            Some(id.clone()),
+                                            &retry.stdout,
+                                        )
                                     } else {
-                                        parse_modem_text(configured_path, Some(id), &retry.stdout)
+                                        parse_modem_text(
+                                            configured_path,
+                                            Some(id.clone()),
+                                            &retry.stdout,
+                                        )
                                     };
-                                    parsed.unwrap_or_else(|err| {
-                                        error_status(
+                                    match parsed {
+                                        Ok(mut status) => {
+                                            status.tool = tool.clone();
+                                            self.enrich_messaging_status(
+                                                &mut status,
+                                                id.as_str(),
+                                                use_json,
+                                            )
+                                            .await;
+                                            status
+                                        }
+                                        Err(err) => error_status(
                                             configured_path,
                                             tool,
                                             err.code(),
                                             err.to_string(),
-                                        )
-                                    })
+                                        ),
+                                    }
                                 }
                                 _ => error_status(
                                     configured_path,
@@ -577,6 +647,51 @@ impl ModemService {
             "modem_status_failed",
             "unexpected status loop exit".to_string(),
         )
+    }
+
+    async fn enrich_messaging_status(
+        &self,
+        status: &mut ModemStatus,
+        target: &str,
+        use_json: bool,
+    ) {
+        if status.messaging.available {
+            return;
+        }
+
+        let args = if use_json {
+            vec!["--modem", target, "--messaging-status", "--output-json"]
+        } else {
+            vec!["--modem", target, "--messaging-status"]
+        };
+        let Ok(output) = self.runner.run(&args, MMCLI_TIMEOUT).await else {
+            return;
+        };
+        if !output.status_success {
+            return;
+        }
+
+        let details = if use_json {
+            parse_messaging_status_json(&output.stdout).ok()
+        } else {
+            Some(parse_messaging_status_text(&output.stdout))
+        };
+        let Some(details) = details else {
+            return;
+        };
+        if !details.available {
+            return;
+        }
+
+        status.messaging = details;
+        status
+            .health
+            .reasons
+            .retain(|reason| reason != "messaging_unavailable");
+        if status.health.reasons.is_empty() {
+            status.health.status = HealthLevel::Unknown;
+            classify(status);
+        }
     }
 
     pub async fn public_health(&self, configured_path: &str) -> PublicModemHealth {
@@ -928,6 +1043,62 @@ mod service_tests {
                     "/org/freedesktop/ModemManager1/Modem/0".to_string(),
                     "--output-json".to_string()
                 ]
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn status_uses_messaging_status_when_modem_json_omits_messaging() {
+        let modem_json = r#"{
+          "modem": {
+            "generic": {
+              "dbus-path": "/org/freedesktop/ModemManager1/Modem/0",
+              "state": "connected",
+              "access-technologies": ["lte"],
+              "signal-quality": { "value": 78, "recent": true }
+            }
+          }
+        }"#;
+        let messaging_json = r#"{
+          "modem": {
+            "messaging": {
+              "supported-storages": "sm, me",
+              "default-storages": "me"
+            }
+          }
+        }"#;
+        let runner = FakeRunner::new(vec![
+            Ok(out("mmcli 1.22.0\n")),
+            Ok(out(modem_json)),
+            Ok(out(messaging_json)),
+        ]);
+        let service = ModemService::new_with_runner(runner.clone());
+        let status = service
+            .status("/org/freedesktop/ModemManager1/Modem/0")
+            .await;
+
+        assert_eq!(status.health.status, HealthLevel::Ok);
+        assert_eq!(status.messaging.supported_storages, vec!["sm", "me"]);
+        assert_eq!(status.messaging.default_storage.as_deref(), Some("me"));
+        assert!(!status
+            .health
+            .reasons
+            .contains(&"messaging_unavailable".to_string()));
+        assert_eq!(
+            runner.calls(),
+            vec![
+                vec!["--version".to_string()],
+                vec![
+                    "--modem".to_string(),
+                    "/org/freedesktop/ModemManager1/Modem/0".to_string(),
+                    "--output-json".to_string()
+                ],
+                vec![
+                    "--modem".to_string(),
+                    "/org/freedesktop/ModemManager1/Modem/0".to_string(),
+                    "--messaging-status".to_string(),
+                    "--output-json".to_string()
+                ],
             ]
         );
     }
