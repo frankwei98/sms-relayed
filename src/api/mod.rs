@@ -1,6 +1,8 @@
 pub mod auth;
 pub mod config;
+pub mod health;
 pub mod messages;
+pub mod modem;
 pub mod service;
 
 use std::path::PathBuf;
@@ -26,6 +28,7 @@ pub struct ApiState {
     pub events: EventBus,
     pub started_at: Instant,
     pub sessions: auth::SessionStore,
+    pub modem: crate::modem::ModemService,
 }
 
 #[derive(Debug)]
@@ -88,10 +91,13 @@ pub type ApiResult<T> = Result<T, ApiError>;
 
 pub fn router(state: ApiState) -> Router {
     let sessions = state.sessions.clone();
+    let auth_routes = auth::routes();
+
     let protected = Router::new()
         .merge(messages::routes())
         .merge(config::routes())
         .merge(service::routes())
+        .merge(modem::routes())
         .layer(middleware::from_fn(
             move |req: axum::extract::Request, next: middleware::Next| {
                 let sessions = sessions.clone();
@@ -105,9 +111,8 @@ pub fn router(state: ApiState) -> Router {
             },
         ));
 
-    let auth_routes = auth::routes();
-
     Router::new()
+        .merge(health::routes())
         .merge(auth_routes)
         .merge(protected)
         .with_state(state)
@@ -186,5 +191,115 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("api.password"));
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::time::Duration;
+
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode};
+    use tower::ServiceExt;
+
+    use super::auth::SessionStore;
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct ApiTestRunner;
+
+    impl crate::modem::MmcliRunner for ApiTestRunner {
+        fn run<'a>(
+            &'a self,
+            args: &'a [&'a str],
+            _timeout: Duration,
+        ) -> Pin<Box<dyn Future<Output = Result<crate::modem::MmcliOutput, crate::modem::ModemError>> + Send + 'a>> {
+            Box::pin(async move {
+                if args == &["--version"] {
+                    return Ok(crate::modem::MmcliOutput {
+                        stdout: "mmcli 1.22.0\n".to_string(),
+                        stderr: String::new(),
+                        status_success: true,
+                    });
+                }
+                Ok(crate::modem::MmcliOutput {
+                    stdout: include_str!("../../tests/fixtures/mmcli/healthy.json").to_string(),
+                    stderr: String::new(),
+                    status_success: true,
+                })
+            })
+        }
+    }
+
+    fn test_state() -> ApiState {
+        let mut cfg = AppConfig::default();
+        cfg.api.enabled = true;
+        cfg.api.password = "secret".to_string();
+        ApiState {
+            config: std::sync::Arc::new(cfg),
+            config_path: std::path::PathBuf::from("/tmp/sms-relayed-test.toml"),
+            store: crate::storage::MessageStore::open_in_memory().unwrap(),
+            events: crate::events::EventBus::new(),
+            started_at: std::time::Instant::now(),
+            sessions: SessionStore::default(),
+            modem: crate::modem::ModemService::new_with_runner(ApiTestRunner),
+        }
+    }
+
+    #[tokio::test]
+    async fn health_route_is_public() {
+        let app = router(test_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn modem_status_route_requires_session() {
+        let app = router(test_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/modem/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn reset_rejects_missing_confirmation() {
+        let state = test_state();
+        let token = state.sessions.create_session();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/modem/reset")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

@@ -38,3 +38,6 @@ rust-embed = { version = "8", features = ["axum"] }
 mime_guess = "2"
 csv = "1"
 tokio-stream = { version = "0.1", features = ["sync"] }
+
+[dev-dependencies]
+tower = "0.5"

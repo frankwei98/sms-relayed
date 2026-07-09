@@ -54,6 +54,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
             events: events.clone(),
             started_at: Instant::now(),
             sessions: SessionStore::default(),
+            modem: crate::modem::ModemService::new(),
         };
         tokio::select! {
             result = crate::api::serve(api_state) => result,

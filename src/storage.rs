@@ -274,6 +274,12 @@ impl MessageStore {
         Ok(out)
     }
 
+    pub fn health_check(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT 1", [], |_| Ok(()))?;
+        Ok(())
+    }
+
     pub fn export_messages_csv(&self, filter: &MessageFilter) -> Result<String> {
         let messages = self.export_messages(filter)?;
         let mut writer = csv::WriterBuilder::new()
