@@ -45,7 +45,12 @@ This route is public and does not require login. It returns compact service heal
 }
 ```
 
-`service.status` reflects SmsRelayed itself: the process is running, Axum can serve requests, and the message database can be opened or queried.
+`service.status` reflects SmsRelayed itself. Because reaching this handler already proves Axum can serve the request, the active service check is the message database. Values are:
+
+- `ok`: the health handler can open or query the configured message database.
+- `error`: the database check fails.
+
+Do not add `degraded` or `unknown` to `service.status` until there is a concrete non-database service check that needs those states. Keep the database check cheap, such as opening the configured store and performing a minimal query.
 
 `modem.status` values:
 
@@ -56,7 +61,7 @@ This route is public and does not require login. It returns compact service heal
 
 The public endpoint must not expose raw `mmcli` output, operator names, SIM identifiers, phone numbers, SMS bodies, object paths, modem ids, signal values, or network-layer details. Public `reason` must be an enum-like code such as `mmcli_missing`, `modem_path_unresolved`, `sim_not_ready`, or `messaging_unavailable`, not free-form command output.
 
-Implement a short cache for the modem portion of `/api/health` so frequent external health checks do not spawn `mmcli` on every request. The default cache TTL should be 5 seconds. If a future configuration knob is added, it should live under the API configuration area.
+Implement a short cache for the modem portion of `/api/health` so frequent external health checks do not spawn `mmcli` on every request. The default cache TTL should be 5 seconds. If a future configuration knob is added, it should live under the API configuration area. Authenticated `GET /api/modem/status` should not use the public health cache; each request should run a fresh status check so the `Refresh` button is meaningful.
 
 ### Authenticated Modem Status
 
@@ -148,11 +153,11 @@ Reset means the ModemManager modem reset operation, equivalent to `mmcli --reset
 
 All `POST /api/modem/*` routes must enforce API-layer hardening:
 
-- Require `Content-Type: application/json`.
+- Require `Content-Type: application/json` for modem action routes. This requirement is scoped to `/api/modem/*` and should not be introduced as a global middleware for existing JSON-less action routes such as service restart.
 - Require a valid existing web session.
-- Check `Origin` or `Referer` when present and reject cross-origin requests that do not match the request host.
-- Use a per-process action lock so enable, disable, and reset cannot run concurrently.
-- Rate-limit reset per session to once per 60 seconds.
+- Check `Origin` or `Referer` when present and reject cross-origin requests whose origin host does not match the incoming `Host` or trusted forwarded host. Do not add a new configured API origin field for this feature.
+- Use a per-process action lock so enable, disable, and reset cannot run concurrently. If another action is already running, reject the new request with `409 conflict` and code `action_in_progress`; do not queue modem actions.
+- Rate-limit reset per session to once per 60 seconds. This reset rate limit must not block enable or disable actions.
 
 These checks do not replace the frontend confirmation dialog. They prevent accidental or cross-site destructive requests from bypassing UI intent.
 
@@ -181,6 +186,7 @@ The modem module should lazily detect and cache tool capabilities for the proces
 
 - Run `mmcli --version` or equivalent once to populate `tool.version_raw`.
 - Detect whether JSON output is supported.
+- If capability detection times out or fails before proving `mmcli` is callable, report `tool.available = false`, `tool.supports_json = false`, and modem status `unknown` with reason `mmcli_probe_failed`.
 - If JSON is supported, prefer JSON for full status parsing.
 - If JSON is not supported, use a deliberately limited text fallback for core fields only: presence, enabled/state, SIM readiness when visible, signal quality when visible, and messaging availability when visible.
 - Fields unavailable in text fallback return `null` and add `text_fallback_limited` to `health.reasons`.
@@ -205,7 +211,7 @@ Command behavior:
 
 - Use a default 5 second timeout for status commands and action commands.
 - Treat timeout as `error` with reason `mmcli_timeout`.
-- Keep one action at a time with an in-process lock.
+- Keep one action at a time with an in-process lock; reject concurrent actions with `409 conflict` rather than queueing them.
 - Use accepted semantics for successful action submission; status changes are observed by later polling.
 
 Logging rules:
@@ -282,7 +288,7 @@ Backend tests:
 - Unit tests for path-to-index mapping from `mmcli -L`, including multiple modems, no match, and stale configured path.
 - Unit tests for health classification using the explicit table.
 - Unit tests for timeout handling through the injected runner.
-- Unit tests for concurrent action handling: a second action while one is running should be rejected or queued according to the implementation, with the chosen behavior documented in the test name.
+- Unit tests for concurrent action handling: a second action while one is running is rejected with `409 conflict` and code `action_in_progress`.
 - Unit test that reset without `{ "confirm": true }` is rejected.
 - Unit tests for reset rate limiting.
 - API route tests that prove `/api/health` is public while `/api/modem/*` routes are protected.
