@@ -67,6 +67,9 @@ function RootComponent() {
 						<Link to="/" className="text-sm hover:underline">
 							SMS
 						</Link>
+						<Link to="/modem" className="text-sm hover:underline">
+							Modem
+						</Link>
 						<Link to="/config" className="text-sm hover:underline">
 							Config
 						</Link>

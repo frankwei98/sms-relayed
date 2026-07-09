@@ -9,10 +9,16 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as ModemRouteImport } from './routes/modem'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as ConfigRouteImport } from './routes/config'
 import { Route as IndexRouteImport } from './routes/index'
 
+const ModemRoute = ModemRouteImport.update({
+  id: '/modem',
+  path: '/modem',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
@@ -33,34 +39,45 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/config': typeof ConfigRoute
   '/login': typeof LoginRoute
+  '/modem': typeof ModemRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/config': typeof ConfigRoute
   '/login': typeof LoginRoute
+  '/modem': typeof ModemRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/config': typeof ConfigRoute
   '/login': typeof LoginRoute
+  '/modem': typeof ModemRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/config' | '/login'
+  fullPaths: '/' | '/config' | '/login' | '/modem'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/config' | '/login'
-  id: '__root__' | '/' | '/config' | '/login'
+  to: '/' | '/config' | '/login' | '/modem'
+  id: '__root__' | '/' | '/config' | '/login' | '/modem'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ConfigRoute: typeof ConfigRoute
   LoginRoute: typeof LoginRoute
+  ModemRoute: typeof ModemRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/modem': {
+      id: '/modem'
+      path: '/modem'
+      fullPath: '/modem'
+      preLoaderRoute: typeof ModemRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/login': {
       id: '/login'
       path: '/login'
@@ -89,6 +106,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ConfigRoute: ConfigRoute,
   LoginRoute: LoginRoute,
+  ModemRoute: ModemRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
