@@ -480,79 +480,103 @@ impl ModemService {
     }
 
     pub async fn status(&self, configured_path: &str) -> ModemStatus {
-        let tool = self.detect_capabilities().await;
+        let mut tool = self.detect_capabilities().await;
         if !tool.available {
             return unavailable_status(configured_path, tool, "mmcli_probe_failed");
         }
 
-        let args = if tool.supports_json {
-            vec!["--modem", configured_path, "--output-json"]
-        } else {
-            vec!["--modem", configured_path]
-        };
+        for attempt in 0..2 {
+            let use_json = tool.supports_json;
+            let args = if use_json {
+                vec!["--modem", configured_path, "--output-json"]
+            } else {
+                vec!["--modem", configured_path]
+            };
 
-        match self.runner.run(&args, MMCLI_TIMEOUT).await {
-            Ok(output) if output.status_success => {
-                let parsed = if tool.supports_json {
-                    parse_modem_json(configured_path, path_id(configured_path), &output.stdout)
-                } else {
-                    parse_modem_text(configured_path, path_id(configured_path), &output.stdout)
-                };
-                parsed
-                    .map(|mut status| {
-                        status.tool = tool.clone();
-                        status
-                    })
-                    .unwrap_or_else(|err| {
-                        error_status(configured_path, tool, err.code(), err.to_string())
-                    })
-            }
-            Ok(output) => {
-                let resolved = self.resolve_id(configured_path).await;
-                match resolved {
-                    Ok(id) => {
-                        let retry_args = if tool.supports_json {
-                            vec!["--modem", id.as_str(), "--output-json"]
-                        } else {
-                            vec!["--modem", id.as_str()]
-                        };
-                        match self.runner.run(&retry_args, MMCLI_TIMEOUT).await {
-                            Ok(retry) if retry.status_success => {
-                                let parsed = if tool.supports_json {
-                                    parse_modem_json(configured_path, Some(id), &retry.stdout)
-                                } else {
-                                    parse_modem_text(configured_path, Some(id), &retry.stdout)
-                                };
-                                parsed.unwrap_or_else(|err| {
-                                    error_status(configured_path, tool, err.code(), err.to_string())
-                                })
-                            }
-                            _ => error_status(
-                                configured_path,
-                                tool,
-                                "modem_path_unresolved",
-                                output.stderr,
-                            ),
-                        }
-                    }
-                    Err(err) => {
-                        let mut status =
-                            error_status(configured_path, tool, err.code(), err.to_string());
-                        if let Ok(candidate) = self.path_drift_candidate(configured_path).await {
-                            status.health.status = HealthLevel::Degraded;
-                            status.health.reasons.clear();
+            match self.runner.run(&args, MMCLI_TIMEOUT).await {
+                Ok(output) if output.status_success => {
+                    let parsed = if use_json {
+                        parse_modem_json(configured_path, path_id(configured_path), &output.stdout)
+                    } else {
+                        parse_modem_text(configured_path, path_id(configured_path), &output.stdout)
+                    };
+                    return parsed
+                        .map(|mut status| {
+                            status.tool = tool.clone();
                             status
-                                .health
-                                .reasons
-                                .push("modem_path_drift_candidate".to_string());
-                            status.diagnostics.path_drift_candidate = Some(candidate);
-                        }
-                        status
+                        })
+                        .unwrap_or_else(|err| {
+                            error_status(configured_path, tool, err.code(), err.to_string())
+                        });
+                }
+                Ok(output) => {
+                    if use_json && is_unknown_option(&output.stderr) && attempt == 0 {
+                        tool.supports_json = false;
+                        *self.capabilities.lock().unwrap() = Some(tool.clone());
+                        continue;
                     }
+
+                    let resolved = self.resolve_id(configured_path).await;
+                    return match resolved {
+                        Ok(id) => {
+                            let retry_args = if use_json {
+                                vec!["--modem", id.as_str(), "--output-json"]
+                            } else {
+                                vec!["--modem", id.as_str()]
+                            };
+                            match self.runner.run(&retry_args, MMCLI_TIMEOUT).await {
+                                Ok(retry) if retry.status_success => {
+                                    let parsed = if use_json {
+                                        parse_modem_json(configured_path, Some(id), &retry.stdout)
+                                    } else {
+                                        parse_modem_text(configured_path, Some(id), &retry.stdout)
+                                    };
+                                    parsed.unwrap_or_else(|err| {
+                                        error_status(
+                                            configured_path,
+                                            tool,
+                                            err.code(),
+                                            err.to_string(),
+                                        )
+                                    })
+                                }
+                                _ => error_status(
+                                    configured_path,
+                                    tool,
+                                    "modem_path_unresolved",
+                                    output.stderr,
+                                ),
+                            }
+                        }
+                        Err(err) => {
+                            let mut status =
+                                error_status(configured_path, tool, err.code(), err.to_string());
+                            if let Ok(candidate) = self.path_drift_candidate(configured_path).await
+                            {
+                                status.health.status = HealthLevel::Degraded;
+                                status.health.reasons.clear();
+                                status
+                                    .health
+                                    .reasons
+                                    .push("modem_path_drift_candidate".to_string());
+                                status.diagnostics.path_drift_candidate = Some(candidate);
+                            }
+                            status
+                        }
+                    };
+                }
+                Err(err) => {
+                    return error_status(configured_path, tool, err.code(), err.to_string())
                 }
             }
-            Err(err) => error_status(configured_path, tool, err.code(), err.to_string()),
         }
+
+        error_status(
+            configured_path,
+            tool,
+            "modem_status_failed",
+            "unexpected status loop exit".to_string(),
+        )
     }
 
     pub async fn public_health(&self, configured_path: &str) -> PublicModemHealth {
@@ -705,6 +729,13 @@ fn error_status(configured_path: &str, tool: ToolInfo, code: &str, message: Stri
 
 fn path_id(path: &str) -> Option<String> {
     path.rsplit("/Modem/").next().map(ToString::to_string)
+}
+
+fn is_unknown_option(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("unknown option")
+        || lower.contains("unrecognized option")
+        || lower.contains("unknown long option")
 }
 
 fn short_hash(value: &str) -> String {
@@ -1019,5 +1050,48 @@ mod service_tests {
         assert_eq!(first.status, HealthLevel::Ok);
         assert_eq!(second.status, HealthLevel::Ok);
         assert_eq!(runner.calls().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn status_falls_back_to_text_when_json_unsupported() {
+        let runner = FakeRunner::new(vec![
+            Ok(out("mmcli 1.20.0\n")),
+            Ok(MmcliOutput {
+                stdout: String::new(),
+                stderr: "error: unknown option '--output-json'\n".to_string(),
+                status_success: false,
+            }),
+            Ok(out(include_str!(
+                "../tests/fixtures/mmcli/text-registered.txt"
+            ))),
+        ]);
+        let service = ModemService::new_with_runner(runner.clone());
+        let status = service
+            .status("/org/freedesktop/ModemManager1/Modem/0")
+            .await;
+
+        assert!(!status.tool.supports_json);
+        assert_eq!(status.modem.state.as_deref(), Some("registered"));
+        assert_eq!(status.modem.sim_state.as_deref(), Some("ready"));
+        assert_eq!(status.modem.signal_quality, Some(78));
+        assert!(status
+            .health
+            .reasons
+            .contains(&"text_fallback_limited".to_string()));
+        assert_eq!(
+            runner.calls(),
+            vec![
+                vec!["--version".to_string()],
+                vec![
+                    "--modem".to_string(),
+                    "/org/freedesktop/ModemManager1/Modem/0".to_string(),
+                    "--output-json".to_string()
+                ],
+                vec![
+                    "--modem".to_string(),
+                    "/org/freedesktop/ModemManager1/Modem/0".to_string()
+                ],
+            ]
+        );
     }
 }
