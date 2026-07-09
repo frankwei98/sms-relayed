@@ -1,0 +1,2 @@
+/org/freedesktop/ModemManager1/Modem/0 [Quectel] EC25
+/org/freedesktop/ModemManager1/Modem/3 [Fibocom] FM350

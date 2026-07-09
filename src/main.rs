@@ -6,6 +6,7 @@ mod dbus;
 mod events;
 mod forward;
 mod message;
+mod modem;
 mod runtime;
 mod smscode;
 mod storage;

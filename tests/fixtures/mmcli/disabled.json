@@ -1,0 +1,13 @@
+{
+  "modem": {
+    "generic": {
+      "dbus-path": "/org/freedesktop/ModemManager1/Modem/0",
+      "state": "disabled",
+      "power-state": "off",
+      "access-technologies": [],
+      "signal-quality": { "value": 0, "recent": false }
+    },
+    "sim": { "state": "ready" },
+    "messaging": { "supported-storages": ["sm"], "default-storage": "sm" }
+  }
+}

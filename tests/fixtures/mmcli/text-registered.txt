@@ -1,0 +1,14 @@
+  --------------------------------
+  General  |                 path: /org/freedesktop/ModemManager1/Modem/0
+           |                state: registered
+           |          power state: on
+           |    access techologies: lte
+  --------------------------------
+  3GPP     |        operator name: CHN-UNICOM
+  --------------------------------
+  SIM      |                state: ready
+  --------------------------------
+  Messaging | supported storages: sm, me
+            |    default storage: sm
+  --------------------------------
+  Signal   |      quality: 78% (recent)

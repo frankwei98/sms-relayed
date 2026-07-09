@@ -1,0 +1,22 @@
+{
+  "modem": {
+    "generic": {
+      "dbus-path": "/org/freedesktop/ModemManager1/Modem/0",
+      "state": "registered",
+      "power-state": "on",
+      "access-technologies": ["lte"],
+      "signal-quality": { "value": 78, "recent": true }
+    },
+    "3gpp": {
+      "operator-name": "CHN-UNICOM",
+      "registration-state": "home"
+    },
+    "sim": {
+      "state": "ready"
+    },
+    "messaging": {
+      "supported-storages": ["sm", "me"],
+      "default-storage": "sm"
+    }
+  }
+}
