@@ -215,7 +215,13 @@ mod route_tests {
             &'a self,
             args: &'a [&'a str],
             _timeout: Duration,
-        ) -> Pin<Box<dyn Future<Output = Result<crate::modem::MmcliOutput, crate::modem::ModemError>> + Send + 'a>> {
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<crate::modem::MmcliOutput, crate::modem::ModemError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
             Box::pin(async move {
                 if args == &["--version"] {
                     return Ok(crate::modem::MmcliOutput {

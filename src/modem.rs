@@ -83,7 +83,10 @@ pub struct ModemError {
 
 impl ModemError {
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self {
+            code,
+            message: message.into(),
+        }
     }
 
     pub fn code(&self) -> &'static str {
@@ -198,7 +201,10 @@ pub fn parse_modem_text(
 ) -> Result<ModemStatus, ModemError> {
     let mut status = base_status(configured_path, id);
     status.tool.supports_json = false;
-    status.health.reasons.push("text_fallback_limited".to_string());
+    status
+        .health
+        .reasons
+        .push("text_fallback_limited".to_string());
     let mut section = "";
 
     for line in raw.lines() {
@@ -275,7 +281,10 @@ pub fn classify(status: &mut ModemStatus) {
         }
     }
     if status.health.status == HealthLevel::Unknown {
-        let usable = matches!(status.modem.state.as_deref(), Some("registered" | "connected"));
+        let usable = matches!(
+            status.modem.state.as_deref(),
+            Some("registered" | "connected")
+        );
         if usable
             && status.modem.enabled != Some(false)
             && status.modem.sim_state.as_deref() == Some("ready")
@@ -367,7 +376,9 @@ pub trait MmcliRunner: Send + Sync {
         &'a self,
         args: &'a [&'a str],
         timeout: std::time::Duration,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<MmcliOutput, ModemError>> + Send + 'a>>;
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<MmcliOutput, ModemError>> + Send + 'a>,
+    >;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -413,7 +424,10 @@ impl MmcliRunner for RealMmcliRunner {
                 .map_err(|e| ModemError::new("mmcli_probe_failed", e.to_string()))?;
             Ok(MmcliOutput {
                 stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).chars().take(300).collect(),
+                stderr: String::from_utf8_lossy(&output.stderr)
+                    .chars()
+                    .take(300)
+                    .collect(),
                 status_success: output.status.success(),
             })
         })
@@ -489,7 +503,9 @@ impl ModemService {
                         status.tool = tool.clone();
                         status
                     })
-                    .unwrap_or_else(|err| error_status(configured_path, tool, err.code(), err.to_string()))
+                    .unwrap_or_else(|err| {
+                        error_status(configured_path, tool, err.code(), err.to_string())
+                    })
             }
             Ok(output) => {
                 let resolved = self.resolve_id(configured_path).await;
@@ -520,7 +536,8 @@ impl ModemService {
                         }
                     }
                     Err(err) => {
-                        let mut status = error_status(configured_path, tool, err.code(), err.to_string());
+                        let mut status =
+                            error_status(configured_path, tool, err.code(), err.to_string());
                         if let Ok(candidate) = self.path_drift_candidate(configured_path).await {
                             status.health.status = HealthLevel::Degraded;
                             status.health.reasons.clear();
@@ -563,7 +580,10 @@ impl ModemService {
         action: ModemAction,
     ) -> Result<ActionResponse, ModemError> {
         let Ok(_guard) = self.action_lock.try_lock() else {
-            return Err(ModemError::new("action_in_progress", "another modem action is running"));
+            return Err(ModemError::new(
+                "action_in_progress",
+                "another modem action is running",
+            ));
         };
         if matches!(action, ModemAction::Reset) {
             self.can_reset(session_token).await?;
@@ -578,8 +598,15 @@ impl ModemService {
         if !output.status_success {
             return Err(ModemError::new("modem_action_failed", output.stderr));
         }
-        log::info!("modem action={} session={} result=accepted", action.name(), short_hash(session_token));
-        Ok(ActionResponse { accepted: true, action: action.name() })
+        log::info!(
+            "modem action={} session={} result=accepted",
+            action.name(),
+            short_hash(session_token)
+        );
+        Ok(ActionResponse {
+            accepted: true,
+            action: action.name(),
+        })
     }
 
     pub async fn can_reset(&self, session_token: &str) -> Result<(), ModemError> {
@@ -588,7 +615,10 @@ impl ModemService {
         guard.retain(|_, last| last.elapsed() < RESET_RATE_LIMIT);
         if let Some(last) = guard.get(&key) {
             if last.elapsed() < RESET_RATE_LIMIT {
-                return Err(ModemError::new("reset_rate_limited", "reset is rate limited"));
+                return Err(ModemError::new(
+                    "reset_rate_limited",
+                    "reset is rate limited",
+                ));
             }
         }
         guard.insert(key, Instant::now());
@@ -617,7 +647,11 @@ impl ModemService {
         tool
     }
 
-    async fn resolve_target(&self, configured_path: &str, _tool: &ToolInfo) -> Result<String, ModemError> {
+    async fn resolve_target(
+        &self,
+        configured_path: &str,
+        _tool: &ToolInfo,
+    ) -> Result<String, ModemError> {
         if self
             .runner
             .run(&["--modem", configured_path], MMCLI_TIMEOUT)
@@ -719,7 +753,10 @@ mod tests {
 
         assert_eq!(status.health.status, HealthLevel::Degraded);
         assert_eq!(status.modem.enabled, Some(false));
-        assert!(status.health.reasons.contains(&"modem_disabled".to_string()));
+        assert!(status
+            .health
+            .reasons
+            .contains(&"modem_disabled".to_string()));
     }
 
     #[test]
@@ -729,7 +766,10 @@ mod tests {
 
         assert_eq!(status.health.status, HealthLevel::Degraded);
         assert!(!status.messaging.available);
-        assert!(status.health.reasons.contains(&"messaging_unavailable".to_string()));
+        assert!(status
+            .health
+            .reasons
+            .contains(&"messaging_unavailable".to_string()));
     }
 
     #[test]
@@ -741,7 +781,10 @@ mod tests {
         assert_eq!(status.modem.state.as_deref(), Some("registered"));
         assert_eq!(status.modem.sim_state.as_deref(), Some("ready"));
         assert_eq!(status.modem.signal_quality, Some(78));
-        assert!(status.health.reasons.contains(&"text_fallback_limited".to_string()));
+        assert!(status
+            .health
+            .reasons
+            .contains(&"text_fallback_limited".to_string()));
     }
 
     #[test]
@@ -757,8 +800,7 @@ mod tests {
     #[test]
     fn rejects_missing_path_mapping() {
         let raw = include_str!("../tests/fixtures/mmcli/modem-list.txt");
-        let err = map_list_path_to_id("/org/freedesktop/ModemManager1/Modem/99", raw)
-            .unwrap_err();
+        let err = map_list_path_to_id("/org/freedesktop/ModemManager1/Modem/99", raw).unwrap_err();
         assert_eq!(err.code(), "modem_path_unresolved");
     }
 
@@ -774,8 +816,7 @@ mod tests {
     #[test]
     fn does_not_prefix_match_modem_ids() {
         let raw = "/org/freedesktop/ModemManager1/Modem/03 [Quectel] EC25\n";
-        let err = map_list_path_to_id("/org/freedesktop/ModemManager1/Modem/0", raw)
-            .unwrap_err();
+        let err = map_list_path_to_id("/org/freedesktop/ModemManager1/Modem/0", raw).unwrap_err();
         assert_eq!(err.code(), "modem_path_unresolved");
     }
 }
@@ -819,11 +860,9 @@ mod service_tests {
                 .unwrap()
                 .push(args.iter().map(|s| s.to_string()).collect());
             Box::pin(async move {
-                self.outputs
-                    .lock()
-                    .unwrap()
-                    .pop_front()
-                    .unwrap_or_else(|| Err(ModemError::new("missing_fake_output", "no fake output")))
+                self.outputs.lock().unwrap().pop_front().unwrap_or_else(|| {
+                    Err(ModemError::new("missing_fake_output", "no fake output"))
+                })
             })
         }
     }
@@ -871,8 +910,12 @@ mod service_tests {
                 stderr: "not found".to_string(),
                 status_success: false,
             }),
-            Ok(out("/org/freedesktop/ModemManager1/Modem/7 [Quectel] EC25\n")),
-            Ok(out("/org/freedesktop/ModemManager1/Modem/7 [Quectel] EC25\n")),
+            Ok(out(
+                "/org/freedesktop/ModemManager1/Modem/7 [Quectel] EC25\n",
+            )),
+            Ok(out(
+                "/org/freedesktop/ModemManager1/Modem/7 [Quectel] EC25\n",
+            )),
         ]);
         let service = ModemService::new_with_runner(runner);
         let status = service
@@ -892,7 +935,10 @@ mod service_tests {
 
     #[tokio::test]
     async fn missing_mmcli_reports_unknown() {
-        let runner = FakeRunner::new(vec![Err(ModemError::new("mmcli_probe_failed", "not found"))]);
+        let runner = FakeRunner::new(vec![Err(ModemError::new(
+            "mmcli_probe_failed",
+            "not found",
+        ))]);
         let service = ModemService::new_with_runner(runner);
         let status = service
             .status("/org/freedesktop/ModemManager1/Modem/0")
@@ -900,7 +946,10 @@ mod service_tests {
 
         assert_eq!(status.tool.available, false);
         assert_eq!(status.health.status, HealthLevel::Unknown);
-        assert!(status.health.reasons.contains(&"mmcli_probe_failed".to_string()));
+        assert!(status
+            .health
+            .reasons
+            .contains(&"mmcli_probe_failed".to_string()));
     }
 
     #[tokio::test]

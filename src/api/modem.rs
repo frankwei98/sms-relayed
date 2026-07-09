@@ -26,12 +26,18 @@ async fn status(State(state): State<ApiState>) -> ApiResult<Json<ModemStatus>> {
     Ok(Json(state.modem.status(&state.config.app.modem_path).await))
 }
 
-async fn enable(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult<Json<ActionResponse>> {
+async fn enable(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<ActionResponse>> {
     harden_action(&headers)?;
     run_action(state, headers, ModemAction::Enable).await
 }
 
-async fn disable(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult<Json<ActionResponse>> {
+async fn disable(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<ActionResponse>> {
     harden_action(&headers)?;
     run_action(state, headers, ModemAction::Disable).await
 }
@@ -67,7 +73,10 @@ fn harden_action(headers: &HeaderMap) -> ApiResult<()> {
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !content_type.to_ascii_lowercase().starts_with("application/json") {
+    if !content_type
+        .to_ascii_lowercase()
+        .starts_with("application/json")
+    {
         return Err(ApiError::new(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "unsupported_media_type",
@@ -120,9 +129,19 @@ fn strip_port(host: &str) -> String {
 
 fn map_modem_error(err: crate::modem::ModemError) -> ApiError {
     match err.code() {
-        "action_in_progress" => ApiError::new(StatusCode::CONFLICT, "action_in_progress", err.to_string()),
-        "reset_rate_limited" => ApiError::new(StatusCode::TOO_MANY_REQUESTS, "reset_rate_limited", err.to_string()),
-        "modem_path_unresolved" => ApiError::new(StatusCode::CONFLICT, "modem_path_unresolved", err.to_string()),
+        "action_in_progress" => {
+            ApiError::new(StatusCode::CONFLICT, "action_in_progress", err.to_string())
+        }
+        "reset_rate_limited" => ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "reset_rate_limited",
+            err.to_string(),
+        ),
+        "modem_path_unresolved" => ApiError::new(
+            StatusCode::CONFLICT,
+            "modem_path_unresolved",
+            err.to_string(),
+        ),
         _ => ApiError::internal(err.to_string()),
     }
 }
