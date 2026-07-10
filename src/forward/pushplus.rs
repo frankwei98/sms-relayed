@@ -5,6 +5,7 @@ use crate::config::{AppConfig, PushPlusConfig};
 use crate::smscode;
 
 pub async fn send(
+    client: &reqwest::Client,
     tel_number: &str,
     sms_text: &str,
     sms_date: &str,
@@ -25,7 +26,6 @@ pub async fn send(
         tel_number, sms_date, device_name, sms_text
     );
 
-    let client = reqwest::Client::new();
     let params = [
         ("token", token.to_string()),
         ("title", title),

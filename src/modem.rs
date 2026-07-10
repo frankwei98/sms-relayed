@@ -525,6 +525,7 @@ impl MmcliRunner for RealMmcliRunner {
         Box::pin(async move {
             let mut command = Command::new("mmcli");
             command.args(args);
+            command.kill_on_drop(true);
             let output = tokio::time::timeout(timeout, command.output())
                 .await
                 .map_err(|_| ModemError::new("mmcli_timeout", "mmcli command timed out"))?

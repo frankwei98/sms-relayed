@@ -5,13 +5,19 @@ pub mod shell;
 pub mod telegram;
 pub mod wecom;
 
+use std::time::Duration;
+
 use anyhow::Result;
 use log::error;
 
 use crate::config::{AppConfig, ChannelProfile};
+use crate::runner::ProcessRunner;
 use crate::util;
 
 pub async fn forward_sms(
+    client: &reqwest::Client,
+    shell_runner: &dyn ProcessRunner,
+    shell_timeout: Duration,
     profiles: &[ChannelProfile],
     tel_number: &str,
     sms_text: &str,
@@ -33,6 +39,7 @@ pub async fn forward_sms(
                 ..
             } => {
                 pushplus::send(
+                    client,
                     tel_number,
                     sms_text,
                     &sms_date,
@@ -47,6 +54,7 @@ pub async fn forward_sms(
                 ..
             } => {
                 wecom::send(
+                    client,
                     tel_number,
                     sms_text,
                     &sms_date,
@@ -61,6 +69,7 @@ pub async fn forward_sms(
                 ..
             } => {
                 telegram::send(
+                    client,
                     tel_number,
                     sms_text,
                     &sms_date,
@@ -75,6 +84,7 @@ pub async fn forward_sms(
                 ..
             } => {
                 dingtalk::send(
+                    client,
                     tel_number,
                     sms_text,
                     &sms_date,
@@ -89,6 +99,7 @@ pub async fn forward_sms(
                 ..
             } => {
                 bark::send(
+                    client,
                     tel_number,
                     sms_text,
                     &sms_date,
@@ -103,6 +114,8 @@ pub async fn forward_sms(
                 ..
             } => {
                 shell::send(
+                    shell_runner,
+                    shell_timeout,
                     tel_number,
                     sms_text,
                     &sms_date,

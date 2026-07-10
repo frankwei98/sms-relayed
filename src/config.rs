@@ -19,6 +19,40 @@ pub struct AppConfig {
     pub channels: ChannelsSection,
     #[serde(default)]
     pub api: ApiSection,
+    #[serde(default)]
+    pub http: HttpSection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HttpSection {
+    #[serde(default = "default_http_connect_timeout")]
+    pub connect_timeout_secs: u64,
+    #[serde(default = "default_http_request_timeout")]
+    pub request_timeout_secs: u64,
+    #[serde(default = "default_shell_timeout")]
+    pub shell_timeout_secs: u64,
+}
+
+fn default_http_connect_timeout() -> u64 {
+    10
+}
+
+fn default_http_request_timeout() -> u64 {
+    30
+}
+
+fn default_shell_timeout() -> u64 {
+    30
+}
+
+impl Default for HttpSection {
+    fn default() -> Self {
+        Self {
+            connect_timeout_secs: default_http_connect_timeout(),
+            request_timeout_secs: default_http_request_timeout(),
+            shell_timeout_secs: default_shell_timeout(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -232,6 +266,7 @@ impl Default for AppConfig {
             forward: ForwardSection::default(),
             channels: ChannelsSection::default(),
             api: ApiSection::default(),
+            http: HttpSection::default(),
         }
     }
 }

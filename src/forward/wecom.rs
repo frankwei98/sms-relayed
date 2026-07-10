@@ -5,6 +5,7 @@ use crate::config::{AppConfig, WeComConfig};
 use crate::smscode;
 
 pub async fn send(
+    client: &reqwest::Client,
     tel_number: &str,
     sms_text: &str,
     sms_date: &str,
@@ -27,8 +28,6 @@ pub async fn send(
     if !code_str.is_empty() {
         content = format!("{}\n{}", code_str, content);
     }
-
-    let client = reqwest::Client::new();
 
     // Step 1: Get access token
     let token_url = format!(

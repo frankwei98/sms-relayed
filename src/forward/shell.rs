@@ -1,10 +1,15 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use log::{error, info};
 
 use crate::config::{AppConfig, ShellConfig};
+use crate::runner::ProcessRunner;
 use crate::smscode;
 
 pub async fn send(
+    runner: &dyn ProcessRunner,
+    shell_timeout: Duration,
     tel_number: &str,
     sms_text: &str,
     sms_date: &str,
@@ -20,11 +25,7 @@ pub async fn send(
         "{} \"{}\" \"{}\" \"{}\" \"{}\" \"{}\" \"{}\"",
         shell_path, tel_number, sms_date, sms_text, code, code_from, device_name
     );
-    let status = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .status()
-        .await?;
+    let status = runner.run_shell(&cmd, shell_timeout).await?;
 
     if status.success() {
         info!("Shell调用成功");

@@ -20,6 +20,7 @@ fn sign(secret: &str, timestamp_ms: i64) -> String {
 }
 
 pub async fn send(
+    client: &reqwest::Client,
     tel_number: &str,
     sms_text: &str,
     sms_date: &str,
@@ -58,7 +59,6 @@ pub async fn send(
         }
     });
 
-    let client = reqwest::Client::new();
     let resp = client
         .post(&url)
         .header("Content-Type", "application/json;charset=utf-8")

@@ -6,6 +6,7 @@ use crate::smscode;
 use crate::util;
 
 pub async fn send(
+    client: &reqwest::Client,
     tel_number: &str,
     sms_text: &str,
     sms_date: &str,
@@ -36,7 +37,6 @@ pub async fn send(
         util::url_encode_form(&text)
     );
 
-    let client = reqwest::Client::new();
     let resp = client.get(&url).send().await?;
     let json: serde_json::Value = resp.json().await?;
     if json["ok"].as_bool() == Some(true) {

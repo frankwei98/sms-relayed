@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
+use std::time::Duration;
 
 use anyhow::Result;
 use futures_util::StreamExt;
@@ -9,6 +10,7 @@ use zbus::Connection;
 
 use crate::config::{AppConfig, ChannelProfile};
 use crate::forward;
+use crate::runner::ProcessRunner;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendTarget {
@@ -81,6 +83,8 @@ const MM_MESSAGING_INTERFACE: &str = "org.freedesktop.ModemManager1.Modem.Messag
 const DBUS_PROPERTIES_INTERFACE: &str = "org.freedesktop.DBus.Properties";
 const MM_DESTINATION: &str = "org.freedesktop.ModemManager1";
 
+const DBUS_METHOD_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn extract_string(props: &HashMap<String, OwnedValue>, key: &str) -> String {
     props
         .get(key)
@@ -114,7 +118,16 @@ pub async fn monitor_dbus(
     profiles: &[ChannelProfile],
     config: &AppConfig,
 ) -> Result<()> {
-    monitor_dbus_with_handler(modem_path, profiles, config, |_| async { Ok(()) }).await
+    monitor_dbus_with_handler(
+        modem_path,
+        profiles,
+        config,
+        |_| async { Ok(()) },
+        &reqwest::Client::new(),
+        &crate::runner::RealProcessRunner,
+        Duration::from_secs(config.http.shell_timeout_secs),
+    )
+    .await
 }
 
 pub async fn monitor_dbus_with_handler<F, Fut>(
@@ -122,6 +135,9 @@ pub async fn monitor_dbus_with_handler<F, Fut>(
     profiles: &[ChannelProfile],
     config: &AppConfig,
     mut on_received: F,
+    client: &reqwest::Client,
+    shell_runner: &dyn ProcessRunner,
+    shell_timeout: Duration,
 ) -> Result<()>
 where
     F: FnMut(ReceivedSms) -> Fut + Send,
@@ -135,15 +151,15 @@ where
         "type='signal',path='{}',interface='{}'",
         modem_path, MM_MESSAGING_INTERFACE
     );
-    connection
-        .call_method(
-            Some("org.freedesktop.DBus"),
-            "/org/freedesktop/DBus",
-            Some("org.freedesktop.DBus"),
-            "AddMatch",
-            &(&match_rule,),
-        )
-        .await?;
+    let add_args = (&match_rule,);
+    let call = connection.call_method(
+        Some("org.freedesktop.DBus"),
+        "/org/freedesktop/DBus",
+        Some("org.freedesktop.DBus"),
+        "AddMatch",
+        &add_args,
+    );
+    tokio::time::timeout(DBUS_METHOD_TIMEOUT, call).await??;
 
     println!("短信转发监听已就绪。按 Ctrl-C 停止。");
 
@@ -182,6 +198,9 @@ where
                         profiles,
                         config,
                         &mut on_received,
+                        client,
+                        shell_runner,
+                        shell_timeout,
                     )
                     .await
                     {
@@ -207,6 +226,9 @@ async fn get_sms_content<F, Fut>(
     profiles: &[ChannelProfile],
     config: &AppConfig,
     on_received: &mut F,
+    client: &reqwest::Client,
+    shell_runner: &dyn ProcessRunner,
+    shell_timeout: Duration,
 ) -> Result<()>
 where
     F: FnMut(ReceivedSms) -> Fut + Send,
@@ -214,15 +236,16 @@ where
 {
     let mut retries = 0;
     loop {
-        let reply = connection
-            .call_method(
-                Some(MM_DESTINATION),
-                sms_path,
-                Some(DBUS_PROPERTIES_INTERFACE),
-                "GetAll",
-                &(MM_SMS_INTERFACE,),
-            )
-            .await?;
+        let call = connection.call_method(
+            Some(MM_DESTINATION),
+            sms_path,
+            Some(DBUS_PROPERTIES_INTERFACE),
+            "GetAll",
+            &(MM_SMS_INTERFACE,),
+        );
+        let reply = tokio::time::timeout(Duration::from_secs(5), call)
+            .await
+            .map_err(|_| anyhow::anyhow!("dbus getAll timeout"))??;
 
         let props: HashMap<String, OwnedValue> = reply.body().deserialize()?;
         let telnum = extract_string(&props, "Number");
@@ -249,7 +272,17 @@ where
             if let Err(e) = on_received(received).await {
                 error!("处理短信失败: {}", e);
             }
-            forward::forward_sms(profiles, &phone_number, &body, &timestamp, config).await?;
+            forward::forward_sms(
+                client,
+                shell_runner,
+                shell_timeout,
+                profiles,
+                &phone_number,
+                &body,
+                &timestamp,
+                config,
+            )
+            .await?;
             return Ok(());
         } else {
             retries += 1;
@@ -276,15 +309,17 @@ pub async fn send_sms(
     properties.insert("text", Value::from(sms_text));
     properties.insert("number", Value::from(tel_number));
 
-    let reply = connection
-        .call_method(
-            Some(MM_DESTINATION),
-            modem_path,
-            Some(MM_MESSAGING_INTERFACE),
-            "Create",
-            &(&properties,),
-        )
-        .await?;
+    let create_args = (&properties,);
+    let call = connection.call_method(
+        Some(MM_DESTINATION),
+        modem_path,
+        Some(MM_MESSAGING_INTERFACE),
+        "Create",
+        &create_args,
+    );
+    let reply = tokio::time::timeout(Duration::from_secs(15), call)
+        .await
+        .map_err(|_| anyhow::anyhow!("dbus Create timeout"))??;
 
     let sms_path: zbus::zvariant::OwnedObjectPath = reply.body().deserialize()?;
     let sms_path_str = sms_path.as_str();
@@ -295,15 +330,15 @@ pub async fn send_sms(
         let mut input = String::new();
         io::stdin().read_line(&mut input).unwrap();
         if input.trim() != "1" {
-            let _ = connection
-                .call_method(
-                    Some(MM_DESTINATION),
-                    modem_path,
-                    Some(MM_MESSAGING_INTERFACE),
-                    "Delete",
-                    &(&sms_path,),
-                )
-                .await;
+            let del_args = (&sms_path,);
+            let del_call = connection.call_method(
+                Some(MM_DESTINATION),
+                modem_path,
+                Some(MM_MESSAGING_INTERFACE),
+                "Delete",
+                &del_args,
+            );
+            let _ = tokio::time::timeout(Duration::from_secs(5), del_call).await;
             println!("短信缓存已清理，按任意键退出程序");
             let mut temp = String::new();
             io::stdin().read_line(&mut temp).unwrap();
@@ -315,15 +350,17 @@ pub async fn send_sms(
         // Confirmation already handled by runtime::send_interactive; skip prompt.
     }
 
-    let _reply = connection
-        .call_method(
-            Some(MM_DESTINATION),
-            sms_path_str,
-            Some("org.freedesktop.ModemManager1.Sms"),
-            "Send",
-            &(),
-        )
-        .await?;
+    let send_call = connection.call_method(
+        Some(MM_DESTINATION),
+        sms_path_str,
+        Some("org.freedesktop.ModemManager1.Sms"),
+        "Send",
+        &(),
+    );
+    let _reply = tokio::time::timeout(Duration::from_secs(30), send_call)
+        .await
+        .map_err(|_| anyhow::anyhow!("dbus Send timeout"))??;
+
     println!("短信已发送");
     Ok(SendSmsOutcome {
         modem_sms_path: sms_path_str.to_string(),
