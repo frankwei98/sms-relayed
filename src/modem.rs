@@ -1274,6 +1274,38 @@ mod service_tests {
     }
 
     #[tokio::test]
+    async fn reports_drift_candidate_when_modem_re_enumerates_under_new_path() {
+        let runner = FakeRunner::new(vec![
+            Ok(out("mmcli 1.22.0\n")),
+            Ok(MmcliOutput {
+                stdout: String::new(),
+                stderr: "not found".to_string(),
+                status_success: false,
+            }),
+            Ok(out(
+                "/org/freedesktop/ModemManager1/Modem/1 [Quectel] EC25\n",
+            )),
+            Ok(out(
+                "/org/freedesktop/ModemManager1/Modem/1 [Quectel] EC25\n",
+            )),
+        ]);
+        let service = ModemService::new_with_runner(runner);
+        let status = service
+            .status("/org/freedesktop/ModemManager1/Modem/0")
+            .await;
+
+        assert_eq!(status.health.status, HealthLevel::Degraded);
+        assert_eq!(
+            status.diagnostics.path_drift_candidate.as_deref(),
+            Some("/org/freedesktop/ModemManager1/Modem/1")
+        );
+        assert!(status
+            .health
+            .reasons
+            .contains(&"modem_path_drift_candidate".to_string()));
+    }
+
+    #[tokio::test]
     async fn missing_mmcli_reports_unknown() {
         let runner = FakeRunner::new(vec![Err(ModemError::new(
             "mmcli_probe_failed",

@@ -627,4 +627,32 @@ mod tests {
         assert!(csv.starts_with("id,direction,phone_number,body,timestamp,status,source,read_at,error,created_at,updated_at\n"));
         assert!(csv.contains("alpha second"));
     }
+
+    #[test]
+    fn conversations_truncated_to_newest_500_global_messages() {
+        let store = memory_store();
+        store
+            .insert_message(NewMessage::inbound("+15550000002", "oldest message"))
+            .unwrap();
+        for i in 0..500 {
+            store
+                .insert_message(NewMessage {
+                    direction: MessageDirection::Inbound,
+                    phone_number: "+15550000001".to_string(),
+                    body: format!("newer msg {}", i),
+                    timestamp: format!("2026-07-08T{:02}:{:02}:00Z", i / 60, i % 60),
+                    status: MessageStatus::Received,
+                    source: MessageSource::Modem,
+                    modem_sms_path: None,
+                    read_at: None,
+                    error: None,
+                })
+                .unwrap();
+        }
+
+        let conversations = store.list_conversations().unwrap();
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].phone_number, "+15550000001");
+        assert_eq!(conversations[0].total_count, 500);
+    }
 }
