@@ -71,7 +71,7 @@ export function MessageConsole() {
 	const [phoneNumber, setPhoneNumber] = useState("");
 	const [body, setBody] = useState("");
 	const [sending, setSending] = useState(false);
-	const markingReadIdsRef = useRef<Set<number>>(new Set());
+	const markingReadPhonesRef = useRef<Set<string>>(new Set());
 
 	const buildParams = useCallback(
 		(phone?: string | null) => {
@@ -136,6 +136,7 @@ export function MessageConsole() {
 			"message.updated": scheduleRefresh,
 			"message.deleted": scheduleRefresh,
 			"message.read_state_changed": scheduleRefresh,
+			"conversation.read": scheduleRefresh,
 		});
 		return () => {
 			unsub();
@@ -156,18 +157,19 @@ export function MessageConsole() {
 
 	useEffect(() => {
 		if (!selectedPhone || isComposingNew) return;
+		if (markingReadPhonesRef.current.has(selectedPhone)) return;
 		const hasUnread = messages.some(
 			(message) =>
 				message.phone_number === selectedPhone &&
 				message.direction === "inbound" &&
-				message.read_at === null &&
-				!markingReadIdsRef.current.has(message.id),
+				message.read_at === null,
 		);
 		if (!hasUnread) return;
 
-		markingReadIdsRef.current.add(0); // mark as in-flight
+		const phone = selectedPhone;
+		markingReadPhonesRef.current.add(phone);
 
-		apiFetch(`/api/conversations/${encodeURIComponent(selectedPhone)}/read`, {
+		apiFetch(`/api/conversations/${encodeURIComponent(phone)}/read`, {
 			method: "POST",
 		})
 			.then(async () => {
@@ -177,7 +179,7 @@ export function MessageConsole() {
 				console.error(err);
 			})
 			.finally(() => {
-				markingReadIdsRef.current.delete(0);
+				markingReadPhonesRef.current.delete(phone);
 			});
 	}, [isComposingNew, messages, reloadActiveViews, selectedPhone]);
 

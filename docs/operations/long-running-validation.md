@@ -18,7 +18,9 @@ Before any fault cycles, record the steady-state baseline:
 ```sh
 # Process info
 pidof sms-relayed
-cat /proc/$(pidof sms-relayed)/status | grep -E "VmRSS|Threads"
+cat /proc/$(pidof sms-relayed)/status | grep -E "VmRSS|RssAnon|Threads"
+cat /proc/$(pidof sms-relayed)/smaps_rollup | grep '^Pss:'
+awk '{print "cpu_ticks=" $14 + $15}' /proc/$(pidof sms-relayed)/stat
 ls -1 /proc/$(pidof sms-relayed)/fd | wc -l
 pgrep -P $(pidof sms-relayed) | wc -l
 
@@ -26,7 +28,7 @@ pgrep -P $(pidof sms-relayed) | wc -l
 ls -lh /etc/sms-relayed/sms-relayed.sqlite
 
 # Delivery state
-sqlite3 /etc/sms-relayed/sms-relayed.sqlite \
+sqlite3 -readonly /etc/sms-relayed/sms-relayed.sqlite \
   "SELECT state, COUNT(*) FROM forward_deliveries GROUP BY state;"
 ```
 
@@ -94,11 +96,12 @@ wait
 
 1. Copy the production database to a test copy: `cp /etc/sms-relayed/sms-relayed.sqlite /tmp/test-export.sqlite`
 2. Point a temporary config to the test database.
-3. Run: `curl -o /tmp/export.csv "http://localhost:8080/api/messages/export?format=csv"`
-4. Verify the CSV is valid and complete.
-5. Check peak RSS during export stays within 32 MiB above baseline.
-6. Verify health responds within 1 second during export.
-7. Clean up: `rm /tmp/test-export.sqlite /tmp/export.csv`
+3. Run the CSV export: `curl -o /tmp/export.csv "http://localhost:8080/api/messages/export?format=csv"`.
+4. Run the JSON export: `curl -o /tmp/export.json "http://localhost:8080/api/messages/export?format=json"`.
+5. Verify both exports are valid and complete. For JSON, use `jq empty /tmp/export.json` when `jq` is available.
+6. Check peak RSS during each export stays within 32 MiB above baseline.
+7. Verify health responds within 1 second during each export.
+8. Clean up: `rm /tmp/test-export.sqlite /tmp/export.csv /tmp/export.json`.
 
 ### 3.7 Retention Cleanup
 

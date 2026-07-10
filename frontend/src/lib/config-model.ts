@@ -32,6 +32,16 @@ export type AppConfig = {
 		password: string;
 		database_path: string;
 	};
+	http: {
+		connect_timeout_secs: number;
+		request_timeout_secs: number;
+		shell_timeout_secs: number;
+	};
+	retention: {
+		enabled: boolean;
+		max_age_days: number;
+		batch_size: number;
+	};
 };
 
 export type StatusResponse = {
