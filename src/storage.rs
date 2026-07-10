@@ -1,8 +1,8 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use rusqlite::{params, params_from_iter, Connection, Row};
+use rusqlite::{params, params_from_iter, Connection, Row, TransactionBehavior};
 use time::OffsetDateTime;
 
 use crate::message::{
@@ -18,6 +18,7 @@ pub struct DeliveryRow {
     pub attempt_count: i64,
     pub next_attempt_at: Option<String>,
     pub lease_at: Option<String>,
+    pub lease_token: Option<String>,
     pub last_error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -26,6 +27,7 @@ pub struct DeliveryRow {
 #[derive(Clone)]
 pub struct MessageStore {
     conn: Arc<Mutex<Connection>>,
+    path: Option<Arc<PathBuf>>,
 }
 
 pub struct NewMessage {
@@ -66,24 +68,32 @@ impl MessageStore {
         }
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open sqlite database {}", path.display()))?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
+            path: Some(Arc::new(path.to_path_buf())),
         };
         store.migrate()?;
         Ok(store)
     }
 
     pub fn open_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
         let store = Self {
-            conn: Arc::new(Mutex::new(Connection::open_in_memory()?)),
+            conn: Arc::new(Mutex::new(conn)),
+            path: None,
         };
         store.migrate()?;
         Ok(store)
     }
 
     pub fn migrate(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute_batch(
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 direction TEXT NOT NULL,
@@ -109,12 +119,13 @@ impl MessageStore {
             );
             CREATE TABLE IF NOT EXISTS forward_deliveries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                message_id INTEGER NOT NULL REFERENCES messages(id),
+                message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
                 profile_key TEXT NOT NULL,
                 state TEXT NOT NULL DEFAULT 'pending',
                 attempt_count INTEGER NOT NULL DEFAULT 0,
                 next_attempt_at TEXT,
                 lease_at TEXT,
+                lease_token TEXT,
                 last_error TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -123,6 +134,7 @@ impl MessageStore {
             CREATE INDEX IF NOT EXISTS idx_deliveries_state ON forward_deliveries(state);
             CREATE INDEX IF NOT EXISTS idx_deliveries_next_attempt ON forward_deliveries(next_attempt_at);",
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -146,27 +158,70 @@ impl MessageStore {
     }
 
     pub fn insert_message(&self, input: NewMessage) -> Result<Message> {
-        let now = now_string();
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO messages (direction, phone_number, body, timestamp, status, source, modem_sms_path, read_at, error, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                direction_to_str(input.direction),
-                input.phone_number,
-                input.body,
-                input.timestamp,
-                status_to_str(input.status),
-                source_to_str(input.source),
-                input.modem_sms_path,
-                input.read_at,
-                input.error,
-                now,
-                now
-            ],
-        )?;
-        let id = conn.last_insert_rowid();
-        map_get(&conn, id)
+        insert_message_on(&conn, input)
+    }
+
+    pub fn insert_message_with_deliveries(
+        &self,
+        input: NewMessage,
+        profile_keys: &[String],
+    ) -> Result<Message> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let msg = insert_message_on(&tx, input)?;
+        let now = now_string();
+        for key in profile_keys {
+            tx.execute(
+                "INSERT INTO forward_deliveries (message_id, profile_key, state, created_at, updated_at)
+                 VALUES (?1, ?2, 'pending', ?3, ?3)",
+                params![msg.id, key, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(msg)
+    }
+
+    pub fn for_each_export_message<F>(&self, filter: &MessageFilter, mut visit: F) -> Result<()>
+    where
+        F: FnMut(Message) -> Result<bool>,
+    {
+        if let Some(path) = &self.path {
+            let conn = Connection::open_with_flags(
+                path.as_ref(),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            conn.busy_timeout(std::time::Duration::from_secs(5))?;
+            for_each_export_on(&conn, filter, &mut visit)
+        } else {
+            let conn = self.conn.lock().unwrap();
+            for_each_export_on(&conn, filter, &mut visit)
+        }
+    }
+
+    pub fn count_messages(&self) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))?)
+    }
+
+    pub fn count_deliveries(&self) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        Ok(
+            conn.query_row("SELECT COUNT(*) FROM forward_deliveries", [], |row| {
+                row.get(0)
+            })?,
+        )
+    }
+
+    pub fn get_delivery(&self, id: i64) -> Result<DeliveryRow> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.query_row(
+            "SELECT id, message_id, profile_key, state, attempt_count, next_attempt_at, lease_at, lease_token, last_error, created_at, updated_at
+             FROM forward_deliveries WHERE id = ?1",
+            params![id],
+            row_to_delivery,
+        )?)
     }
 
     pub fn get_message(&self, id: i64) -> Result<Message> {
@@ -178,56 +233,9 @@ impl MessageStore {
         self.query_messages(filter, true)
     }
 
-    pub fn export_messages(&self, filter: &MessageFilter) -> Result<Vec<Message>> {
-        self.query_messages(filter, false)
-    }
-
     fn query_messages(&self, filter: &MessageFilter, apply_limit: bool) -> Result<Vec<Message>> {
         let conn = self.conn.lock().unwrap();
-        let limit = filter.limit.unwrap_or(50).min(500);
-        let mut sql = "SELECT * FROM messages WHERE 1=1".to_string();
-        let mut values: Vec<String> = Vec::new();
-        if let Some(before_id) = filter.before_id {
-            sql.push_str(" AND id < ");
-            sql.push_str(&before_id.to_string());
-        }
-        if let Some(phone) = &filter.phone_number {
-            sql.push_str(" AND phone_number = ?");
-            values.push(phone.clone());
-        }
-        if let Some(from) = &filter.from {
-            sql.push_str(" AND timestamp >= ?");
-            values.push(from.clone());
-        }
-        if let Some(to) = &filter.to {
-            sql.push_str(" AND timestamp <= ?");
-            values.push(to.clone());
-        }
-        if let Some(q) = &filter.q {
-            sql.push_str(" AND (phone_number LIKE ? OR body LIKE ?)");
-            values.push(format!("%{}%", q));
-            values.push(format!("%{}%", q));
-        }
-        if let Some(direction) = filter.direction {
-            sql.push_str(" AND direction = ?");
-            values.push(direction_to_str(direction).to_string());
-        }
-        if let Some(status) = filter.status {
-            sql.push_str(" AND status = ?");
-            values.push(status_to_str(status).to_string());
-        }
-        if let Some(unread) = filter.unread {
-            if unread {
-                sql.push_str(" AND read_at IS NULL");
-            } else {
-                sql.push_str(" AND read_at IS NOT NULL");
-            }
-        }
-        sql.push_str(" ORDER BY id DESC");
-        if apply_limit {
-            sql.push_str(" LIMIT ");
-            sql.push_str(&limit.to_string());
-        }
+        let (sql, values) = build_message_query(filter, apply_limit);
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(values.iter()), row_to_message)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -265,10 +273,12 @@ impl MessageStore {
     }
 
     pub fn delete_messages(&self, ids: &[i64]) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
         for id in ids {
-            conn.execute("DELETE FROM messages WHERE id = ?1", params![id])?;
+            tx.execute("DELETE FROM messages WHERE id = ?1", params![id])?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -360,9 +370,18 @@ impl MessageStore {
         lease_until: &str,
     ) -> Result<Vec<DeliveryRow>> {
         let now = now_string();
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, message_id, profile_key, state, attempt_count, next_attempt_at, lease_at, last_error, created_at, updated_at
+        let lease_token = uuid::Uuid::new_v4().to_string();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE forward_deliveries
+             SET state = 'retry_wait', lease_at = NULL, lease_token = NULL,
+                 next_attempt_at = ?1, updated_at = ?1
+             WHERE state = 'in_flight' AND lease_at IS NOT NULL AND lease_at <= ?1",
+            params![now],
+        )?;
+        let mut stmt = tx.prepare(
+            "SELECT id, message_id, profile_key, state, attempt_count, next_attempt_at, lease_at, lease_token, last_error, created_at, updated_at
              FROM forward_deliveries
              WHERE state IN ('pending', 'retry_wait')
                AND (next_attempt_at IS NULL OR next_attempt_at <= ?1)
@@ -374,31 +393,23 @@ impl MessageStore {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         for row in &rows {
-            conn.execute(
-                "UPDATE forward_deliveries SET state = 'in_flight', lease_at = ?1, updated_at = ?1 WHERE id = ?2 AND state IN ('pending', 'retry_wait')",
-                params![lease_until, row.id],
+            tx.execute(
+                "UPDATE forward_deliveries
+                 SET state = 'in_flight', lease_at = ?1, lease_token = ?2, updated_at = ?3
+                 WHERE id = ?4 AND state IN ('pending', 'retry_wait')",
+                params![lease_until, lease_token, now, row.id],
             )?;
         }
-
-        // Re-read rows that were successfully claimed
-        let ids: Vec<String> = rows.iter().map(|r| r.id.to_string()).collect();
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!(
-            "SELECT id, message_id, profile_key, state, attempt_count, next_attempt_at, lease_at, last_error, created_at, updated_at
-             FROM forward_deliveries WHERE id IN ({}) AND state = 'in_flight'",
-            placeholders
-        );
-        let mut stmt2 = conn.prepare(&sql)?;
-        let params2: Vec<&dyn rusqlite::types::ToSql> = ids
-            .iter()
-            .map(|s| s as &dyn rusqlite::types::ToSql)
-            .collect();
-        let claimed = stmt2
-            .query_map(params2.as_slice(), row_to_delivery)?
+        drop(stmt);
+        let mut claimed_stmt = tx.prepare(
+            "SELECT id, message_id, profile_key, state, attempt_count, next_attempt_at, lease_at, lease_token, last_error, created_at, updated_at
+             FROM forward_deliveries WHERE lease_token = ?1 ORDER BY id ASC",
+        )?;
+        let claimed = claimed_stmt
+            .query_map(params![lease_token], row_to_delivery)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(claimed_stmt);
+        tx.commit()?;
         Ok(claimed)
     }
 
@@ -409,21 +420,33 @@ impl MessageStore {
         error: Option<&str>,
         attempt_count: i64,
         next_attempt_at: Option<&str>,
-    ) -> Result<()> {
+        lease_token: &str,
+    ) -> Result<bool> {
         let now = now_string();
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE forward_deliveries SET state = ?1, last_error = ?2, attempt_count = ?3, next_attempt_at = ?4, lease_at = NULL, updated_at = ?5 WHERE id = ?6",
-            params![state, error, attempt_count, next_attempt_at, now, id],
+        let changed = conn.execute(
+            "UPDATE forward_deliveries
+             SET state = ?1, last_error = ?2, attempt_count = ?3, next_attempt_at = ?4,
+                 lease_at = NULL, lease_token = NULL, updated_at = ?5
+             WHERE id = ?6 AND state = 'in_flight' AND lease_token = ?7",
+            params![
+                state,
+                error,
+                attempt_count,
+                next_attempt_at,
+                now,
+                id,
+                lease_token
+            ],
         )?;
-        Ok(())
+        Ok(changed == 1)
     }
 
     pub fn recover_expired_leases(&self, before: &str) -> Result<usize> {
         let now = now_string();
         let conn = self.conn.lock().unwrap();
         let count = conn.execute(
-            "UPDATE forward_deliveries SET state = 'retry_wait', lease_at = NULL, next_attempt_at = ?1, updated_at = ?1
+            "UPDATE forward_deliveries SET state = 'retry_wait', lease_at = NULL, lease_token = NULL, next_attempt_at = ?1, updated_at = ?1
              WHERE state = 'in_flight' AND lease_at IS NOT NULL AND lease_at < ?2",
             params![now, before],
         )?;
@@ -435,9 +458,10 @@ impl MessageStore {
         let cutoff = (OffsetDateTime::now_utc() - time::Duration::days(max_age_days as i64))
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap_or_default();
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
         // Find message IDs eligible for deletion: terminal status, old, and no non-terminal deliveries
-        let mut stmt = conn.prepare(
+        let mut stmt = tx.prepare(
             "SELECT m.id FROM messages m
              WHERE m.timestamp < ?1
                AND m.status IN ('received', 'sent', 'failed')
@@ -452,74 +476,12 @@ impl MessageStore {
             .query_map(params![cutoff, batch_size], |row| row.get(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let count = ids.len();
+        drop(stmt);
         for id in &ids {
-            conn.execute("DELETE FROM messages WHERE id = ?1", params![id])?;
+            tx.execute("DELETE FROM messages WHERE id = ?1", params![id])?;
         }
+        tx.commit()?;
         Ok(count)
-    }
-
-    pub fn get_delivery_count_for_message(
-        &self,
-        message_id: i64,
-        non_terminal_states: &[&str],
-    ) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
-        let placeholders: Vec<String> = non_terminal_states
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", i + 2))
-            .collect();
-        let sql = format!(
-            "SELECT COUNT(*) FROM forward_deliveries
-             WHERE message_id = ?1 AND state IN ({})",
-            placeholders.join(",")
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(message_id)];
-        for s in non_terminal_states {
-            params_vec.push(Box::new(s.to_string()));
-        }
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params_vec.iter().map(|p| p.as_ref()).collect();
-        let count: i64 = stmt.query_row(param_refs.as_slice(), |row| row.get(0))?;
-        Ok(count)
-    }
-
-    pub fn export_messages_csv(&self, filter: &MessageFilter) -> Result<String> {
-        let messages = self.export_messages(filter)?;
-        let mut writer = csv::WriterBuilder::new()
-            .terminator(csv::Terminator::Any(b'\n'))
-            .from_writer(Vec::new());
-        writer.write_record([
-            "id",
-            "direction",
-            "phone_number",
-            "body",
-            "timestamp",
-            "status",
-            "source",
-            "read_at",
-            "error",
-            "created_at",
-            "updated_at",
-        ])?;
-        for msg in messages {
-            writer.write_record([
-                msg.id.to_string(),
-                direction_to_str(msg.direction).to_string(),
-                msg.phone_number,
-                msg.body,
-                msg.timestamp,
-                status_to_str(msg.status).to_string(),
-                source_to_str(msg.source).to_string(),
-                msg.read_at.unwrap_or_default(),
-                msg.error.unwrap_or_default(),
-                msg.created_at,
-                msg.updated_at,
-            ])?;
-        }
-        let bytes = writer.into_inner()?;
-        Ok(String::from_utf8(bytes).unwrap_or_default())
     }
 }
 
@@ -530,6 +492,91 @@ fn map_get(conn: &Connection, id: i64) -> Result<Message> {
         Some(row) => row.map_err(Into::into),
         None => anyhow::bail!("message {} not found", id),
     }
+}
+
+fn insert_message_on(conn: &Connection, input: NewMessage) -> Result<Message> {
+    let now = now_string();
+    conn.execute(
+        "INSERT INTO messages (direction, phone_number, body, timestamp, status, source, modem_sms_path, read_at, error, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            direction_to_str(input.direction),
+            input.phone_number,
+            input.body,
+            input.timestamp,
+            status_to_str(input.status),
+            source_to_str(input.source),
+            input.modem_sms_path,
+            input.read_at,
+            input.error,
+            now,
+            now
+        ],
+    )?;
+    map_get(conn, conn.last_insert_rowid())
+}
+
+fn build_message_query(filter: &MessageFilter, apply_limit: bool) -> (String, Vec<String>) {
+    let limit = filter.limit.unwrap_or(50).min(500);
+    let mut sql = "SELECT * FROM messages WHERE 1=1".to_string();
+    let mut values = Vec::new();
+    if let Some(before_id) = filter.before_id {
+        sql.push_str(" AND id < ");
+        sql.push_str(&before_id.to_string());
+    }
+    if let Some(phone) = &filter.phone_number {
+        sql.push_str(" AND phone_number = ?");
+        values.push(phone.clone());
+    }
+    if let Some(from) = &filter.from {
+        sql.push_str(" AND timestamp >= ?");
+        values.push(from.clone());
+    }
+    if let Some(to) = &filter.to {
+        sql.push_str(" AND timestamp <= ?");
+        values.push(to.clone());
+    }
+    if let Some(q) = &filter.q {
+        sql.push_str(" AND (phone_number LIKE ? OR body LIKE ?)");
+        values.push(format!("%{}%", q));
+        values.push(format!("%{}%", q));
+    }
+    if let Some(direction) = filter.direction {
+        sql.push_str(" AND direction = ?");
+        values.push(direction_to_str(direction).to_string());
+    }
+    if let Some(status) = filter.status {
+        sql.push_str(" AND status = ?");
+        values.push(status_to_str(status).to_string());
+    }
+    if let Some(unread) = filter.unread {
+        sql.push_str(if unread {
+            " AND read_at IS NULL"
+        } else {
+            " AND read_at IS NOT NULL"
+        });
+    }
+    sql.push_str(" ORDER BY id DESC");
+    if apply_limit {
+        sql.push_str(" LIMIT ");
+        sql.push_str(&limit.to_string());
+    }
+    (sql, values)
+}
+
+fn for_each_export_on<F>(conn: &Connection, filter: &MessageFilter, visit: &mut F) -> Result<()>
+where
+    F: FnMut(Message) -> Result<bool>,
+{
+    let (sql, values) = build_message_query(filter, false);
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(values.iter()), row_to_message)?;
+    for row in rows {
+        if !visit(row?)? {
+            break;
+        }
+    }
+    Ok(())
 }
 
 fn row_to_message(row: &Row) -> rusqlite::Result<Message> {
@@ -606,9 +653,10 @@ fn row_to_delivery(row: &Row) -> rusqlite::Result<DeliveryRow> {
         attempt_count: row.get(4)?,
         next_attempt_at: row.get(5)?,
         lease_at: row.get(6)?,
-        last_error: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
+        lease_token: row.get(7)?,
+        last_error: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
     })
 }
 
@@ -826,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn export_ignores_page_limit_and_uses_stable_csv_columns() {
+    fn export_iteration_ignores_page_limit_without_collecting_in_store() {
         let store = memory_store();
         store
             .insert_message(NewMessage::inbound("+1", "alpha"))
@@ -840,12 +888,14 @@ mod tests {
             q: Some("alpha".to_string()),
             ..MessageFilter::default()
         };
-        let rows = store.export_messages(&filter).unwrap();
+        let mut rows = Vec::new();
+        store
+            .for_each_export_message(&filter, |message| {
+                rows.push(message);
+                Ok(true)
+            })
+            .unwrap();
         assert_eq!(rows.len(), 2);
-
-        let csv = store.export_messages_csv(&filter).unwrap();
-        assert!(csv.starts_with("id,direction,phone_number,body,timestamp,status,source,read_at,error,created_at,updated_at\n"));
-        assert!(csv.contains("alpha second"));
     }
 
     #[test]
@@ -935,5 +985,156 @@ mod tests {
             .unwrap();
         let deleted = store.run_retention(1, 100).unwrap();
         assert_eq!(deleted, 0);
+    }
+
+    #[test]
+    fn inbound_message_and_deliveries_commit_atomically() {
+        let store = memory_store();
+        let duplicate_profiles = ["bark.primary".to_string(), "bark.primary".to_string()];
+
+        let result = store.insert_message_with_deliveries(
+            NewMessage::inbound("+1", "atomic"),
+            &duplicate_profiles,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(store.count_messages().unwrap(), 0);
+        assert_eq!(store.count_deliveries().unwrap(), 0);
+    }
+
+    #[test]
+    fn migrates_a_populated_pre_delivery_database() {
+        let path = std::env::temp_dir().join(format!(
+            "sms-relayed-legacy-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let legacy = Connection::open(&path).unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    direction TEXT NOT NULL,
+                    phone_number TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    modem_sms_path TEXT NULL,
+                    read_at TEXT NULL,
+                    error TEXT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO messages
+                    (direction, phone_number, body, timestamp, status, source, created_at, updated_at)
+                VALUES
+                    ('inbound', '+1', 'legacy', '2026-01-01T00:00:00Z', 'received',
+                     'modem', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        drop(legacy);
+
+        let store = MessageStore::open(&path).unwrap();
+        assert_eq!(store.count_messages().unwrap(), 1);
+        store
+            .insert_deliveries(1, &["bark.primary".to_string()])
+            .unwrap();
+        assert_eq!(store.count_deliveries().unwrap(), 1);
+        drop(store);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn delivery_claims_use_owner_tokens_and_recover_expired_leases() {
+        let store = memory_store();
+        let message = store
+            .insert_message_with_deliveries(
+                NewMessage::inbound("+1", "lease"),
+                &["bark.primary".to_string()],
+            )
+            .unwrap();
+        assert_eq!(store.count_deliveries().unwrap(), 1);
+
+        let first = store
+            .claim_due_deliveries(1, "2000-01-01T00:00:00Z")
+            .unwrap()
+            .pop()
+            .unwrap();
+        let first_token = first.lease_token.unwrap();
+        let second = store
+            .claim_due_deliveries(1, "2099-01-01T00:00:00Z")
+            .unwrap()
+            .pop()
+            .unwrap();
+        let second_token = second.lease_token.clone().unwrap();
+        assert_ne!(first_token, second_token);
+        assert!(!store
+            .complete_delivery(second.id, "succeeded", None, 1, None, &first_token,)
+            .unwrap());
+        assert!(store
+            .complete_delivery(second.id, "succeeded", None, 1, None, &second_token,)
+            .unwrap());
+        assert_eq!(store.get_delivery(second.id).unwrap().state, "succeeded");
+        assert_eq!(store.get_message(message.id).unwrap().body, "lease");
+    }
+
+    #[test]
+    fn deleting_message_cascades_delivery_rows() {
+        let store = memory_store();
+        let message = store
+            .insert_message_with_deliveries(
+                NewMessage::inbound("+1", "delete"),
+                &["bark.primary".to_string()],
+            )
+            .unwrap();
+
+        store.delete_messages(&[message.id]).unwrap();
+
+        assert_eq!(store.count_messages().unwrap(), 0);
+        assert_eq!(store.count_deliveries().unwrap(), 0);
+    }
+
+    #[test]
+    fn file_export_does_not_hold_the_writer_connection() {
+        let path = std::env::temp_dir().join(format!(
+            "sms-relayed-export-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = MessageStore::open(&path).unwrap();
+        for i in 0..50 {
+            store
+                .insert_message(NewMessage::inbound("+1", &format!("row-{i}")))
+                .unwrap();
+        }
+        let export_store = store.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut first = true;
+            export_store
+                .for_each_export_message(&MessageFilter::default(), |_| {
+                    if first {
+                        first = false;
+                        started_tx.send(()).unwrap();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    Ok(true)
+                })
+                .unwrap();
+        });
+        started_rx.recv().unwrap();
+
+        store
+            .insert_message(NewMessage::inbound("+2", "written-during-export"))
+            .unwrap();
+        worker.join().unwrap();
+        assert_eq!(store.count_messages().unwrap(), 51);
+
+        drop(store);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
     }
 }

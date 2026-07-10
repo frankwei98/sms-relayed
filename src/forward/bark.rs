@@ -1,7 +1,9 @@
 use log::{error, info};
 
 use crate::config::{AppConfig, BarkConfig};
-use crate::forward::ForwardOutcome;
+use crate::forward::{
+    classify_http_status, classify_provider_rejection, transport_failure, ForwardOutcome,
+};
 use crate::smscode;
 use crate::util;
 
@@ -47,18 +49,20 @@ pub async fn send(
 
     let resp = match client.get(&url).send().await {
         Ok(r) => r,
-        Err(e) => return ForwardOutcome::TransientFailure(e.to_string()),
+        Err(e) => return transport_failure(&e),
     };
+    if let Some(outcome) = classify_http_status(resp.status()) {
+        return outcome;
+    }
     let json: serde_json::Value = match resp.json().await {
         Ok(j) => j,
-        Err(e) => return ForwardOutcome::TransientFailure(e.to_string()),
+        Err(e) => return transport_failure(&e),
     };
     if json["code"].as_i64() == Some(200) {
         info!("Bark转发成功");
         ForwardOutcome::Success
     } else {
-        let msg = json["message"].as_str().unwrap_or("unknown error");
-        error!("Bark转发失败: {}", msg);
-        ForwardOutcome::PermanentFailure(msg.to_string())
+        error!("Bark转发失败: provider_rejected");
+        classify_provider_rejection(json["code"].as_i64(), &[400, 401, 403, 404, 422])
     }
 }

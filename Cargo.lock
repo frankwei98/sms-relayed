@@ -1887,6 +1887,7 @@ dependencies = [
  "http",
  "inquire",
  "is-terminal",
+ "libc",
  "log",
  "mime_guess",
  "regex",

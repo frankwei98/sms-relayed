@@ -8,6 +8,7 @@ pub mod wecom;
 use std::time::Duration;
 
 use log::error;
+use reqwest::StatusCode;
 
 use crate::config::{AppConfig, ChannelProfile};
 use crate::runner::ProcessRunner;
@@ -18,6 +19,53 @@ pub enum ForwardOutcome {
     Success,
     TransientFailure(String),
     PermanentFailure(String),
+}
+
+pub(crate) fn transport_failure(error: &reqwest::Error) -> ForwardOutcome {
+    let code = if error.is_timeout() {
+        "http_timeout"
+    } else if error.is_connect() {
+        "http_connect"
+    } else if error.is_decode() {
+        "http_decode"
+    } else if error.is_body() {
+        "http_body"
+    } else if error.is_redirect() {
+        "http_redirect"
+    } else if error.is_request() {
+        "http_request"
+    } else {
+        "http_transport"
+    };
+    ForwardOutcome::TransientFailure(code.to_string())
+}
+
+pub(crate) fn classify_http_status(status: StatusCode) -> Option<ForwardOutcome> {
+    if status.is_success() {
+        return None;
+    }
+
+    let code = format!("http_status_{}", status.as_u16());
+    if status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+        || !status.is_client_error()
+    {
+        Some(ForwardOutcome::TransientFailure(code))
+    } else {
+        Some(ForwardOutcome::PermanentFailure(code))
+    }
+}
+
+pub(crate) fn classify_provider_rejection(
+    code: Option<i64>,
+    permanent_codes: &[i64],
+) -> ForwardOutcome {
+    if code.is_some_and(|value| permanent_codes.contains(&value)) {
+        ForwardOutcome::PermanentFailure("provider_invalid_credentials_or_parameters".to_string())
+    } else {
+        ForwardOutcome::TransientFailure("provider_rejected".to_string())
+    }
 }
 
 #[allow(dead_code)]
@@ -33,11 +81,6 @@ pub async fn forward_sms(
 ) -> Vec<(String, ForwardOutcome)> {
     let device_name = resolve_device_name(config);
     let sms_date = sms_date.replace('T', " ");
-    println!(
-        "发信电话:{}\n时间:{}\n短信内容:{}",
-        tel_number, sms_date, sms_text
-    );
-
     let mut results: Vec<(String, ForwardOutcome)> = Vec::new();
     for profile in profiles {
         let key = profile.key();
@@ -163,5 +206,80 @@ fn resolve_device_name(config: &AppConfig) -> String {
         util::hostname()
     } else {
         name.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_status_classification_matches_retry_contract() {
+        let cases = [
+            (200, None),
+            (204, None),
+            (400, Some(false)),
+            (401, Some(false)),
+            (404, Some(false)),
+            (408, Some(true)),
+            (429, Some(true)),
+            (500, Some(true)),
+            (503, Some(true)),
+            (302, Some(true)),
+        ];
+
+        for (status, expected_transient) in cases {
+            let status = StatusCode::from_u16(status).unwrap();
+            let outcome = classify_http_status(status);
+            match (outcome, expected_transient) {
+                (None, None) => {}
+                (Some(ForwardOutcome::TransientFailure(code)), Some(true)) => {
+                    assert_eq!(code, format!("http_status_{}", status.as_u16()));
+                }
+                (Some(ForwardOutcome::PermanentFailure(code)), Some(false)) => {
+                    assert_eq!(code, format!("http_status_{}", status.as_u16()));
+                }
+                (actual, expected) => panic!(
+                    "unexpected classification for {status}: {actual:?}, expected {expected:?}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_provider_rejections_retry_by_default() {
+        let cases = [
+            (None, true),
+            (Some(999_999), true),
+            (Some(401), false),
+            (Some(400), false),
+        ];
+
+        for (code, expected_transient) in cases {
+            let outcome = classify_provider_rejection(code, &[400, 401]);
+            assert_eq!(
+                matches!(outcome, ForwardOutcome::TransientFailure(_)),
+                expected_transient,
+                "unexpected provider classification for {code:?}: {outcome:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_errors_return_fixed_safe_codes() {
+        let secret = "secret-token-and-phone-15551234567";
+        let error = reqwest::Client::new()
+            .get(format!("http://[{secret}"))
+            .send()
+            .await
+            .unwrap_err();
+
+        let ForwardOutcome::TransientFailure(code) = transport_failure(&error) else {
+            panic!("transport failures must be retryable");
+        };
+        assert!(code.starts_with("http_"));
+        assert!(!code.contains(secret));
+        assert!(!code.contains("15551234567"));
+        assert!(!code.contains("token"));
     }
 }

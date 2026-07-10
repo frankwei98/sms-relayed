@@ -81,6 +81,8 @@ impl StorageType {
 const MM_SMS_INTERFACE: &str = "org.freedesktop.ModemManager1.Sms";
 const MM_MESSAGING_INTERFACE: &str = "org.freedesktop.ModemManager1.Modem.Messaging";
 const DBUS_PROPERTIES_INTERFACE: &str = "org.freedesktop.DBus.Properties";
+const DBUS_INTERFACE: &str = "org.freedesktop.DBus";
+const OBJECT_MANAGER_INTERFACE: &str = "org.freedesktop.DBus.ObjectManager";
 const MM_DESTINATION: &str = "org.freedesktop.ModemManager1";
 
 const DBUS_METHOD_TIMEOUT: Duration = Duration::from_secs(10);
@@ -124,17 +126,32 @@ async fn resolve_monitor_path(
     store: &MessageStore,
 ) -> Option<String> {
     // Try configured path first
+    let stored_fp = store.get_meta(FINGERPRINT_META_KEY);
     let identity = modem_service.extract_identity(configured_path).await;
-    if identity.is_some() {
-        let fp = ModemService::compute_fingerprint(&identity.unwrap());
-        store.set_meta(FINGERPRINT_META_KEY, &fp).ok();
-        return Some(configured_path.to_string());
+    if let Some(identity) = identity {
+        let current_fp = ModemService::compute_fingerprint(&identity);
+        match stored_fp.as_deref() {
+            Some(enrolled_fp) if enrolled_fp == current_fp => {
+                return Some(configured_path.to_string());
+            }
+            Some(enrolled_fp) => {
+                warn!("configured modem identity changed; refusing path reuse");
+                return modem_service.scan_and_match_fingerprint(enrolled_fp).await;
+            }
+            None => {
+                if let Err(e) = store.set_meta(FINGERPRINT_META_KEY, &current_fp) {
+                    error!("failed to enroll modem identity: {}", e);
+                    return None;
+                }
+                return Some(configured_path.to_string());
+            }
+        }
     }
 
     // Configured path failed; try fingerprint match
-    let stored_fp = store.get_meta(FINGERPRINT_META_KEY)?;
-    let matched = modem_service.scan_and_match_fingerprint(&stored_fp).await;
-    matched
+    modem_service
+        .scan_and_match_fingerprint(stored_fp.as_deref()?)
+        .await
 }
 
 async fn run_subscription<F, Fut>(
@@ -162,6 +179,17 @@ where
     );
     tokio::time::timeout(DBUS_METHOD_TIMEOUT, call).await??;
 
+    let owner_rule = format!(
+        "type='signal',interface='{}',member='NameOwnerChanged',arg0='{}'",
+        DBUS_INTERFACE, MM_DESTINATION
+    );
+    add_match_rule(&connection, &owner_rule).await?;
+    let removed_rule = format!(
+        "type='signal',interface='{}',member='InterfacesRemoved'",
+        OBJECT_MANAGER_INTERFACE
+    );
+    add_match_rule(&connection, &removed_rule).await?;
+
     info!("SMS monitor ready on {}", actual_path);
 
     let ignored_storage: Vec<StorageType> = config
@@ -183,6 +211,27 @@ where
             .unwrap_or_default();
         let member = header.member().map(|s| s.to_string()).unwrap_or_default();
 
+        if interface == DBUS_INTERFACE && member == "NameOwnerChanged" {
+            if let Ok((name, old_owner, new_owner)) =
+                msg.body().deserialize::<(String, String, String)>()
+            {
+                if modem_owner_changed(&name, &old_owner, &new_owner) {
+                    return Err(anyhow::anyhow!("ModemManager owner changed"));
+                }
+            }
+        }
+
+        if interface == OBJECT_MANAGER_INTERFACE && member == "InterfacesRemoved" {
+            if let Ok((removed_path, _interfaces)) = msg
+                .body()
+                .deserialize::<(zbus::zvariant::ObjectPath, Vec<String>)>()
+            {
+                if removed_path.as_str() == actual_path {
+                    return Err(anyhow::anyhow!("monitored modem object removed"));
+                }
+            }
+        }
+
         if interface == MM_MESSAGING_INTERFACE && member.as_str() == "Added" {
             if let Ok(body) = msg
                 .body()
@@ -192,12 +241,8 @@ where
                 let is_received = body.1;
                 if is_received {
                     info!("SmsPath:\n{}", sms_path);
-                    if let Err(e) =
-                        handle_incoming_sms(&connection, &sms_path, &ignored_storage, on_received)
-                            .await
-                    {
-                        error!("handle incoming SMS failed: {}", e);
-                    }
+                    handle_incoming_sms(&connection, &sms_path, &ignored_storage, on_received)
+                        .await?;
                 }
             }
         }
@@ -247,8 +292,16 @@ where
                 storage,
                 modem_sms_path: sms_path.to_string(),
             };
-            if let Err(e) = on_received(received).await {
-                error!("处理短信失败: {}", e);
+            let mut delay = Duration::from_millis(100);
+            loop {
+                match on_received(received.clone()).await {
+                    Ok(()) => break,
+                    Err(e) => {
+                        error!("persist incoming SMS failed; retrying: {}", e);
+                        tokio::time::sleep(delay).await;
+                        delay = (delay * 2).min(Duration::from_secs(30));
+                    }
+                }
             }
             return Ok(());
         } else {
@@ -263,6 +316,23 @@ where
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
+}
+
+async fn add_match_rule(connection: &Connection, rule: &str) -> Result<()> {
+    let args = (rule,);
+    let call = connection.call_method(
+        Some("org.freedesktop.DBus"),
+        "/org/freedesktop/DBus",
+        Some("org.freedesktop.DBus"),
+        "AddMatch",
+        &args,
+    );
+    tokio::time::timeout(DBUS_METHOD_TIMEOUT, call).await??;
+    Ok(())
+}
+
+fn modem_owner_changed(name: &str, old_owner: &str, new_owner: &str) -> bool {
+    name == MM_DESTINATION && old_owner != new_owner
 }
 
 pub async fn monitor_dbus_with_handler<F, Fut>(
@@ -408,4 +478,69 @@ pub async fn send_sms_via_system(
         SendTarget::Api,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use super::*;
+    use crate::modem::{MmcliOutput, MmcliRunner, ModemError};
+
+    #[derive(Clone)]
+    struct IdentityRunner;
+
+    impl MmcliRunner for IdentityRunner {
+        fn run<'a>(
+            &'a self,
+            args: &'a [&'a str],
+            _timeout: Duration,
+        ) -> Pin<Box<dyn Future<Output = Result<MmcliOutput, ModemError>> + Send + 'a>> {
+            Box::pin(async move {
+                let stdout = match args {
+                    ["--modem", "/org/freedesktop/ModemManager1/Modem/0", "--output-json"] => {
+                        r#"{"modem":{"generic":{"equipment-identifier":"other"}}}"#
+                    }
+                    ["-L"] => "/org/freedesktop/ModemManager1/Modem/1 [test] modem\n",
+                    ["--modem", "/org/freedesktop/ModemManager1/Modem/1", "--output-json"] => {
+                        r#"{"modem":{"generic":{"equipment-identifier":"target"}}}"#
+                    }
+                    _ => "",
+                };
+                Ok(MmcliOutput {
+                    stdout: stdout.to_string(),
+                    stderr: String::new(),
+                    status_success: !stdout.is_empty(),
+                })
+            })
+        }
+    }
+
+    #[test]
+    fn owner_change_requires_reconnect_only_for_modem_manager() {
+        assert!(modem_owner_changed(MM_DESTINATION, ":1.1", ":1.2"));
+        assert!(!modem_owner_changed(MM_DESTINATION, ":1.1", ":1.1"));
+        assert!(!modem_owner_changed("org.example.Other", ":1.1", ":1.2"));
+    }
+
+    #[tokio::test]
+    async fn enrolled_fingerprint_rejects_unrelated_modem_at_configured_path() {
+        let store = MessageStore::open_in_memory().unwrap();
+        let target = ModemService::compute_fingerprint("target");
+        store.set_meta(FINGERPRINT_META_KEY, &target).unwrap();
+        let service = ModemService::new_with_runner(IdentityRunner);
+
+        let resolved =
+            resolve_monitor_path("/org/freedesktop/ModemManager1/Modem/0", &service, &store).await;
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some("/org/freedesktop/ModemManager1/Modem/1")
+        );
+        assert_eq!(
+            store.get_meta(FINGERPRINT_META_KEY).as_deref(),
+            Some(target.as_str())
+        );
+    }
 }

@@ -10,6 +10,7 @@ pub enum AppEvent {
     MessageUpdated(Message),
     MessageDeleted { ids: Vec<i64> },
     MessageReadStateChanged(Message),
+    ConversationRead,
     ConfigSaved,
     ServiceRestartScheduled,
 }
@@ -47,6 +48,7 @@ impl AppEvent {
             AppEvent::MessageUpdated(_) => "message.updated",
             AppEvent::MessageDeleted { .. } => "message.deleted",
             AppEvent::MessageReadStateChanged(_) => "message.read_state_changed",
+            AppEvent::ConversationRead => "conversation.read",
             AppEvent::ConfigSaved => "config.saved",
             AppEvent::ServiceRestartScheduled => "service.restart_scheduled",
         }

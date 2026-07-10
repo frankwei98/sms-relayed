@@ -55,16 +55,27 @@ impl ProcessRunner for RealProcessRunner {
     ) -> Pin<Box<dyn Future<Output = Result<ExitStatus>> + Send + 'a>> {
         let cmd = cmd.to_string();
         Box::pin(async move {
-            let mut child = tokio::process::Command::new("sh")
+            let mut command = tokio::process::Command::new("sh");
+            command
                 .arg("-c")
                 .arg(&cmd)
                 .kill_on_drop(true)
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped())
-                .spawn()?;
+                .stderr(std::process::Stdio::null());
+            #[cfg(unix)]
+            command.process_group(0);
+            let mut child = command.spawn()?;
             match tokio::time::timeout(timeout, child.wait()).await {
                 Ok(result) => Ok(result?),
                 Err(_) => {
+                    #[cfg(unix)]
+                    if let Some(pid) = child.id() {
+                        // The shell is its own process-group leader; kill descendants too.
+                        unsafe {
+                            libc::kill(-(pid as i32), libc::SIGKILL);
+                        }
+                    }
+                    #[cfg(not(unix))]
                     let _ = child.kill().await;
                     child.wait().await?;
                     Err(anyhow::anyhow!("shell timeout"))

@@ -450,6 +450,20 @@ impl AppConfig {
                 bail!("api.database_path is required when api.enabled is true");
             }
         }
+        if self.http.connect_timeout_secs == 0
+            || self.http.request_timeout_secs == 0
+            || self.http.shell_timeout_secs == 0
+        {
+            bail!("http and shell timeouts must be greater than zero");
+        }
+        if self.http.connect_timeout_secs > self.http.request_timeout_secs {
+            bail!("http.connect_timeout_secs must not exceed request_timeout_secs");
+        }
+        if self.retention.enabled
+            && (self.retention.max_age_days == 0 || self.retention.batch_size == 0)
+        {
+            bail!("enabled retention requires positive max_age_days and batch_size");
+        }
         Ok(())
     }
 

@@ -45,9 +45,20 @@ port = 8080
 enable_ipv6 = false
 password = "your-password"
 database_path = "/etc/sms-relayed/sms-relayed.sqlite"
+
+[http]
+connect_timeout_secs = 10
+request_timeout_secs = 30
+shell_timeout_secs = 30
+
+[retention]
+enabled = false
+max_age_days = 90
+batch_size = 500
 ```
 
 `api.enabled = true` 且 `api.password` 为空时，服务将拒绝启动。
+`http` 和 `retention` 都可以省略并使用以上默认值。历史保留清理默认关闭；启用后只分批删除超过保留期且没有待投递任务的消息。
 
 ### 功能
 
@@ -55,7 +66,7 @@ database_path = "/etc/sms-relayed/sms-relayed.sqlite"
 - SMS 收件箱/发件箱列表，按号码分组会话，未读计数。
 - 搜索：手机号、正文全文、方向（接收/发送）、状态、未读、时间范围。
 - 标记已读/未读，单条和批量删除。
-- 导出为 CSV 或 JSON。
+- 以流式响应导出 CSV 或 JSON，避免将全部历史一次载入内存。
 - 发送短信（通过 ModemManager）。
 - 配置全量编辑：`app`、`sms`、`forward`、`channels`、`api` 各节。
 - 配置验证（JSON 和 TOML 均支持）。

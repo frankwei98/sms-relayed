@@ -1,7 +1,9 @@
 use log::{error, info};
 
 use crate::config::{AppConfig, WeComConfig};
-use crate::forward::ForwardOutcome;
+use crate::forward::{
+    classify_http_status, classify_provider_rejection, transport_failure, ForwardOutcome,
+};
 use crate::smscode;
 
 pub async fn send(
@@ -17,7 +19,7 @@ pub async fn send(
     let corpsecret = profile.secret.as_str();
     let agentid: i64 = match profile.agent_id.parse() {
         Ok(id) => id,
-        Err(e) => return ForwardOutcome::PermanentFailure(format!("invalid agent_id: {}", e)),
+        Err(_) => return ForwardOutcome::PermanentFailure("invalid_agent_id".to_string()),
     };
 
     let mut content = format!(
@@ -36,20 +38,25 @@ pub async fn send(
     );
     let token_resp = match client.get(&token_url).send().await {
         Ok(r) => r,
-        Err(e) => return ForwardOutcome::TransientFailure(e.to_string()),
+        Err(e) => return transport_failure(&e),
     };
+    if let Some(outcome) = classify_http_status(token_resp.status()) {
+        return outcome;
+    }
     let token_json: serde_json::Value = match token_resp.json().await {
         Ok(j) => j,
-        Err(e) => return ForwardOutcome::TransientFailure(e.to_string()),
+        Err(e) => return transport_failure(&e),
     };
     if token_json["errcode"].as_i64() != Some(0) {
-        let msg = token_json["errmsg"].as_str().unwrap_or("unknown");
-        error!("企业微信获取token失败: {}", msg);
-        return ForwardOutcome::PermanentFailure(format!("get_token: {}", msg));
+        error!("企业微信获取token失败: provider_rejected");
+        return classify_provider_rejection(
+            token_json["errcode"].as_i64(),
+            &[40013, 40014, 41001, 41002],
+        );
     }
     let access_token = match token_json["access_token"].as_str() {
         Some(t) => t.to_string(),
-        None => return ForwardOutcome::PermanentFailure("access_token为空".to_string()),
+        None => return ForwardOutcome::TransientFailure("provider_malformed_response".to_string()),
     };
 
     // Step 2: Send message
@@ -74,18 +81,23 @@ pub async fn send(
 
     let msg_resp = match client.post(&msg_url).json(&msg_body).send().await {
         Ok(r) => r,
-        Err(e) => return ForwardOutcome::TransientFailure(e.to_string()),
+        Err(e) => return transport_failure(&e),
     };
+    if let Some(outcome) = classify_http_status(msg_resp.status()) {
+        return outcome;
+    }
     let msg_json: serde_json::Value = match msg_resp.json().await {
         Ok(j) => j,
-        Err(e) => return ForwardOutcome::TransientFailure(e.to_string()),
+        Err(e) => return transport_failure(&e),
     };
     if msg_json["errcode"].as_i64() == Some(0) && msg_json["errmsg"].as_str() == Some("ok") {
         info!("企业微信转发成功");
         ForwardOutcome::Success
     } else {
-        let msg = msg_json["errmsg"].as_str().unwrap_or("unknown");
-        error!("企业微信转发失败: {}", msg);
-        ForwardOutcome::PermanentFailure(msg.to_string())
+        error!("企业微信转发失败: provider_rejected");
+        classify_provider_rejection(
+            msg_json["errcode"].as_i64(),
+            &[40014, 40056, 41001, 41009, 48002, 60011, 60111],
+        )
     }
 }

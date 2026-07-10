@@ -5,7 +5,9 @@ use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::{AppConfig, DingTalkConfig};
-use crate::forward::ForwardOutcome;
+use crate::forward::{
+    classify_http_status, classify_provider_rejection, transport_failure, ForwardOutcome,
+};
 use crate::smscode;
 use crate::util;
 
@@ -67,18 +69,20 @@ pub async fn send(
         .await
     {
         Ok(r) => r,
-        Err(e) => return ForwardOutcome::TransientFailure(e.to_string()),
+        Err(e) => return transport_failure(&e),
     };
+    if let Some(outcome) = classify_http_status(resp.status()) {
+        return outcome;
+    }
     let json: serde_json::Value = match resp.json().await {
         Ok(j) => j,
-        Err(e) => return ForwardOutcome::TransientFailure(e.to_string()),
+        Err(e) => return transport_failure(&e),
     };
     if json["errcode"].as_i64() == Some(0) && json["errmsg"].as_str() == Some("ok") {
         info!("钉钉转发成功");
         ForwardOutcome::Success
     } else {
-        let msg = json["errmsg"].as_str().unwrap_or("unknown");
-        error!("钉钉转发失败: {}", msg);
-        ForwardOutcome::PermanentFailure(msg.to_string())
+        error!("钉钉转发失败: provider_rejected");
+        classify_provider_rejection(json["errcode"].as_i64(), &[40035, 310000])
     }
 }

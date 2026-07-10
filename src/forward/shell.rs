@@ -27,7 +27,7 @@ pub async fn send(
     );
     let status = match runner.run_shell(&cmd, shell_timeout).await {
         Ok(s) => s,
-        Err(e) => return ForwardOutcome::TransientFailure(e.to_string()),
+        Err(_) => return ForwardOutcome::TransientFailure("shell_execution_failed".to_string()),
     };
 
     if status.success() {

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::Value;
 use time::OffsetDateTime;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -525,19 +526,54 @@ impl MmcliRunner for RealMmcliRunner {
     ) -> Pin<Box<dyn Future<Output = Result<MmcliOutput, ModemError>> + Send + 'a>> {
         Box::pin(async move {
             let mut command = Command::new("mmcli");
-            command.args(args);
-            command.kill_on_drop(true);
-            let output = tokio::time::timeout(timeout, command.output())
+            command
+                .args(args)
+                .kill_on_drop(true)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            let mut child = command
+                .spawn()
+                .map_err(|e| ModemError::new("mmcli_probe_failed", e.to_string()))?;
+            let mut stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| ModemError::new("mmcli_probe_failed", "stdout unavailable"))?;
+            let mut stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| ModemError::new("mmcli_probe_failed", "stderr unavailable"))?;
+            let stdout_task = tokio::spawn(async move {
+                let mut bytes = Vec::new();
+                stdout.read_to_end(&mut bytes).await.map(|_| bytes)
+            });
+            let stderr_task = tokio::spawn(async move {
+                let mut bytes = Vec::new();
+                stderr.read_to_end(&mut bytes).await.map(|_| bytes)
+            });
+            let status = match tokio::time::timeout(timeout, child.wait()).await {
+                Ok(result) => {
+                    result.map_err(|e| ModemError::new("mmcli_probe_failed", e.to_string()))?
+                }
+                Err(_) => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    let _ = stdout_task.await;
+                    let _ = stderr_task.await;
+                    return Err(ModemError::new("mmcli_timeout", "mmcli command timed out"));
+                }
+            };
+            let stdout = stdout_task
                 .await
-                .map_err(|_| ModemError::new("mmcli_timeout", "mmcli command timed out"))?
+                .map_err(|e| ModemError::new("mmcli_probe_failed", e.to_string()))?
+                .map_err(|e| ModemError::new("mmcli_probe_failed", e.to_string()))?;
+            let stderr = stderr_task
+                .await
+                .map_err(|e| ModemError::new("mmcli_probe_failed", e.to_string()))?
                 .map_err(|e| ModemError::new("mmcli_probe_failed", e.to_string()))?;
             Ok(MmcliOutput {
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr)
-                    .chars()
-                    .take(300)
-                    .collect(),
-                status_success: output.status.success(),
+                stdout: String::from_utf8_lossy(&stdout).to_string(),
+                stderr: String::from_utf8_lossy(&stderr).chars().take(300).collect(),
+                status_success: status.success(),
             })
         })
     }
@@ -973,34 +1009,31 @@ impl ModemService {
     }
 
     pub async fn extract_identity(&self, modem_path: &str) -> Option<String> {
-        let output = self
+        let json_output = self
             .runner
             .run(&["--modem", modem_path, "--output-json"], MMCLI_TIMEOUT)
             .await
+            .ok();
+        if let Some(output) = json_output.filter(|o| o.status_success) {
+            if let Some(identity) = extract_identity_from_json(&output.stdout) {
+                return Some(identity);
+            }
+        }
+
+        let text_output = self
+            .runner
+            .run(&["--modem", modem_path], MMCLI_TIMEOUT)
+            .await
             .ok()
             .filter(|o| o.status_success)?;
-        let value: serde_json::Value = serde_json::from_str(&output.stdout).ok()?;
-        let modem = value.get("modem")?;
-        let generic = modem.get("generic")?;
-        if let Some(ei) = generic
-            .get("equipment-identifier")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-        {
-            return Some(ei.to_string());
-        }
-        generic
-            .get("device-identifier")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(ToString::to_string)
+        extract_identity_from_text(&text_output.stdout)
     }
 
     pub fn compute_fingerprint(identity: &str) -> String {
         use sha2::{Digest, Sha256};
         let domain = "sms-relayed-modem-fingerprint:";
         let digest = Sha256::digest(format!("{}{}", domain, identity));
-        base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &digest)
+        base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, digest)
     }
 
     pub async fn list_all_modem_paths(&self) -> Vec<String> {
@@ -1051,6 +1084,39 @@ impl ModemService {
     }
 }
 
+fn extract_identity_from_json(raw: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let generic = value.get("modem")?.get("generic")?;
+    for key in ["equipment-identifier", "device-identifier"] {
+        if let Some(value) = generic
+            .get(key)
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+        {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn extract_identity_from_text(raw: &str) -> Option<String> {
+    for wanted in ["equipment identifier", "device identifier"] {
+        for line in raw.lines() {
+            let Some((label, value)) = line.trim().split_once(':') else {
+                continue;
+            };
+            let label = label.to_ascii_lowercase();
+            if label.starts_with(wanted) || label.contains(&format!("| {wanted}")) {
+                let value = value.trim();
+                if !value.is_empty() && value != "--" {
+                    return Some(value.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 fn unavailable_status(configured_path: &str, tool: ToolInfo, reason: &str) -> ModemStatus {
     let mut status = base_status(configured_path, None);
     status.tool = tool;
@@ -1086,7 +1152,7 @@ fn is_unknown_option(stderr: &str) -> bool {
 fn short_hash(value: &str) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(value.as_bytes());
-    base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &digest)[..12]
+    base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, digest)[..12]
         .to_string()
 }
 
@@ -1217,6 +1283,16 @@ mod tests {
         let generic = value["modem"]["generic"].clone();
         assert!(generic.get("equipment-identifier").is_none());
         assert!(generic.get("device-identifier").is_none());
+    }
+
+    #[test]
+    fn extracts_identity_from_legacy_text_output() {
+        let raw =
+            "  -----------------------------\n  General | equipment identifier: 867530900000001\n";
+        assert_eq!(
+            extract_identity_from_text(raw).as_deref(),
+            Some("867530900000001")
+        );
     }
 }
 

@@ -51,26 +51,28 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
             let events = events_inbound.clone();
             let cfg = config_inbound.clone();
             async move {
-                let msg = store.insert_message(NewMessage {
-                    direction: MessageDirection::Inbound,
-                    phone_number: sms.phone_number,
-                    body: sms.body,
-                    timestamp: sms.timestamp,
-                    status: MessageStatus::Received,
-                    source: MessageSource::Modem,
-                    modem_sms_path: Some(sms.modem_sms_path),
-                    read_at: None,
-                    error: None,
-                })?;
-                let profile_keys: Vec<String> = cfg
+                let mut profile_keys: Vec<String> = cfg
                     .enabled_profiles()
                     .unwrap_or_default()
                     .iter()
                     .map(|p| p.key())
                     .collect();
-                if !profile_keys.is_empty() {
-                    store.insert_deliveries(msg.id, &profile_keys)?;
-                }
+                profile_keys.sort();
+                profile_keys.dedup();
+                let msg = store.insert_message_with_deliveries(
+                    NewMessage {
+                        direction: MessageDirection::Inbound,
+                        phone_number: sms.phone_number,
+                        body: sms.body,
+                        timestamp: sms.timestamp,
+                        status: MessageStatus::Received,
+                        source: MessageSource::Modem,
+                        modem_sms_path: Some(sms.modem_sms_path),
+                        read_at: None,
+                        error: None,
+                    },
+                    &profile_keys,
+                )?;
                 events.send(AppEvent::MessageCreated(msg));
                 Ok(())
             }
@@ -86,6 +88,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
         Arc::new(shell_runner),
         shell_timeout,
     );
+    let retention_worker = run_retention_worker(store.clone(), config.clone());
 
     if config.api.enabled {
         let api_state = ApiState {
@@ -107,6 +110,9 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
             _ = delivery_worker => {
                 Err(anyhow::anyhow!("delivery worker exited unexpectedly"))
             }
+            _ = retention_worker => {
+                Err(anyhow::anyhow!("retention worker exited unexpectedly"))
+            }
         }
     } else {
         tokio::select! {
@@ -114,7 +120,35 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
             _ = delivery_worker => {
                 Err(anyhow::anyhow!("delivery worker exited unexpectedly"))
             }
+            _ = retention_worker => {
+                Err(anyhow::anyhow!("retention worker exited unexpectedly"))
+            }
         }
+    }
+}
+
+async fn run_retention_worker(store: MessageStore, config: AppConfig) {
+    const RETENTION_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+    if !config.retention.enabled {
+        std::future::pending::<()>().await;
+        return;
+    }
+
+    loop {
+        let store = store.clone();
+        let max_age_days = config.retention.max_age_days;
+        let batch_size = config.retention.batch_size;
+        match tokio::task::spawn_blocking(move || store.run_retention(max_age_days, batch_size))
+            .await
+        {
+            Ok(Ok(deleted)) if deleted > 0 => {
+                log::info!("retention deleted {} messages", deleted);
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => log::error!("retention failed: {}", e),
+            Err(e) => log::error!("retention task failed: {}", e),
+        }
+        tokio::time::sleep(RETENTION_INTERVAL).await;
     }
 }
 
