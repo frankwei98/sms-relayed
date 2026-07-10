@@ -88,7 +88,30 @@ impl MessageStore {
             CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
             CREATE INDEX IF NOT EXISTS idx_messages_direction ON messages(direction);
             CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
-            CREATE INDEX IF NOT EXISTS idx_messages_read_at ON messages(read_at);",
+            CREATE INDEX IF NOT EXISTS idx_messages_read_at ON messages(read_at);
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );",
+        )?;
+        Ok(())
+    }
+
+    pub fn get_meta(&self, key: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            params![key, value],
         )?;
         Ok(())
     }
@@ -654,5 +677,15 @@ mod tests {
         assert_eq!(conversations.len(), 1);
         assert_eq!(conversations[0].phone_number, "+15550000001");
         assert_eq!(conversations[0].total_count, 500);
+    }
+
+    #[test]
+    fn meta_read_write_roundtrip() {
+        let store = memory_store();
+        assert_eq!(store.get_meta("test_key"), None);
+        store.set_meta("test_key", "hello").unwrap();
+        assert_eq!(store.get_meta("test_key").as_deref(), Some("hello"));
+        store.set_meta("test_key", "updated").unwrap();
+        assert_eq!(store.get_meta("test_key").as_deref(), Some("updated"));
     }
 }

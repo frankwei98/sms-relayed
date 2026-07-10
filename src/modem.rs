@@ -941,6 +941,84 @@ impl ModemService {
         path_drift_candidate(configured_path, &output.stdout)
             .ok_or_else(|| ModemError::new("modem_path_lost", "no single drift candidate"))
     }
+
+    pub async fn extract_identity(&self, modem_path: &str) -> Option<String> {
+        let output = self
+            .runner
+            .run(&["--modem", modem_path, "--output-json"], MMCLI_TIMEOUT)
+            .await
+            .ok()
+            .filter(|o| o.status_success)?;
+        let value: serde_json::Value = serde_json::from_str(&output.stdout).ok()?;
+        let modem = value.get("modem")?;
+        let generic = modem.get("generic")?;
+        if let Some(ei) = generic
+            .get("equipment-identifier")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(ei.to_string());
+        }
+        generic
+            .get("device-identifier")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+    }
+
+    pub fn compute_fingerprint(identity: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let domain = "sms-relayed-modem-fingerprint:";
+        let digest = Sha256::digest(format!("{}{}", domain, identity));
+        base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &digest)
+    }
+
+    pub async fn list_all_modem_paths(&self) -> Vec<String> {
+        let output = self
+            .runner
+            .run(&["-L"], MMCLI_TIMEOUT)
+            .await
+            .ok()
+            .filter(|o| o.status_success);
+        match output {
+            Some(o) => o
+                .stdout
+                .lines()
+                .filter_map(|line| {
+                    let path = line.split_whitespace().next()?;
+                    if path.starts_with("/org/freedesktop/ModemManager1/Modem/") {
+                        Some(path.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    pub async fn scan_and_match_fingerprint(&self, target_fingerprint: &str) -> Option<String> {
+        let paths = self.list_all_modem_paths().await;
+        let mut matched: Vec<String> = Vec::new();
+        for path in &paths {
+            if let Some(identity) = self.extract_identity(path).await {
+                let fp = Self::compute_fingerprint(&identity);
+                if fp == target_fingerprint {
+                    matched.push(path.clone());
+                }
+            }
+        }
+        if matched.len() == 1 {
+            Some(matched.remove(0))
+        } else {
+            None
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn runner_ref(&self) -> &Arc<dyn MmcliRunner> {
+        &self.runner
+    }
 }
 
 fn unavailable_status(configured_path: &str, tool: ToolInfo, reason: &str) -> ModemStatus {
@@ -1086,6 +1164,29 @@ mod tests {
         let raw = "/org/freedesktop/ModemManager1/Modem/03 [Quectel] EC25\n";
         let err = map_list_path_to_id("/org/freedesktop/ModemManager1/Modem/0", raw).unwrap_err();
         assert_eq!(err.code(), "modem_path_unresolved");
+    }
+
+    #[test]
+    fn compute_fingerprint_is_domain_separated_and_deterministic() {
+        let fp1 = ModemService::compute_fingerprint("123456789012345");
+        let fp2 = ModemService::compute_fingerprint("123456789012345");
+        let fp3 = ModemService::compute_fingerprint("different-value");
+        assert_eq!(fp1, fp2);
+        assert_ne!(fp1, fp3);
+        assert!(!fp1.is_empty());
+        assert!(
+            !fp1.contains("123456789012345"),
+            "fingerprint must not contain raw value"
+        );
+    }
+
+    #[test]
+    fn extract_identity_returns_none_without_identifiers() {
+        let raw = include_str!("../tests/fixtures/mmcli/healthy.json");
+        let value: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let generic = value["modem"]["generic"].clone();
+        assert!(generic.get("equipment-identifier").is_none());
+        assert!(generic.get("device-identifier").is_none());
     }
 }
 

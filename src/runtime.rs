@@ -12,28 +12,28 @@ use crate::config::AppConfig;
 use crate::dbus::{self, SendTarget};
 use crate::events::{AppEvent, EventBus};
 use crate::message::{Message, MessageDirection, MessageSource, MessageStatus};
+use crate::modem::ModemService;
 use crate::runner::{build_http_client, RealProcessRunner};
 use crate::storage::{MessageStore, NewMessage};
 
 pub async fn run_forwarding(config_path: &Path) -> Result<()> {
     let config = AppConfig::load(config_path)?;
     config.validate()?;
-    let profiles = config.enabled_profiles()?;
-
     let store = MessageStore::open(Path::new(&config.api.database_path))?;
     let events = EventBus::new();
 
     let client = Arc::new(build_http_client(&config.http));
     let shell_timeout = Duration::from_secs(config.http.shell_timeout_secs);
     let shell_runner = RealProcessRunner;
+    let modem_service = ModemService::new();
 
     let store_inbound = store.clone();
     let events_inbound = events.clone();
     let client_inbound = client.clone();
+    let modem_inbound = modem_service.clone();
 
     let dbus_future = dbus::monitor_dbus_with_handler(
         &config.app.modem_path,
-        &profiles,
         &config,
         move |sms| {
             let store = store_inbound.clone();
@@ -57,6 +57,8 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
         &client_inbound,
         &shell_runner,
         shell_timeout,
+        &modem_inbound,
+        &store,
     );
 
     if config.api.enabled {
@@ -67,7 +69,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
             events: events.clone(),
             started_at: Instant::now(),
             sessions: SessionStore::default(),
-            modem: crate::modem::ModemService::new(),
+            modem: modem_service,
         };
         tokio::select! {
             result = crate::api::serve(api_state) => result,

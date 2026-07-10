@@ -10,7 +10,9 @@ use zbus::Connection;
 
 use crate::config::{AppConfig, ChannelProfile};
 use crate::forward;
+use crate::modem::ModemService;
 use crate::runner::ProcessRunner;
+use crate::storage::MessageStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendTarget {
@@ -85,6 +87,8 @@ const MM_DESTINATION: &str = "org.freedesktop.ModemManager1";
 
 const DBUS_METHOD_TIMEOUT: Duration = Duration::from_secs(10);
 
+const FINGERPRINT_META_KEY: &str = "modem_fingerprint";
+
 fn extract_string(props: &HashMap<String, OwnedValue>, key: &str) -> String {
     props
         .get(key)
@@ -113,43 +117,45 @@ fn extract_u32(props: &HashMap<String, OwnedValue>, key: &str) -> u32 {
         .unwrap_or(100)
 }
 
-pub async fn monitor_dbus(
-    modem_path: &str,
-    profiles: &[ChannelProfile],
-    config: &AppConfig,
-) -> Result<()> {
-    monitor_dbus_with_handler(
-        modem_path,
-        profiles,
-        config,
-        |_| async { Ok(()) },
-        &reqwest::Client::new(),
-        &crate::runner::RealProcessRunner,
-        Duration::from_secs(config.http.shell_timeout_secs),
-    )
-    .await
+/// Resolve the actual modem path for monitoring.
+/// First tries the configured path directly. If it fails and a fingerprint is
+/// stored, scans all modems and matches by fingerprint exactly once.
+async fn resolve_monitor_path(
+    configured_path: &str,
+    modem_service: &ModemService,
+    store: &MessageStore,
+) -> Option<String> {
+    // Try configured path first
+    let identity = modem_service.extract_identity(configured_path).await;
+    if identity.is_some() {
+        let fp = ModemService::compute_fingerprint(&identity.unwrap());
+        store.set_meta(FINGERPRINT_META_KEY, &fp).ok();
+        return Some(configured_path.to_string());
+    }
+
+    // Configured path failed; try fingerprint match
+    let stored_fp = store.get_meta(FINGERPRINT_META_KEY)?;
+    let matched = modem_service.scan_and_match_fingerprint(&stored_fp).await;
+    matched
 }
 
-pub async fn monitor_dbus_with_handler<F, Fut>(
-    modem_path: &str,
-    profiles: &[ChannelProfile],
+async fn run_subscription<F, Fut>(
+    actual_path: &str,
     config: &AppConfig,
-    mut on_received: F,
+    on_received: &mut F,
     client: &reqwest::Client,
     shell_runner: &dyn ProcessRunner,
     shell_timeout: Duration,
 ) -> Result<()>
 where
-    F: FnMut(ReceivedSms) -> Fut + Send,
+    F: FnMut(crate::dbus::ReceivedSms) -> Fut + Send,
     Fut: std::future::Future<Output = Result<()>> + Send,
 {
-    println!("短信转发模式正在启动，正在连接系统 D-Bus。");
-    info!("正在运行. 按下 Ctrl-C 停止.");
     let connection = Connection::system().await?;
 
     let match_rule = format!(
         "type='signal',path='{}',interface='{}'",
-        modem_path, MM_MESSAGING_INTERFACE
+        actual_path, MM_MESSAGING_INTERFACE
     );
     let add_args = (&match_rule,);
     let call = connection.call_method(
@@ -161,7 +167,7 @@ where
     );
     tokio::time::timeout(DBUS_METHOD_TIMEOUT, call).await??;
 
-    println!("短信转发监听已就绪。按 Ctrl-C 停止。");
+    info!("SMS monitor ready on {}", actual_path);
 
     let ignored_storage: Vec<StorageType> = config
         .sms
@@ -169,6 +175,8 @@ where
         .iter()
         .map(|s| StorageType::from_config(s))
         .collect();
+
+    let profiles = config.enabled_profiles().unwrap_or_default();
 
     let mut stream = zbus::MessageStream::from(connection.clone());
 
@@ -191,35 +199,29 @@ where
                 let is_received = body.1;
                 if is_received {
                     info!("SmsPath:\n{}", sms_path);
-                    if let Err(e) = get_sms_content(
+                    if let Err(e) = handle_incoming_sms(
                         &connection,
                         &sms_path,
                         &ignored_storage,
-                        profiles,
+                        &profiles,
                         config,
-                        &mut on_received,
+                        on_received,
                         client,
                         shell_runner,
                         shell_timeout,
                     )
                     .await
                     {
-                        error!("处理短信失败: {}", e);
+                        error!("handle incoming SMS failed: {}", e);
                     }
                 }
             }
         }
     }
-    Ok(())
+    Err(anyhow::anyhow!("ModemManager signal stream ended"))
 }
 
-fn should_ignore_storage(storage: u32, filters: &[StorageType]) -> bool {
-    filters
-        .iter()
-        .any(|filter| !matches!(filter, StorageType::All) && filter.should_ignore(storage))
-}
-
-async fn get_sms_content<F, Fut>(
+async fn handle_incoming_sms<F, Fut>(
     connection: &Connection,
     sms_path: &str,
     storage_filters: &[StorageType],
@@ -231,7 +233,7 @@ async fn get_sms_content<F, Fut>(
     shell_timeout: Duration,
 ) -> Result<()>
 where
-    F: FnMut(ReceivedSms) -> Fut + Send,
+    F: FnMut(crate::dbus::ReceivedSms) -> Fut + Send,
     Fut: std::future::Future<Output = Result<()>> + Send,
 {
     let mut retries = 0;
@@ -296,6 +298,70 @@ where
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
+}
+
+pub async fn monitor_dbus_with_handler<F, Fut>(
+    configured_modem_path: &str,
+    config: &AppConfig,
+    on_received: F,
+    client: &reqwest::Client,
+    shell_runner: &dyn ProcessRunner,
+    shell_timeout: Duration,
+    modem_service: &ModemService,
+    store: &MessageStore,
+) -> Result<()>
+where
+    F: FnMut(ReceivedSms) -> Fut + Send + Clone + 'static,
+    Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+{
+    println!("短信转发模式正在启动，正在连接系统 D-Bus。");
+    info!("正在运行. 按下 Ctrl-C 停止.");
+
+    let mut current_path = resolve_monitor_path(configured_modem_path, modem_service, store).await;
+    if current_path.is_none() {
+        warn!("initial modem resolution failed; will retry with backoff");
+        current_path = Some(configured_modem_path.to_string());
+    }
+
+    let mut delay = Duration::from_secs(5);
+    let max_delay = Duration::from_secs(60);
+
+    loop {
+        let path = current_path
+            .clone()
+            .unwrap_or_else(|| configured_modem_path.to_string());
+        let mut cb = on_received.clone();
+
+        match run_subscription(&path, config, &mut cb, client, shell_runner, shell_timeout).await {
+            Ok(()) => {
+                delay = Duration::from_secs(5);
+            }
+            Err(e) => {
+                error!("D-Bus monitor lost: {}", e);
+                // Re-resolve the modem path
+                let resolved =
+                    resolve_monitor_path(configured_modem_path, modem_service, store).await;
+                if let Some(new_path) = resolved {
+                    if new_path != path {
+                        info!("modem path changed from {} to {}", path, new_path);
+                    }
+                    current_path = Some(new_path);
+                } else {
+                    warn!("modem re-resolution failed; will retry");
+                }
+            }
+        }
+
+        info!("reconnecting in {}s...", delay.as_secs_f64());
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(max_delay);
+    }
+}
+
+fn should_ignore_storage(storage: u32, filters: &[StorageType]) -> bool {
+    filters
+        .iter()
+        .any(|filter| !matches!(filter, StorageType::All) && filter.should_ignore(storage))
 }
 
 pub async fn send_sms(
