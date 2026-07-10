@@ -1,7 +1,7 @@
-use anyhow::Result;
 use log::{error, info};
 
 use crate::config::{AppConfig, PushPlusConfig};
+use crate::forward::ForwardOutcome;
 use crate::smscode;
 
 pub async fn send(
@@ -12,7 +12,7 @@ pub async fn send(
     device_name: &str,
     profile: &PushPlusConfig,
     app_config: &AppConfig,
-) -> Result<()> {
+) -> ForwardOutcome {
     let token = profile.token.as_str();
 
     let (code_str, _, _) = smscode::get_sms_code_str(sms_text, app_config);
@@ -31,19 +31,25 @@ pub async fn send(
         ("title", title),
         ("content", content),
     ];
-    let resp = client
+    let resp = match client
         .post("https://www.pushplus.plus/send")
         .form(&params)
         .send()
-        .await?;
-    let json: serde_json::Value = resp.json().await?;
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return ForwardOutcome::TransientFailure(e.to_string()),
+    };
+    let json: serde_json::Value = match resp.json().await {
+        Ok(j) => j,
+        Err(e) => return ForwardOutcome::TransientFailure(e.to_string()),
+    };
     if json["code"].as_i64() == Some(200) {
         info!("pushplus转发成功");
+        ForwardOutcome::Success
     } else {
-        error!(
-            "pushplus转发失败: {}",
-            json["msg"].as_str().unwrap_or("unknown error")
-        );
+        let msg = json["msg"].as_str().unwrap_or("unknown error");
+        error!("pushplus转发失败: {}", msg);
+        ForwardOutcome::PermanentFailure(msg.to_string())
     }
-    Ok(())
 }

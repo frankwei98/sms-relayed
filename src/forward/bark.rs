@@ -1,7 +1,7 @@
-use anyhow::Result;
 use log::{error, info};
 
 use crate::config::{AppConfig, BarkConfig};
+use crate::forward::ForwardOutcome;
 use crate::smscode;
 use crate::util;
 
@@ -13,7 +13,7 @@ pub async fn send(
     device_name: &str,
     profile: &BarkConfig,
     app_config: &AppConfig,
-) -> Result<()> {
+) -> ForwardOutcome {
     let bark_url = profile.server_url.trim_end_matches('/');
     let bark_key = profile.key.as_str();
 
@@ -45,15 +45,20 @@ pub async fn send(
         url.push_str(&format!("?group={}&title={}", tel_number, title));
     }
 
-    let resp = client.get(&url).send().await?;
-    let json: serde_json::Value = resp.json().await?;
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => return ForwardOutcome::TransientFailure(e.to_string()),
+    };
+    let json: serde_json::Value = match resp.json().await {
+        Ok(j) => j,
+        Err(e) => return ForwardOutcome::TransientFailure(e.to_string()),
+    };
     if json["code"].as_i64() == Some(200) {
         info!("Bark转发成功");
+        ForwardOutcome::Success
     } else {
-        error!(
-            "Bark转发失败: {}",
-            json["message"].as_str().unwrap_or("unknown error")
-        );
+        let msg = json["message"].as_str().unwrap_or("unknown error");
+        error!("Bark转发失败: {}", msg);
+        ForwardOutcome::PermanentFailure(msg.to_string())
     }
-    Ok(())
 }

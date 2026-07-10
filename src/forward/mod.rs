@@ -7,13 +7,20 @@ pub mod wecom;
 
 use std::time::Duration;
 
-use anyhow::Result;
 use log::error;
 
 use crate::config::{AppConfig, ChannelProfile};
 use crate::runner::ProcessRunner;
 use crate::util;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForwardOutcome {
+    Success,
+    TransientFailure(String),
+    PermanentFailure(String),
+}
+
+#[allow(dead_code)]
 pub async fn forward_sms(
     client: &reqwest::Client,
     shell_runner: &dyn ProcessRunner,
@@ -23,7 +30,7 @@ pub async fn forward_sms(
     sms_text: &str,
     sms_date: &str,
     config: &AppConfig,
-) -> Result<()> {
+) -> Vec<(String, ForwardOutcome)> {
     let device_name = resolve_device_name(config);
     let sms_date = sms_date.replace('T', " ");
     println!(
@@ -31,9 +38,10 @@ pub async fn forward_sms(
         tel_number, sms_date, sms_text
     );
 
-    let mut failures = 0usize;
+    let mut results: Vec<(String, ForwardOutcome)> = Vec::new();
     for profile in profiles {
-        let result = match profile {
+        let key = profile.key();
+        let outcome = match profile {
             ChannelProfile::PushPlus {
                 config: profile_config,
                 ..
@@ -126,18 +134,29 @@ pub async fn forward_sms(
                 .await
             }
         };
-        if let Err(e) = result {
-            failures += 1;
-            error!("profile forward failed: {}", e);
+        results.push((key, outcome));
+    }
+
+    let failures: Vec<_> = results
+        .iter()
+        .filter(|(_, o)| !matches!(o, ForwardOutcome::Success))
+        .map(|(k, _)| k.clone())
+        .collect();
+    if failures.len() == profiles.len() && !profiles.is_empty() {
+        error!("all forwarding profiles failed for this SMS");
+    }
+    for (key, outcome) in &results {
+        if matches!(outcome, ForwardOutcome::Success) {
+            log::info!("{} forward success", key);
+        } else {
+            error!("{} forward failed: {:?}", key, outcome);
         }
     }
 
-    if failures == profiles.len() && !profiles.is_empty() {
-        error!("all forwarding profiles failed for this SMS");
-    }
-    Ok(())
+    results
 }
 
+#[allow(dead_code)]
 fn resolve_device_name(config: &AppConfig) -> String {
     let name = config.app.device_name.as_str();
     if name == "*Host*Name*" || name.is_empty() {

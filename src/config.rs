@@ -296,6 +296,17 @@ impl ProfileRef {
 }
 
 impl ChannelProfile {
+    pub fn key(&self) -> String {
+        match self {
+            ChannelProfile::Bark { name, .. } => format!("bark.{}", name),
+            ChannelProfile::Telegram { name, .. } => format!("telegram.{}", name),
+            ChannelProfile::PushPlus { name, .. } => format!("pushplus.{}", name),
+            ChannelProfile::WeCom { name, .. } => format!("wecom.{}", name),
+            ChannelProfile::DingTalk { name, .. } => format!("dingtalk.{}", name),
+            ChannelProfile::Shell { name, .. } => format!("shell.{}", name),
+        }
+    }
+
     pub fn redacted_line(&self) -> String {
         match self {
             ChannelProfile::Bark { name, config } => {

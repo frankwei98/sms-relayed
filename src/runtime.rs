@@ -10,6 +10,7 @@ use crate::api::auth::SessionStore;
 use crate::api::ApiState;
 use crate::config::AppConfig;
 use crate::dbus::{self, SendTarget};
+use crate::delivery::run_delivery_worker;
 use crate::events::{AppEvent, EventBus};
 use crate::message::{Message, MessageDirection, MessageSource, MessageStatus};
 use crate::modem::ModemService;
@@ -19,6 +20,7 @@ use crate::storage::{MessageStore, NewMessage};
 pub async fn run_forwarding(config_path: &Path) -> Result<()> {
     let config = AppConfig::load(config_path)?;
     config.validate()?;
+
     let store = MessageStore::open(Path::new(&config.api.database_path))?;
     let events = EventBus::new();
 
@@ -27,17 +29,27 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
     let shell_runner = RealProcessRunner;
     let modem_service = ModemService::new();
 
+    // Recover expired delivery leases
+    let lease_timeout =
+        OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?;
+    if let Ok(count) = store.recover_expired_leases(&lease_timeout) {
+        if count > 0 {
+            log::info!("recovered {} expired delivery leases", count);
+        }
+    }
+
     let store_inbound = store.clone();
     let events_inbound = events.clone();
-    let client_inbound = client.clone();
-    let modem_inbound = modem_service.clone();
+    let config_inbound = config.clone();
 
+    let dbus_modem = modem_service.clone();
     let dbus_future = dbus::monitor_dbus_with_handler(
         &config.app.modem_path,
         &config,
         move |sms| {
             let store = store_inbound.clone();
             let events = events_inbound.clone();
+            let cfg = config_inbound.clone();
             async move {
                 let msg = store.insert_message(NewMessage {
                     direction: MessageDirection::Inbound,
@@ -50,15 +62,29 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
                     read_at: None,
                     error: None,
                 })?;
+                let profile_keys: Vec<String> = cfg
+                    .enabled_profiles()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|p| p.key())
+                    .collect();
+                if !profile_keys.is_empty() {
+                    store.insert_deliveries(msg.id, &profile_keys)?;
+                }
                 events.send(AppEvent::MessageCreated(msg));
                 Ok(())
             }
         },
-        &client_inbound,
-        &shell_runner,
-        shell_timeout,
-        &modem_inbound,
+        &dbus_modem,
         &store,
+    );
+
+    let delivery_worker = run_delivery_worker(
+        store.clone(),
+        config.clone(),
+        client.clone(),
+        Arc::new(shell_runner),
+        shell_timeout,
     );
 
     if config.api.enabled {
@@ -72,11 +98,23 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
             modem: modem_service,
         };
         tokio::select! {
-            result = crate::api::serve(api_state) => result,
+            biased;
+            result = crate::api::serve(api_state) => {
+                log::warn!("API server exited: {:?}", result);
+                result
+            }
             result = dbus_future => result,
+            _ = delivery_worker => {
+                Err(anyhow::anyhow!("delivery worker exited unexpectedly"))
+            }
         }
     } else {
-        dbus_future.await
+        tokio::select! {
+            result = dbus_future => result,
+            _ = delivery_worker => {
+                Err(anyhow::anyhow!("delivery worker exited unexpectedly"))
+            }
+        }
     }
 }
 

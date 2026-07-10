@@ -9,6 +9,20 @@ use crate::message::{
     ConversationSummary, Message, MessageDirection, MessageFilter, MessageSource, MessageStatus,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryRow {
+    pub id: i64,
+    pub message_id: i64,
+    pub profile_key: String,
+    pub state: String,
+    pub attempt_count: i64,
+    pub next_attempt_at: Option<String>,
+    pub lease_at: Option<String>,
+    pub last_error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Clone)]
 pub struct MessageStore {
     conn: Arc<Mutex<Connection>>,
@@ -92,7 +106,22 @@ impl MessageStore {
             CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS forward_deliveries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id INTEGER NOT NULL REFERENCES messages(id),
+                profile_key TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT,
+                lease_at TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(message_id, profile_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_deliveries_state ON forward_deliveries(state);
+            CREATE INDEX IF NOT EXISTS idx_deliveries_next_attempt ON forward_deliveries(next_attempt_at);",
         )?;
         Ok(())
     }
@@ -303,6 +332,123 @@ impl MessageStore {
         Ok(())
     }
 
+    pub fn insert_deliveries(&self, message_id: i64, profile_keys: &[String]) -> Result<()> {
+        let now = now_string();
+        let conn = self.conn.lock().unwrap();
+        for key in profile_keys {
+            conn.execute(
+                "INSERT OR IGNORE INTO forward_deliveries (message_id, profile_key, state, created_at, updated_at)
+                 VALUES (?1, ?2, 'pending', ?3, ?3)",
+                params![message_id, key, now],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn claim_due_deliveries(
+        &self,
+        batch_size: u32,
+        lease_until: &str,
+    ) -> Result<Vec<DeliveryRow>> {
+        let now = now_string();
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, message_id, profile_key, state, attempt_count, next_attempt_at, lease_at, last_error, created_at, updated_at
+             FROM forward_deliveries
+             WHERE state IN ('pending', 'retry_wait')
+               AND (next_attempt_at IS NULL OR next_attempt_at <= ?1)
+             ORDER BY id ASC
+             LIMIT ?2",
+        )?;
+        let rows: Vec<DeliveryRow> = stmt
+            .query_map(params![now, batch_size], row_to_delivery)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        for row in &rows {
+            conn.execute(
+                "UPDATE forward_deliveries SET state = 'in_flight', lease_at = ?1, updated_at = ?1 WHERE id = ?2 AND state IN ('pending', 'retry_wait')",
+                params![lease_until, row.id],
+            )?;
+        }
+
+        // Re-read rows that were successfully claimed
+        let ids: Vec<String> = rows.iter().map(|r| r.id.to_string()).collect();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT id, message_id, profile_key, state, attempt_count, next_attempt_at, lease_at, last_error, created_at, updated_at
+             FROM forward_deliveries WHERE id IN ({}) AND state = 'in_flight'",
+            placeholders
+        );
+        let mut stmt2 = conn.prepare(&sql)?;
+        let params2: Vec<&dyn rusqlite::types::ToSql> = ids
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        let claimed = stmt2
+            .query_map(params2.as_slice(), row_to_delivery)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(claimed)
+    }
+
+    pub fn complete_delivery(
+        &self,
+        id: i64,
+        state: &str,
+        error: Option<&str>,
+        attempt_count: i64,
+        next_attempt_at: Option<&str>,
+    ) -> Result<()> {
+        let now = now_string();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE forward_deliveries SET state = ?1, last_error = ?2, attempt_count = ?3, next_attempt_at = ?4, lease_at = NULL, updated_at = ?5 WHERE id = ?6",
+            params![state, error, attempt_count, next_attempt_at, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn recover_expired_leases(&self, before: &str) -> Result<usize> {
+        let now = now_string();
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute(
+            "UPDATE forward_deliveries SET state = 'retry_wait', lease_at = NULL, next_attempt_at = ?1, updated_at = ?1
+             WHERE state = 'in_flight' AND lease_at IS NOT NULL AND lease_at < ?2",
+            params![now, before],
+        )?;
+        Ok(count)
+    }
+
+    #[allow(dead_code)]
+    pub fn get_delivery_count_for_message(
+        &self,
+        message_id: i64,
+        non_terminal_states: &[&str],
+    ) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let placeholders: Vec<String> = non_terminal_states
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 2))
+            .collect();
+        let sql = format!(
+            "SELECT COUNT(*) FROM forward_deliveries
+             WHERE message_id = ?1 AND state IN ({})",
+            placeholders.join(",")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(message_id)];
+        for s in non_terminal_states {
+            params_vec.push(Box::new(s.to_string()));
+        }
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+        let count: i64 = stmt.query_row(param_refs.as_slice(), |row| row.get(0))?;
+        Ok(count)
+    }
+
     pub fn export_messages_csv(&self, filter: &MessageFilter) -> Result<String> {
         let messages = self.export_messages(filter)?;
         let mut writer = csv::WriterBuilder::new()
@@ -413,6 +559,21 @@ fn str_to_source(s: &str) -> MessageSource {
         "cli" => MessageSource::Cli,
         _ => MessageSource::Modem,
     }
+}
+
+fn row_to_delivery(row: &Row) -> rusqlite::Result<DeliveryRow> {
+    Ok(DeliveryRow {
+        id: row.get(0)?,
+        message_id: row.get(1)?,
+        profile_key: row.get(2)?,
+        state: row.get(3)?,
+        attempt_count: row.get(4)?,
+        next_attempt_at: row.get(5)?,
+        lease_at: row.get(6)?,
+        last_error: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
 }
 
 fn now_string() -> String {

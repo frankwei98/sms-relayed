@@ -3,6 +3,7 @@ mod assets;
 mod cli;
 mod config;
 mod dbus;
+mod delivery;
 mod events;
 mod forward;
 mod message;

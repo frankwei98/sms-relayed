@@ -8,10 +8,8 @@ use log::{error, info, warn};
 use zbus::zvariant::{OwnedValue, Value};
 use zbus::Connection;
 
-use crate::config::{AppConfig, ChannelProfile};
-use crate::forward;
+use crate::config::AppConfig;
 use crate::modem::ModemService;
-use crate::runner::ProcessRunner;
 use crate::storage::MessageStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,9 +141,6 @@ async fn run_subscription<F, Fut>(
     actual_path: &str,
     config: &AppConfig,
     on_received: &mut F,
-    client: &reqwest::Client,
-    shell_runner: &dyn ProcessRunner,
-    shell_timeout: Duration,
 ) -> Result<()>
 where
     F: FnMut(crate::dbus::ReceivedSms) -> Fut + Send,
@@ -176,8 +171,6 @@ where
         .map(|s| StorageType::from_config(s))
         .collect();
 
-    let profiles = config.enabled_profiles().unwrap_or_default();
-
     let mut stream = zbus::MessageStream::from(connection.clone());
 
     while let Some(msg) = stream.next().await {
@@ -199,18 +192,9 @@ where
                 let is_received = body.1;
                 if is_received {
                     info!("SmsPath:\n{}", sms_path);
-                    if let Err(e) = handle_incoming_sms(
-                        &connection,
-                        &sms_path,
-                        &ignored_storage,
-                        &profiles,
-                        config,
-                        on_received,
-                        client,
-                        shell_runner,
-                        shell_timeout,
-                    )
-                    .await
+                    if let Err(e) =
+                        handle_incoming_sms(&connection, &sms_path, &ignored_storage, on_received)
+                            .await
                     {
                         error!("handle incoming SMS failed: {}", e);
                     }
@@ -225,12 +209,7 @@ async fn handle_incoming_sms<F, Fut>(
     connection: &Connection,
     sms_path: &str,
     storage_filters: &[StorageType],
-    profiles: &[ChannelProfile],
-    config: &AppConfig,
     on_received: &mut F,
-    client: &reqwest::Client,
-    shell_runner: &dyn ProcessRunner,
-    shell_timeout: Duration,
 ) -> Result<()>
 where
     F: FnMut(crate::dbus::ReceivedSms) -> Fut + Send,
@@ -268,23 +247,9 @@ where
                 storage,
                 modem_sms_path: sms_path.to_string(),
             };
-            let phone_number = received.phone_number.clone();
-            let body = received.body.clone();
-            let timestamp = received.timestamp.clone();
             if let Err(e) = on_received(received).await {
                 error!("处理短信失败: {}", e);
             }
-            forward::forward_sms(
-                client,
-                shell_runner,
-                shell_timeout,
-                profiles,
-                &phone_number,
-                &body,
-                &timestamp,
-                config,
-            )
-            .await?;
             return Ok(());
         } else {
             retries += 1;
@@ -304,9 +269,6 @@ pub async fn monitor_dbus_with_handler<F, Fut>(
     configured_modem_path: &str,
     config: &AppConfig,
     on_received: F,
-    client: &reqwest::Client,
-    shell_runner: &dyn ProcessRunner,
-    shell_timeout: Duration,
     modem_service: &ModemService,
     store: &MessageStore,
 ) -> Result<()>
@@ -332,13 +294,12 @@ where
             .unwrap_or_else(|| configured_modem_path.to_string());
         let mut cb = on_received.clone();
 
-        match run_subscription(&path, config, &mut cb, client, shell_runner, shell_timeout).await {
+        match run_subscription(&path, config, &mut cb).await {
             Ok(()) => {
                 delay = Duration::from_secs(5);
             }
             Err(e) => {
                 error!("D-Bus monitor lost: {}", e);
-                // Re-resolve the modem path
                 let resolved =
                     resolve_monitor_path(configured_modem_path, modem_service, store).await;
                 if let Some(new_path) = resolved {

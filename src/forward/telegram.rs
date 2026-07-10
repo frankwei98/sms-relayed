@@ -1,7 +1,7 @@
-use anyhow::Result;
 use log::{error, info};
 
 use crate::config::{AppConfig, TelegramConfig};
+use crate::forward::ForwardOutcome;
 use crate::smscode;
 use crate::util;
 
@@ -13,7 +13,7 @@ pub async fn send(
     device_name: &str,
     profile: &TelegramConfig,
     app_config: &AppConfig,
-) -> Result<()> {
+) -> ForwardOutcome {
     let token = profile.bot_token.as_str();
     let chat_id = profile.chat_id.as_str();
     let base_url = profile.api_base.trim_end_matches('/');
@@ -37,15 +37,20 @@ pub async fn send(
         util::url_encode_form(&text)
     );
 
-    let resp = client.get(&url).send().await?;
-    let json: serde_json::Value = resp.json().await?;
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => return ForwardOutcome::TransientFailure(e.to_string()),
+    };
+    let json: serde_json::Value = match resp.json().await {
+        Ok(j) => j,
+        Err(e) => return ForwardOutcome::TransientFailure(e.to_string()),
+    };
     if json["ok"].as_bool() == Some(true) {
         info!("TGBot转发成功");
+        ForwardOutcome::Success
     } else {
-        error!(
-            "TGBot转发失败: {}",
-            json["description"].as_str().unwrap_or("unknown error")
-        );
+        let msg = json["description"].as_str().unwrap_or("unknown error");
+        error!("TGBot转发失败: {}", msg);
+        ForwardOutcome::PermanentFailure(msg.to_string())
     }
-    Ok(())
 }
