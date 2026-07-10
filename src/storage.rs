@@ -431,6 +431,33 @@ impl MessageStore {
     }
 
     #[allow(dead_code)]
+    pub fn run_retention(&self, max_age_days: u64, batch_size: u32) -> Result<usize> {
+        let cutoff = (OffsetDateTime::now_utc() - time::Duration::days(max_age_days as i64))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        let conn = self.conn.lock().unwrap();
+        // Find message IDs eligible for deletion: terminal status, old, and no non-terminal deliveries
+        let mut stmt = conn.prepare(
+            "SELECT m.id FROM messages m
+             WHERE m.timestamp < ?1
+               AND m.status IN ('received', 'sent', 'failed')
+               AND NOT EXISTS (
+                   SELECT 1 FROM forward_deliveries d
+                   WHERE d.message_id = m.id
+                     AND d.state IN ('pending', 'in_flight', 'retry_wait')
+               )
+             LIMIT ?2",
+        )?;
+        let ids: Vec<i64> = stmt
+            .query_map(params![cutoff, batch_size], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let count = ids.len();
+        for id in &ids {
+            conn.execute("DELETE FROM messages WHERE id = ?1", params![id])?;
+        }
+        Ok(count)
+    }
+
     pub fn get_delivery_count_for_message(
         &self,
         message_id: i64,
@@ -865,5 +892,48 @@ mod tests {
         assert_eq!(store.get_meta("test_key").as_deref(), Some("hello"));
         store.set_meta("test_key", "updated").unwrap();
         assert_eq!(store.get_meta("test_key").as_deref(), Some("updated"));
+    }
+
+    #[test]
+    fn retention_deletes_old_terminal_messages() {
+        let store = memory_store();
+        store
+            .insert_message(NewMessage {
+                direction: MessageDirection::Inbound,
+                phone_number: "+1".to_string(),
+                body: "old".to_string(),
+                timestamp: "2020-01-01T00:00:00Z".to_string(),
+                status: MessageStatus::Received,
+                source: MessageSource::Modem,
+                modem_sms_path: None,
+                read_at: None,
+                error: None,
+            })
+            .unwrap();
+        let deleted = store.run_retention(1, 100).unwrap();
+        assert_eq!(deleted, 1);
+    }
+
+    #[test]
+    fn retention_skips_messages_with_non_terminal_deliveries() {
+        let store = memory_store();
+        let msg = store
+            .insert_message(NewMessage {
+                direction: MessageDirection::Inbound,
+                phone_number: "+1".to_string(),
+                body: "old".to_string(),
+                timestamp: "2020-01-01T00:00:00Z".to_string(),
+                status: MessageStatus::Received,
+                source: MessageSource::Modem,
+                modem_sms_path: None,
+                read_at: None,
+                error: None,
+            })
+            .unwrap();
+        store
+            .insert_deliveries(msg.id, &["bark.test".to_string()])
+            .unwrap();
+        let deleted = store.run_retention(1, 100).unwrap();
+        assert_eq!(deleted, 0);
     }
 }

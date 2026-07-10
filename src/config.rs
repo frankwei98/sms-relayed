@@ -21,6 +21,36 @@ pub struct AppConfig {
     pub api: ApiSection,
     #[serde(default)]
     pub http: HttpSection,
+    #[serde(default)]
+    pub retention: RetentionSection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RetentionSection {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_retention_max_age_days")]
+    pub max_age_days: u64,
+    #[serde(default = "default_retention_batch_size")]
+    pub batch_size: u32,
+}
+
+fn default_retention_max_age_days() -> u64 {
+    90
+}
+
+fn default_retention_batch_size() -> u32 {
+    500
+}
+
+impl Default for RetentionSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_age_days: default_retention_max_age_days(),
+            batch_size: default_retention_batch_size(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -267,6 +297,7 @@ impl Default for AppConfig {
             channels: ChannelsSection::default(),
             api: ApiSection::default(),
             http: HttpSection::default(),
+            retention: RetentionSection::default(),
         }
     }
 }
