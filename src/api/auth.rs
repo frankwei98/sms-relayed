@@ -13,6 +13,7 @@ use super::{ApiError, ApiState};
 
 pub const SESSION_COOKIE: &str = "sms-relayed-session";
 const SESSION_DAYS: i64 = 7;
+const MAX_SESSIONS: usize = 256;
 
 #[derive(Clone, Default)]
 pub struct SessionStore {
@@ -23,16 +24,23 @@ impl SessionStore {
     pub fn create_session(&self) -> String {
         let token = Uuid::new_v4().to_string();
         let expires = OffsetDateTime::now_utc() + Duration::days(SESSION_DAYS);
-        self.inner.lock().unwrap().insert(token.clone(), expires);
+        let mut guard = self.inner.lock().unwrap();
+        // Prune expired before insert
+        prune_expired(&mut guard);
+        // Enforce capacity
+        if guard.len() >= MAX_SESSIONS {
+            evict_oldest(&mut guard);
+        }
+        guard.insert(token.clone(), expires);
         token
     }
 
     pub fn is_valid(&self, token: &str) -> bool {
-        let guard = self.inner.lock().unwrap();
-        match guard.get(token) {
-            Some(expires) => *expires > OffsetDateTime::now_utc(),
-            None => false,
-        }
+        let mut guard = self.inner.lock().unwrap();
+        prune_expired(&mut guard);
+        guard
+            .get(token)
+            .is_some_and(|expires| *expires > OffsetDateTime::now_utc())
     }
 
     pub fn remove(&self, token: &str) {
@@ -70,6 +78,26 @@ impl SessionStore {
         if let Some(expires) = self.inner.lock().unwrap().get_mut(token) {
             *expires = OffsetDateTime::UNIX_EPOCH;
         }
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.inner.lock().unwrap().len()
+    }
+}
+
+fn prune_expired(sessions: &mut HashMap<String, OffsetDateTime>) {
+    let now = OffsetDateTime::now_utc();
+    sessions.retain(|_, expires| *expires > now);
+}
+
+fn evict_oldest(sessions: &mut HashMap<String, OffsetDateTime>) {
+    if let Some(oldest) = sessions
+        .iter()
+        .min_by_key(|(_, expires)| *expires)
+        .map(|(k, _)| k.clone())
+    {
+        sessions.remove(&oldest);
     }
 }
 
@@ -159,4 +187,23 @@ async fn me(State(state): State<ApiState>, headers: HeaderMap) -> Json<AuthRespo
     Json(AuthResponse {
         authenticated: state.sessions.is_valid(&session_token(&headers)),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_store_prunes_expired_and_enforces_capacity() {
+        let store = SessionStore::default();
+        // Create more than MAX_SESSIONS tokens
+        for i in 0..MAX_SESSIONS + 10 {
+            let token = store.create_session();
+            if i < MAX_SESSIONS {
+                assert!(store.is_valid(&token));
+            }
+        }
+        let len = store.len();
+        assert!(len <= MAX_SESSIONS, "len {} > max {}", len, MAX_SESSIONS);
+    }
 }

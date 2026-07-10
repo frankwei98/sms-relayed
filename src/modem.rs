@@ -511,6 +511,7 @@ pub struct PublicModemHealth {
 
 const MMCLI_TIMEOUT: Duration = Duration::from_secs(5);
 const HEALTH_CACHE_TTL: Duration = Duration::from_secs(5);
+const HEALTH_STALE_MAX: Duration = Duration::from_secs(30);
 const RESET_RATE_LIMIT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Default)]
@@ -567,6 +568,7 @@ pub struct ModemService {
     health_cache: Arc<Mutex<Option<(String, Instant, PublicModemHealth)>>>,
     pub(crate) action_lock: Arc<tokio::sync::Mutex<()>>,
     reset_limits: Arc<Mutex<HashMap<String, Instant>>>,
+    health_refresh_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl ModemService {
@@ -584,6 +586,7 @@ impl ModemService {
             health_cache: Arc::new(Mutex::new(None)),
             action_lock: Arc::new(tokio::sync::Mutex::new(())),
             reset_limits: Arc::new(Mutex::new(HashMap::new())),
+            health_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -817,18 +820,45 @@ impl ModemService {
     }
 
     pub async fn public_health(&self, configured_path: &str) -> PublicModemHealth {
-        if let Some((path, at, cached)) = self.health_cache.lock().unwrap().clone() {
-            if path == configured_path && at.elapsed() < HEALTH_CACHE_TTL {
-                return cached;
+        // Fast path: fresh cache hit
+        {
+            let cache = self.health_cache.lock().unwrap();
+            if let Some((path, at, ref cached)) = cache.clone() {
+                if path == configured_path {
+                    if at.elapsed() < HEALTH_CACHE_TTL {
+                        return cached.clone();
+                    }
+                    // Stale but within stale-result window: return stale if refresh in progress
+                    if at.elapsed() < HEALTH_STALE_MAX
+                        && self.health_refresh_lock.try_lock().is_err()
+                    {
+                        return cached.clone();
+                    }
+                }
             }
         }
 
+        // Acquire the refresh lock (blocks concurrent refreshers)
+        let _guard = self.health_refresh_lock.lock().await;
+
+        // Double-check cache after acquiring lock (another thread may have refreshed)
+        {
+            let cache = self.health_cache.lock().unwrap();
+            if let Some((path, at, ref cached)) = cache.clone() {
+                if path == configured_path && at.elapsed() < HEALTH_CACHE_TTL {
+                    return cached.clone();
+                }
+            }
+        }
+
+        // Perform the refresh
         let status = self.status(configured_path).await;
         let health = PublicModemHealth {
             status: status.health.status,
             reason: status.health.reasons.first().cloned(),
             checked_at: status.checked_at,
         };
+
         *self.health_cache.lock().unwrap() =
             Some((configured_path.to_string(), Instant::now(), health.clone()));
         health
