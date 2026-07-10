@@ -288,42 +288,51 @@ impl MessageStore {
     }
 
     pub fn list_conversations(&self) -> Result<Vec<ConversationSummary>> {
-        let messages = self.list_messages(&MessageFilter {
-            limit: Some(500),
-            ..MessageFilter::default()
-        })?;
-        let mut by_phone: std::collections::BTreeMap<String, Vec<Message>> =
-            std::collections::BTreeMap::new();
-        for msg in messages {
-            by_phone
-                .entry(msg.phone_number.clone())
-                .or_default()
-                .push(msg);
-        }
-        let mut out: Vec<ConversationSummary> = by_phone
-            .into_iter()
-            .filter_map(|(phone_number, rows)| {
-                let last_message = rows.first()?.clone();
-                let unread_count = rows
-                    .iter()
-                    .filter(|m| m.direction == MessageDirection::Inbound && m.read_at.is_none())
-                    .count() as i64;
-                let total_count = rows.len() as i64;
-                Some(ConversationSummary {
-                    phone_number,
-                    last_message,
-                    unread_count,
-                    total_count,
-                })
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "WITH agg AS (
+                SELECT phone_number,
+                       COUNT(*) as total_count,
+                       SUM(CASE WHEN direction = 'inbound' AND read_at IS NULL THEN 1 ELSE 0 END) as unread_count,
+                       MAX(id) as last_id
+                FROM messages
+                GROUP BY phone_number
+            )
+            SELECT agg.phone_number, agg.total_count, agg.unread_count,
+                   m.id, m.direction, m.phone_number, m.body, m.timestamp,
+                   m.status, m.source, m.modem_sms_path, m.read_at, m.error,
+                   m.created_at, m.updated_at
+            FROM agg
+            JOIN messages m ON m.id = agg.last_id
+            ORDER BY m.id DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let phone_number: String = row.get(0)?;
+            let total_count: i64 = row.get(1)?;
+            let unread_count: i64 = row.get(2)?;
+            let last_message = Message {
+                id: row.get(3)?,
+                direction: str_to_direction(&row.get::<_, String>(4)?),
+                phone_number: row.get(5)?,
+                body: row.get(6)?,
+                timestamp: row.get(7)?,
+                status: str_to_status(&row.get::<_, String>(8)?),
+                source: str_to_source(&row.get::<_, String>(9)?),
+                modem_sms_path: row.get(10)?,
+                read_at: row.get(11)?,
+                error: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
+            };
+            Ok(ConversationSummary {
+                phone_number,
+                last_message,
+                unread_count,
+                total_count,
             })
-            .collect();
-        out.sort_by(|a, b| {
-            b.last_message
-                .timestamp
-                .cmp(&a.last_message.timestamp)
-                .then(b.last_message.id.cmp(&a.last_message.id))
-        });
-        Ok(out)
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn health_check(&self) -> Result<()> {
@@ -813,7 +822,7 @@ mod tests {
     }
 
     #[test]
-    fn conversations_truncated_to_newest_500_global_messages() {
+    fn conversations_include_all_phones_beyond_500_messages() {
         let store = memory_store();
         store
             .insert_message(NewMessage::inbound("+15550000002", "oldest message"))
@@ -835,9 +844,17 @@ mod tests {
         }
 
         let conversations = store.list_conversations().unwrap();
-        assert_eq!(conversations.len(), 1);
-        assert_eq!(conversations[0].phone_number, "+15550000001");
-        assert_eq!(conversations[0].total_count, 500);
+        assert_eq!(conversations.len(), 2);
+        let a = conversations
+            .iter()
+            .find(|c| c.phone_number == "+15550000001")
+            .unwrap();
+        assert_eq!(a.total_count, 500);
+        let b = conversations
+            .iter()
+            .find(|c| c.phone_number == "+15550000002")
+            .unwrap();
+        assert_eq!(b.total_count, 1);
     }
 
     #[test]
