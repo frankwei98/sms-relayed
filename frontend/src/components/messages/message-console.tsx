@@ -120,27 +120,28 @@ export function MessageConsole() {
 		loadMessages();
 	}, [loadMessages]);
 
+	const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+	const scheduleRefresh = useCallback(() => {
+		if (refreshTimeoutRef.current) clearTimeout(refreshTimeoutRef.current);
+		refreshTimeoutRef.current = setTimeout(() => {
+			reloadActiveViews();
+			refreshTimeoutRef.current = null;
+		}, 100);
+	}, [reloadActiveViews]);
+
 	useEffect(() => {
 		const unsub = subscribeEvents({
-			"message.created": () => {
-				loadMessages();
-				loadConversations();
-			},
-			"message.updated": () => {
-				loadMessages();
-				loadConversations();
-			},
-			"message.deleted": () => {
-				loadMessages();
-				loadConversations();
-			},
-			"message.read_state_changed": () => {
-				loadMessages();
-				loadConversations();
-			},
+			"message.created": scheduleRefresh,
+			"message.updated": scheduleRefresh,
+			"message.deleted": scheduleRefresh,
+			"message.read_state_changed": scheduleRefresh,
 		});
-		return unsub;
-	}, [loadMessages, loadConversations]);
+		return () => {
+			unsub();
+			if (refreshTimeoutRef.current) clearTimeout(refreshTimeoutRef.current);
+		};
+	}, [scheduleRefresh]);
 
 	useEffect(() => {
 		if (
@@ -155,26 +156,20 @@ export function MessageConsole() {
 
 	useEffect(() => {
 		if (!selectedPhone || isComposingNew) return;
-		const unreadVisibleIds = messages
-			.filter(
-				(message) =>
-					message.phone_number === selectedPhone &&
-					message.direction === "inbound" &&
-					message.read_at === null &&
-					!markingReadIdsRef.current.has(message.id),
-			)
-			.map((message) => message.id);
-		if (unreadVisibleIds.length === 0) return;
+		const hasUnread = messages.some(
+			(message) =>
+				message.phone_number === selectedPhone &&
+				message.direction === "inbound" &&
+				message.read_at === null &&
+				!markingReadIdsRef.current.has(message.id),
+		);
+		if (!hasUnread) return;
 
-		for (const id of unreadVisibleIds) {
-			markingReadIdsRef.current.add(id);
-		}
+		markingReadIdsRef.current.add(0); // mark as in-flight
 
-		Promise.all(
-			unreadVisibleIds.map((id) =>
-				apiFetch(`/api/messages/${id}/read`, { method: "POST" }),
-			),
-		)
+		apiFetch(`/api/conversations/${encodeURIComponent(selectedPhone)}/read`, {
+			method: "POST",
+		})
 			.then(async () => {
 				await reloadActiveViews();
 			})
@@ -182,9 +177,7 @@ export function MessageConsole() {
 				console.error(err);
 			})
 			.finally(() => {
-				for (const id of unreadVisibleIds) {
-					markingReadIdsRef.current.delete(id);
-				}
+				markingReadIdsRef.current.delete(0);
 			});
 	}, [isComposingNew, messages, reloadActiveViews, selectedPhone]);
 
