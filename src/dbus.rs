@@ -132,6 +132,10 @@ async fn resolve_monitor_path(
         let current_fp = ModemService::compute_fingerprint(&identity);
         match stored_fp.as_deref() {
             Some(enrolled_fp) if enrolled_fp == current_fp => {
+                if let Err(e) = store.backfill_dedupe_keys() {
+                    error!("failed to backfill dedupe keys: {}", e);
+                    return None;
+                }
                 return Some(configured_path.to_string());
             }
             Some(enrolled_fp) => {
@@ -548,5 +552,49 @@ mod tests {
             store.get_meta(FINGERPRINT_META_KEY).as_deref(),
             Some(target.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn matching_enrolled_fingerprint_backfills_legacy_messages_before_monitoring() {
+        let store = MessageStore::open_in_memory().unwrap();
+        store
+            .insert_message(crate::storage::NewMessage {
+                direction: crate::message::MessageDirection::Inbound,
+                phone_number: "+1".to_string(),
+                body: "legacy".to_string(),
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                status: crate::message::MessageStatus::Received,
+                source: crate::message::MessageSource::Modem,
+                modem_sms_path: Some("/org/freedesktop/ModemManager1/SMS/1".to_string()),
+                read_at: None,
+                error: None,
+                inbound_dedupe_key: None,
+            })
+            .unwrap();
+        let enrolled = ModemService::compute_fingerprint("other");
+        store.set_meta(FINGERPRINT_META_KEY, &enrolled).unwrap();
+        let service = ModemService::new_with_runner(IdentityRunner);
+
+        let resolved =
+            resolve_monitor_path("/org/freedesktop/ModemManager1/Modem/0", &service, &store).await;
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some("/org/freedesktop/ModemManager1/Modem/0")
+        );
+        let replay = crate::storage::NewMessage::modem_inbound(
+            "+1",
+            "legacy",
+            "2026-01-01T00:00:00Z",
+            "/org/freedesktop/ModemManager1/SMS/99",
+            &enrolled,
+        );
+        assert!(matches!(
+            store
+                .insert_inbound_message_with_deliveries(replay, &[])
+                .unwrap(),
+            crate::storage::InboundInsertResult::Duplicate(_)
+        ));
+        assert_eq!(store.count_messages().unwrap(), 1);
     }
 }

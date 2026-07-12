@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+	cleanup,
+	fireEvent,
+	render,
+	screen,
+	waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { ForwardingStatusPanel } from "#/components/forwarding/forwarding-status-panel";
 
@@ -31,6 +37,7 @@ const failureSample = {
 };
 
 afterEach(() => {
+	cleanup();
 	vi.clearAllMocks();
 });
 
@@ -193,6 +200,41 @@ describe("ForwardingStatusPanel", () => {
 		await waitFor(() => {
 			expect(screen.getAllByText("bark.primary").length).toBeGreaterThan(0);
 		});
+	});
+
+	test("manual refresh disables the button and shows progress until completion", async () => {
+		mocks.apiFetch.mockResolvedValueOnce({
+			generated_at: "2026-07-12T17:00:00Z",
+			profiles: [],
+		});
+		let resolveRefresh: (value: unknown) => void = () => {};
+		mocks.apiFetch.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					resolveRefresh = resolve;
+				}),
+		);
+
+		render(<ForwardingStatusPanel />);
+		await waitFor(() => {
+			expect(
+				screen.getByText("No forwarding profiles configured."),
+			).toBeDefined();
+		});
+
+		const refreshButton = screen.getByRole("button", { name: /refresh/i });
+		fireEvent.click(refreshButton);
+		expect(refreshButton.hasAttribute("disabled")).toBe(true);
+		expect(refreshButton.querySelector(".animate-spin")).not.toBeNull();
+
+		resolveRefresh({
+			generated_at: "2026-07-12T17:01:00Z",
+			profiles: [],
+		});
+		await waitFor(() => {
+			expect(refreshButton.hasAttribute("disabled")).toBe(false);
+		});
+		expect(refreshButton.querySelector(".animate-spin")).toBeNull();
 	});
 
 	test("DOM does not contain phone numbers or SMS bodies", async () => {
