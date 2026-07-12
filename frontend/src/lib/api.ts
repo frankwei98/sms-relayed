@@ -49,3 +49,29 @@ export type ConversationSummary = {
 	unread_count: number;
 	total_count: number;
 };
+
+export type ForwardAttemptOutcome =
+	| "success"
+	| "transient_failure"
+	| "permanent_failure";
+
+export type ForwardAttemptSample = {
+	attempt_number: number;
+	is_retry: boolean;
+	started_at: string;
+	completed_at: string;
+	latency_ms: number;
+	outcome: ForwardAttemptOutcome;
+	error_code: string | null;
+};
+
+export type ProfileStatus = {
+	profile_key: string;
+	enabled: boolean;
+	samples: ForwardAttemptSample[];
+};
+
+export type ForwardingResponse = {
+	generated_at: string;
+	profiles: ProfileStatus[];
+};
