@@ -1003,6 +1003,180 @@ mod tests {
     }
 
     #[test]
+    fn repeated_inbound_dedupe_key_creates_one_message_and_delivery_set() {
+        let store = memory_store();
+        let profiles = ["bark.primary".to_string(), "telegram.backup".to_string()];
+        let input = || {
+            NewMessage::modem_inbound(
+                "+15550000000",
+                "same sms",
+                "2026-07-12T16:57:00+08:00",
+                "/org/freedesktop/ModemManager1/SMS/42",
+                "modem-fingerprint",
+            )
+        };
+
+        let first = store
+            .insert_inbound_message_with_deliveries(input(), &profiles)
+            .unwrap();
+        let second = store
+            .insert_inbound_message_with_deliveries(input(), &profiles)
+            .unwrap();
+
+        let InboundInsertResult::Inserted(inserted) = first else {
+            panic!("first reception must insert the message");
+        };
+        let InboundInsertResult::Duplicate(existing) = second else {
+            panic!("replayed reception must be reported as a duplicate");
+        };
+        assert_eq!(existing.id, inserted.id);
+        assert_eq!(store.count_messages().unwrap(), 1);
+        assert_eq!(store.count_deliveries().unwrap(), 2);
+    }
+
+    #[test]
+    fn inbound_dedupe_survives_path_changes_but_not_provider_timestamp_changes() {
+        let store = memory_store();
+        let profiles = ["bark.primary".to_string()];
+
+        let first = NewMessage::modem_inbound(
+            "+15550000000",
+            "same sms",
+            "2026-07-12T16:57:00+08:00",
+            "/org/freedesktop/ModemManager1/SMS/42",
+            "modem-fingerprint",
+        );
+        let replayed_at_new_path = NewMessage::modem_inbound(
+            "+15550000000",
+            "same sms",
+            "2026-07-12T16:57:00+08:00",
+            "/org/freedesktop/ModemManager1/SMS/99",
+            "modem-fingerprint",
+        );
+        let later_message = NewMessage::modem_inbound(
+            "+15550000000",
+            "same sms",
+            "2026-07-12T16:58:00+08:00",
+            "/org/freedesktop/ModemManager1/SMS/100",
+            "modem-fingerprint",
+        );
+
+        assert!(matches!(
+            store
+                .insert_inbound_message_with_deliveries(first, &profiles)
+                .unwrap(),
+            InboundInsertResult::Inserted(_)
+        ));
+        assert!(matches!(
+            store
+                .insert_inbound_message_with_deliveries(replayed_at_new_path, &profiles)
+                .unwrap(),
+            InboundInsertResult::Duplicate(_)
+        ));
+        assert!(matches!(
+            store
+                .insert_inbound_message_with_deliveries(later_message, &profiles)
+                .unwrap(),
+            InboundInsertResult::Inserted(_)
+        ));
+        assert_eq!(store.count_messages().unwrap(), 2);
+        assert_eq!(store.count_deliveries().unwrap(), 2);
+    }
+
+    #[test]
+    fn forwarding_attempt_history_keeps_latest_five_completed_per_profile() {
+        let store = memory_store();
+
+        for attempt_number in 1..=6 {
+            store
+                .record_forward_attempt(NewForwardAttemptSample {
+                    profile_key: "bark.primary".to_string(),
+                    delivery_id: None,
+                    attempt_number,
+                    started_at: format!("2026-07-12T16:57:0{}Z", attempt_number - 1),
+                    completed_at: format!("2026-07-12T16:57:0{attempt_number}Z"),
+                    latency_ms: attempt_number * 100,
+                    outcome: ForwardAttemptOutcome::Success,
+                    error_code: None,
+                })
+                .unwrap();
+        }
+        store
+            .record_forward_attempt(NewForwardAttemptSample {
+                profile_key: "telegram.backup".to_string(),
+                delivery_id: None,
+                attempt_number: 1,
+                started_at: "2026-07-12T16:58:00Z".to_string(),
+                completed_at: "2026-07-12T16:58:01Z".to_string(),
+                latency_ms: 1_000,
+                outcome: ForwardAttemptOutcome::TransientFailure,
+                error_code: Some("http_timeout".to_string()),
+            })
+            .unwrap();
+
+        let bark = store.list_forward_attempts("bark.primary", 5).unwrap();
+        let telegram = store.list_forward_attempts("telegram.backup", 5).unwrap();
+        assert_eq!(bark.len(), 5);
+        assert_eq!(
+            bark.iter()
+                .map(|sample| sample.attempt_number)
+                .collect::<Vec<_>>(),
+            vec![6, 5, 4, 3, 2]
+        );
+        assert!(bark[0].is_retry());
+        assert_eq!(telegram.len(), 1);
+        assert_eq!(telegram[0].error_code.as_deref(), Some("http_timeout"));
+    }
+
+    #[test]
+    fn forwarding_attempt_is_retained_when_delivery_lease_is_lost() {
+        let store = memory_store();
+        let message = store
+            .insert_message_with_deliveries(
+                NewMessage::inbound("+1", "lease sample"),
+                &["bark.primary".to_string()],
+            )
+            .unwrap();
+        let delivery = store
+            .claim_due_deliveries(1, "2099-01-01T00:00:00Z")
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        let completed = store
+            .complete_delivery_with_attempt(
+                delivery.id,
+                "succeeded",
+                None,
+                1,
+                None,
+                "wrong-lease-token",
+                NewForwardAttemptSample {
+                    profile_key: delivery.profile_key,
+                    delivery_id: Some(delivery.id),
+                    attempt_number: 1,
+                    started_at: "2026-07-12T16:57:00Z".to_string(),
+                    completed_at: "2026-07-12T16:57:01Z".to_string(),
+                    latency_ms: 1_000,
+                    outcome: ForwardAttemptOutcome::Success,
+                    error_code: None,
+                },
+            )
+            .unwrap();
+
+        assert!(!completed);
+        assert_eq!(store.get_delivery(delivery.id).unwrap().state, "in_flight");
+        assert_eq!(store.get_message(message.id).unwrap().body, "lease sample");
+        assert_eq!(
+            store
+                .list_forward_attempts("bark.primary", 5)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn migrates_a_populated_pre_delivery_database() {
         let path = std::env::temp_dir().join(format!(
             "sms-relayed-legacy-{}.sqlite",
