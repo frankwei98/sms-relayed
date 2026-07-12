@@ -87,7 +87,7 @@ const MM_DESTINATION: &str = "org.freedesktop.ModemManager1";
 
 const DBUS_METHOD_TIMEOUT: Duration = Duration::from_secs(10);
 
-const FINGERPRINT_META_KEY: &str = "modem_fingerprint";
+pub const FINGERPRINT_META_KEY: &str = "modem_fingerprint";
 
 fn extract_string(props: &HashMap<String, OwnedValue>, key: &str) -> String {
     props

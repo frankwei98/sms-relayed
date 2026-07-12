@@ -3,6 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use rusqlite::{params, params_from_iter, Connection, Row, TransactionBehavior};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 use crate::message::{
@@ -24,6 +26,51 @@ pub struct DeliveryRow {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForwardAttemptOutcome {
+    Success,
+    TransientFailure,
+    PermanentFailure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardAttemptSample {
+    pub id: i64,
+    pub profile_key: String,
+    pub delivery_id: Option<i64>,
+    pub attempt_number: i32,
+    pub started_at: String,
+    pub completed_at: String,
+    pub latency_ms: i64,
+    pub outcome: ForwardAttemptOutcome,
+    pub error_code: Option<String>,
+}
+
+impl ForwardAttemptSample {
+    pub fn is_retry(&self) -> bool {
+        self.attempt_number > 1
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NewForwardAttemptSample {
+    pub profile_key: String,
+    pub delivery_id: Option<i64>,
+    pub attempt_number: i32,
+    pub started_at: String,
+    pub completed_at: String,
+    pub latency_ms: i64,
+    pub outcome: ForwardAttemptOutcome,
+    pub error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InboundInsertResult {
+    Inserted(Message),
+    Duplicate(Message),
+}
+
 #[derive(Clone)]
 pub struct MessageStore {
     conn: Arc<Mutex<Connection>>,
@@ -40,6 +87,7 @@ pub struct NewMessage {
     pub modem_sms_path: Option<String>,
     pub read_at: Option<String>,
     pub error: Option<String>,
+    pub inbound_dedupe_key: Option<String>,
 }
 
 impl NewMessage {
@@ -54,8 +102,61 @@ impl NewMessage {
             modem_sms_path: None,
             read_at: None,
             error: None,
+            inbound_dedupe_key: None,
         }
     }
+
+    pub fn modem_inbound(
+        phone_number: &str,
+        body: &str,
+        timestamp: &str,
+        modem_sms_path: &str,
+        modem_fingerprint: &str,
+    ) -> Self {
+        let dedup_key =
+            compute_inbound_dedupe_key(modem_fingerprint, timestamp, phone_number, body);
+        Self {
+            direction: MessageDirection::Inbound,
+            phone_number: phone_number.to_string(),
+            body: body.to_string(),
+            timestamp: timestamp.to_string(),
+            status: MessageStatus::Received,
+            source: MessageSource::Modem,
+            modem_sms_path: Some(modem_sms_path.to_string()),
+            read_at: None,
+            error: None,
+            inbound_dedupe_key: Some(dedup_key),
+        }
+    }
+}
+
+fn compute_inbound_dedupe_key(
+    fingerprint: &str,
+    timestamp: &str,
+    phone: &str,
+    body: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update([0u8]);
+    hasher.update((fingerprint.len() as u32).to_be_bytes());
+    hasher.update(fingerprint.as_bytes());
+    hasher.update((timestamp.len() as u32).to_be_bytes());
+    hasher.update(timestamp.as_bytes());
+    hasher.update((phone.len() as u32).to_be_bytes());
+    hasher.update(phone.as_bytes());
+    hasher.update((body.len() as u32).to_be_bytes());
+    hasher.update(body.as_bytes());
+    hex_encode(hasher.finalize().as_slice())
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX_CHARS: &[u8] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX_CHARS[(b >> 4) as usize] as char);
+        out.push(HEX_CHARS[(b & 0x0f) as usize] as char);
+    }
+    out
 }
 
 impl MessageStore {
@@ -106,7 +207,8 @@ impl MessageStore {
                 read_at TEXT NULL,
                 error TEXT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                inbound_dedupe_key TEXT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_messages_phone_number ON messages(phone_number);
             CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
@@ -132,8 +234,72 @@ impl MessageStore {
                 UNIQUE(message_id, profile_key)
             );
             CREATE INDEX IF NOT EXISTS idx_deliveries_state ON forward_deliveries(state);
-            CREATE INDEX IF NOT EXISTS idx_deliveries_next_attempt ON forward_deliveries(next_attempt_at);",
+            CREATE INDEX IF NOT EXISTS idx_deliveries_next_attempt ON forward_deliveries(next_attempt_at);
+            CREATE TABLE IF NOT EXISTS forward_attempt_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_key TEXT NOT NULL,
+                delivery_id INTEGER NULL,
+                attempt_number INTEGER NOT NULL,
+                started_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                outcome TEXT NOT NULL,
+                error_code TEXT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_attempts_profile ON forward_attempt_samples(profile_key, completed_at DESC, id DESC);",
         )?;
+
+        // Migration: add inbound_dedupe_key column to existing databases
+        let has_dedupe: bool = tx
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'inbound_dedupe_key'")?
+            .query_row([], |r| r.get::<_, i64>(0))
+            .map(|c| c > 0)?;
+        if !has_dedupe {
+            tx.execute(
+                "ALTER TABLE messages ADD COLUMN inbound_dedupe_key TEXT NULL",
+                [],
+            )?;
+        }
+
+        // Partial unique index where dedup key is non-NULL (created after potential ALTER)
+        tx.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_dedupe ON messages(inbound_dedupe_key) WHERE inbound_dedupe_key IS NOT NULL",
+            [],
+        )?;
+
+        // Backfill: compute dedup keys for legacy modem-inbound messages
+        let fingerprint: Option<String> = tx
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'modem_fingerprint'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        if let Some(ref fp) = fingerprint {
+            let mut stmt = tx.prepare(
+                "SELECT id, phone_number, body, timestamp FROM messages
+                 WHERE direction = 'inbound' AND source = 'modem' AND inbound_dedupe_key IS NULL
+                 ORDER BY id ASC",
+            )?;
+            let rows: Vec<(i64, String, String, String)> = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(stmt);
+            for (id, phone, body, timestamp) in &rows {
+                let dedup_key = compute_inbound_dedupe_key(fp, timestamp, phone, body);
+                let exists: bool = tx
+                    .prepare("SELECT COUNT(*) > 0 FROM messages WHERE inbound_dedupe_key = ?1")?
+                    .query_row(params![dedup_key], |r| r.get(0))?;
+                if !exists {
+                    tx.execute(
+                        "UPDATE messages SET inbound_dedupe_key = ?1 WHERE id = ?2",
+                        params![dedup_key, id],
+                    )?;
+                }
+            }
+        }
+
         tx.commit()?;
         Ok(())
     }
@@ -483,6 +649,165 @@ impl MessageStore {
         tx.commit()?;
         Ok(count)
     }
+
+    pub fn insert_inbound_message_with_deliveries(
+        &self,
+        input: NewMessage,
+        profile_keys: &[String],
+    ) -> Result<InboundInsertResult> {
+        let dedup_key = input.inbound_dedupe_key.as_deref();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        if let Some(key) = dedup_key {
+            if let Ok(existing) = tx.query_row(
+                "SELECT * FROM messages WHERE inbound_dedupe_key = ?1",
+                params![key],
+                row_to_message,
+            ) {
+                return Ok(InboundInsertResult::Duplicate(existing));
+            }
+        }
+
+        let msg = insert_message_on(&tx, input)?;
+        let now = now_string();
+        for key in profile_keys {
+            tx.execute(
+                "INSERT INTO forward_deliveries (message_id, profile_key, state, created_at, updated_at)
+                 VALUES (?1, ?2, 'pending', ?3, ?3)",
+                params![msg.id, key, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(InboundInsertResult::Inserted(msg))
+    }
+
+    pub fn record_forward_attempt(
+        &self,
+        sample: NewForwardAttemptSample,
+    ) -> Result<ForwardAttemptSample> {
+        let now = now_string();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO forward_attempt_samples (profile_key, delivery_id, attempt_number, started_at, completed_at, latency_ms, outcome, error_code, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                sample.profile_key,
+                sample.delivery_id,
+                sample.attempt_number,
+                sample.started_at,
+                sample.completed_at,
+                sample.latency_ms,
+                outcome_to_str(&sample.outcome),
+                sample.error_code,
+                now,
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        self.prune_forward_attempts_on(&tx, &sample.profile_key)?;
+        tx.commit()?;
+        Ok(ForwardAttemptSample {
+            id,
+            profile_key: sample.profile_key,
+            delivery_id: sample.delivery_id,
+            attempt_number: sample.attempt_number,
+            started_at: sample.started_at,
+            completed_at: sample.completed_at,
+            latency_ms: sample.latency_ms,
+            outcome: sample.outcome,
+            error_code: sample.error_code,
+        })
+    }
+
+    fn prune_forward_attempts_on(&self, tx: &Connection, profile_key: &str) -> Result<()> {
+        tx.execute(
+            "DELETE FROM forward_attempt_samples WHERE id IN (
+                SELECT id FROM forward_attempt_samples
+                WHERE profile_key = ?1
+                ORDER BY completed_at DESC, id DESC
+                LIMIT -1 OFFSET 5
+            )",
+            params![profile_key],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_forward_attempt_profiles(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT profile_key FROM forward_attempt_samples ORDER BY profile_key",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn list_forward_attempts(
+        &self,
+        profile_key: &str,
+        limit: u32,
+    ) -> Result<Vec<ForwardAttemptSample>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, profile_key, delivery_id, attempt_number, started_at, completed_at, latency_ms, outcome, error_code
+             FROM forward_attempt_samples
+             WHERE profile_key = ?1
+             ORDER BY completed_at DESC, id DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![profile_key, limit], row_to_attempt_sample)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn complete_delivery_with_attempt(
+        &self,
+        id: i64,
+        state: &str,
+        error: Option<&str>,
+        attempt_count: i64,
+        next_attempt_at: Option<&str>,
+        lease_token: &str,
+        sample: NewForwardAttemptSample,
+    ) -> Result<bool> {
+        let now = now_string();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO forward_attempt_samples (profile_key, delivery_id, attempt_number, started_at, completed_at, latency_ms, outcome, error_code, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                sample.profile_key,
+                sample.delivery_id,
+                sample.attempt_number,
+                sample.started_at,
+                sample.completed_at,
+                sample.latency_ms,
+                outcome_to_str(&sample.outcome),
+                sample.error_code,
+                now,
+            ],
+        )?;
+        self.prune_forward_attempts_on(&tx, &sample.profile_key)?;
+        let changed = tx.execute(
+            "UPDATE forward_deliveries
+             SET state = ?1, last_error = ?2, attempt_count = ?3, next_attempt_at = ?4,
+                 lease_at = NULL, lease_token = NULL, updated_at = ?5
+             WHERE id = ?6 AND state = 'in_flight' AND lease_token = ?7",
+            params![
+                state,
+                error,
+                attempt_count,
+                next_attempt_at,
+                now,
+                id,
+                lease_token
+            ],
+        )?;
+        tx.commit()?;
+        Ok(changed == 1)
+    }
 }
 
 fn map_get(conn: &Connection, id: i64) -> Result<Message> {
@@ -497,8 +822,8 @@ fn map_get(conn: &Connection, id: i64) -> Result<Message> {
 fn insert_message_on(conn: &Connection, input: NewMessage) -> Result<Message> {
     let now = now_string();
     conn.execute(
-        "INSERT INTO messages (direction, phone_number, body, timestamp, status, source, modem_sms_path, read_at, error, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO messages (direction, phone_number, body, timestamp, status, source, modem_sms_path, read_at, error, created_at, updated_at, inbound_dedupe_key)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             direction_to_str(input.direction),
             input.phone_number,
@@ -510,7 +835,8 @@ fn insert_message_on(conn: &Connection, input: NewMessage) -> Result<Message> {
             input.read_at,
             input.error,
             now,
-            now
+            now,
+            input.inbound_dedupe_key,
         ],
     )?;
     map_get(conn, conn.last_insert_rowid())
@@ -644,6 +970,37 @@ fn str_to_source(s: &str) -> MessageSource {
     }
 }
 
+fn outcome_to_str(outcome: &ForwardAttemptOutcome) -> &'static str {
+    match outcome {
+        ForwardAttemptOutcome::Success => "success",
+        ForwardAttemptOutcome::TransientFailure => "transient_failure",
+        ForwardAttemptOutcome::PermanentFailure => "permanent_failure",
+    }
+}
+
+fn str_to_outcome(s: &str) -> ForwardAttemptOutcome {
+    match s {
+        "success" => ForwardAttemptOutcome::Success,
+        "transient_failure" => ForwardAttemptOutcome::TransientFailure,
+        "permanent_failure" => ForwardAttemptOutcome::PermanentFailure,
+        _ => ForwardAttemptOutcome::PermanentFailure,
+    }
+}
+
+fn row_to_attempt_sample(row: &Row) -> rusqlite::Result<ForwardAttemptSample> {
+    Ok(ForwardAttemptSample {
+        id: row.get(0)?,
+        profile_key: row.get(1)?,
+        delivery_id: row.get(2)?,
+        attempt_number: row.get(3)?,
+        started_at: row.get(4)?,
+        completed_at: row.get(5)?,
+        latency_ms: row.get(6)?,
+        outcome: str_to_outcome(&row.get::<_, String>(7)?),
+        error_code: row.get(8)?,
+    })
+}
+
 fn row_to_delivery(row: &Row) -> rusqlite::Result<DeliveryRow> {
     Ok(DeliveryRow {
         id: row.get(0)?,
@@ -688,6 +1045,7 @@ mod tests {
                 modem_sms_path: Some("/org/freedesktop/ModemManager1/SMS/1".to_string()),
                 read_at: None,
                 error: None,
+                inbound_dedupe_key: None,
             })
             .unwrap();
         let second = store
@@ -722,6 +1080,7 @@ mod tests {
                 modem_sms_path: None,
                 read_at: Some("2026-07-08T12:01:00Z".to_string()),
                 error: None,
+                inbound_dedupe_key: None,
             })
             .unwrap();
         store
@@ -833,6 +1192,7 @@ mod tests {
                 modem_sms_path: None,
                 read_at: None,
                 error: None,
+                inbound_dedupe_key: None,
             })
             .unwrap();
         store
@@ -846,6 +1206,7 @@ mod tests {
                 modem_sms_path: None,
                 read_at: None,
                 error: None,
+                inbound_dedupe_key: None,
             })
             .unwrap();
         store
@@ -859,6 +1220,7 @@ mod tests {
                 modem_sms_path: None,
                 read_at: None,
                 error: None,
+                inbound_dedupe_key: None,
             })
             .unwrap();
 
@@ -916,6 +1278,7 @@ mod tests {
                     modem_sms_path: None,
                     read_at: None,
                     error: None,
+                    inbound_dedupe_key: None,
                 })
                 .unwrap();
         }
@@ -958,6 +1321,7 @@ mod tests {
                 modem_sms_path: None,
                 read_at: None,
                 error: None,
+                inbound_dedupe_key: None,
             })
             .unwrap();
         let deleted = store.run_retention(1, 100).unwrap();
@@ -978,6 +1342,7 @@ mod tests {
                 modem_sms_path: None,
                 read_at: None,
                 error: None,
+                inbound_dedupe_key: None,
             })
             .unwrap();
         store
@@ -1095,7 +1460,7 @@ mod tests {
                     attempt_number,
                     started_at: format!("2026-07-12T16:57:0{}Z", attempt_number - 1),
                     completed_at: format!("2026-07-12T16:57:0{attempt_number}Z"),
-                    latency_ms: attempt_number * 100,
+                    latency_ms: attempt_number as i64 * 100,
                     outcome: ForwardAttemptOutcome::Success,
                     error_code: None,
                 })
@@ -1310,5 +1675,55 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
         }
+    }
+
+    #[test]
+    fn concurrent_dedupe_inserts_one_message_with_immediate_transactions() {
+        let store = memory_store();
+        let profiles = ["bark.primary".to_string()];
+
+        let store1 = store.clone();
+        let store2 = store.clone();
+        let profiles1 = profiles.clone();
+        let h1 = std::thread::spawn(move || {
+            let input = NewMessage::modem_inbound(
+                "+15550000000",
+                "concurrent",
+                "2026-07-12T17:00:00Z",
+                "/org/freedesktop/ModemManager1/SMS/1",
+                "modem-fingerprint",
+            );
+            store1.insert_inbound_message_with_deliveries(input, &profiles1)
+        });
+        let profiles2 = profiles.clone();
+        let h2 = std::thread::spawn(move || {
+            let input = NewMessage::modem_inbound(
+                "+15550000000",
+                "concurrent",
+                "2026-07-12T17:00:00Z",
+                "/org/freedesktop/ModemManager1/SMS/2",
+                "modem-fingerprint",
+            );
+            store2.insert_inbound_message_with_deliveries(input, &profiles2)
+        });
+
+        let r1 = h1.join().unwrap();
+        let r2 = h2.join().unwrap();
+        assert!(r1.is_ok());
+        assert!(r2.is_ok());
+
+        let insert_count = [&r1, &r2]
+            .iter()
+            .filter(|r| matches!(r.as_ref().unwrap(), InboundInsertResult::Inserted(_)))
+            .count();
+        let duplicate_count = [&r1, &r2]
+            .iter()
+            .filter(|r| matches!(r.as_ref().unwrap(), InboundInsertResult::Duplicate(_)))
+            .count();
+
+        assert_eq!(insert_count, 1, "exactly one thread must Inserted");
+        assert_eq!(duplicate_count, 1, "exactly one thread must get Duplicate");
+        assert_eq!(store.count_messages().unwrap(), 1);
+        assert_eq!(store.count_deliveries().unwrap(), 1);
     }
 }

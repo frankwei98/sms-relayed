@@ -115,6 +115,7 @@ async fn send_message(
         modem_sms_path: None,
         read_at: Some(now),
         error: None,
+        inbound_dedupe_key: None,
     };
     let msg = state.store.insert_message(new)?;
     state.events.send(AppEvent::MessageCreated(msg.clone()));

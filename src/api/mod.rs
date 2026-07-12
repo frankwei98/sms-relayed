@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod config;
+pub mod forwarding;
 pub mod health;
 pub mod messages;
 pub mod modem;
@@ -98,6 +99,7 @@ pub fn router(state: ApiState) -> Router {
         .merge(config::routes())
         .merge(service::routes())
         .merge(modem::routes())
+        .merge(forwarding::routes())
         .layer(middleware::from_fn(
             move |req: axum::extract::Request, next: middleware::Next| {
                 let sessions = sessions.clone();
@@ -307,5 +309,113 @@ mod route_tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn forwarding_route_requires_session() {
+        let app = router(test_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/forwarding/attempts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn forwarding_route_returns_profile_shapes_with_session() {
+        let state = test_state();
+        let token = state.sessions.create_session();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/forwarding/attempts")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(body.get("generated_at").is_some());
+        assert!(body.get("profiles").is_some());
+        let profiles = body["profiles"].as_array().unwrap();
+        for p in profiles {
+            assert!(p.get("profile_key").is_some());
+            assert!(p.get("enabled").is_some());
+            assert!(p.get("samples").is_some());
+            for s in p["samples"].as_array().unwrap() {
+                assert!(s.get("attempt_number").is_some());
+                assert!(s.get("is_retry").is_some());
+                assert!(s.get("started_at").is_some());
+                assert!(s.get("completed_at").is_some());
+                assert!(s.get("latency_ms").is_some());
+                assert!(s.get("outcome").is_some());
+                assert!(s.get("error_code").is_some());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn forwarding_api_does_not_expose_sensitive_fields() {
+        let state = test_state();
+        state
+            .store
+            .record_forward_attempt(crate::storage::NewForwardAttemptSample {
+                profile_key: "bark.test".to_string(),
+                delivery_id: None,
+                attempt_number: 1,
+                started_at: "2026-07-12T17:00:00Z".to_string(),
+                completed_at: "2026-07-12T17:00:01Z".to_string(),
+                latency_ms: 100,
+                outcome: crate::storage::ForwardAttemptOutcome::Success,
+                error_code: None,
+            })
+            .unwrap();
+        let token = state.sessions.create_session();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/forwarding/attempts")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        assert!(!body_str.contains("+1555"), "must not contain phone number");
+        assert!(!body_str.contains("same sms"), "must not contain SMS body");
+        assert!(!body_str.contains("secret"), "must not contain tokens");
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        let profiles = body["profiles"].as_array().unwrap();
+        let p = profiles
+            .iter()
+            .find(|p| p["profile_key"] == "bark.test")
+            .expect("bark.test profile must appear");
+        assert!(
+            !p["enabled"].as_bool().unwrap(),
+            "bark.test is not configured"
+        );
+        assert_eq!(p["samples"].as_array().unwrap().len(), 1);
     }
 }

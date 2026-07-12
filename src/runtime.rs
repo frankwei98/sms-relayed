@@ -9,6 +9,7 @@ use time::OffsetDateTime;
 use crate::api::auth::SessionStore;
 use crate::api::ApiState;
 use crate::config::AppConfig;
+use crate::dbus::FINGERPRINT_META_KEY;
 use crate::dbus::{self, SendTarget};
 use crate::delivery::run_delivery_worker;
 use crate::events::{AppEvent, EventBus};
@@ -59,21 +60,22 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
                     .collect();
                 profile_keys.sort();
                 profile_keys.dedup();
-                let msg = store.insert_message_with_deliveries(
-                    NewMessage {
-                        direction: MessageDirection::Inbound,
-                        phone_number: sms.phone_number,
-                        body: sms.body,
-                        timestamp: sms.timestamp,
-                        status: MessageStatus::Received,
-                        source: MessageSource::Modem,
-                        modem_sms_path: Some(sms.modem_sms_path),
-                        read_at: None,
-                        error: None,
-                    },
-                    &profile_keys,
-                )?;
-                events.send(AppEvent::MessageCreated(msg));
+                let fingerprint = store.get_meta(FINGERPRINT_META_KEY).unwrap_or_default();
+                let msg = NewMessage::modem_inbound(
+                    &sms.phone_number,
+                    &sms.body,
+                    &sms.timestamp,
+                    &sms.modem_sms_path,
+                    &fingerprint,
+                );
+                match store.insert_inbound_message_with_deliveries(msg, &profile_keys)? {
+                    crate::storage::InboundInsertResult::Inserted(m) => {
+                        events.send(AppEvent::MessageCreated(m));
+                    }
+                    crate::storage::InboundInsertResult::Duplicate(_) => {
+                        log::debug!("duplicate inbound message suppressed");
+                    }
+                }
                 Ok(())
             }
         },
@@ -196,6 +198,7 @@ async fn send_and_persist(
         modem_sms_path: None,
         read_at: Some(now),
         error: None,
+        inbound_dedupe_key: None,
     })?;
     match dbus::send_sms(connection, modem_path, phone_number, body, target).await {
         Ok(_outcome) => {
