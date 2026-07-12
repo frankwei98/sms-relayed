@@ -143,6 +143,12 @@ async fn resolve_monitor_path(
                     error!("failed to enroll modem identity: {}", e);
                     return None;
                 }
+                // Backfill dedupe keys for legacy modem-inbound messages now
+                // that the fingerprint is available for stable hashing.
+                if let Err(e) = store.backfill_dedupe_keys() {
+                    error!("failed to backfill dedupe keys: {}", e);
+                    return None;
+                }
                 return Some(configured_path.to_string());
             }
         }

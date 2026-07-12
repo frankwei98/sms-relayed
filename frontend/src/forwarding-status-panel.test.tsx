@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 
-import { render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { ForwardingStatusPanel } from "#/components/forwarding/forwarding-status-panel";
 
@@ -84,7 +83,6 @@ describe("ForwardingStatusPanel", () => {
 		await waitFor(() => {
 			expect(screen.getAllByText("bark.primary").length).toBeGreaterThan(0);
 		});
-		// Latest (first) sample is success -> Success badge in header
 		const successElements = screen.getAllByText("Success");
 		expect(successElements.length).toBeGreaterThanOrEqual(1);
 	});
@@ -156,7 +154,7 @@ describe("ForwardingStatusPanel", () => {
 	});
 
 	test("manual refresh triggers data update", async () => {
-		// Return empty first, then set up for refresh
+		// Use mockResolvedValue (not Once) since React may call twice in dev
 		mocks.apiFetch.mockResolvedValue({
 			generated_at: "2026-07-12T17:00:00Z",
 			profiles: [],
@@ -170,7 +168,7 @@ describe("ForwardingStatusPanel", () => {
 			).toBeDefined();
 		});
 
-		// Re-mock for refresh
+		// Re-mock for the refresh call
 		mocks.apiFetch.mockResolvedValue({
 			generated_at: "2026-07-12T17:01:00Z",
 			profiles: [
@@ -189,7 +187,7 @@ describe("ForwardingStatusPanel", () => {
 		expect(refreshButton).toBeDefined();
 
 		if (refreshButton) {
-			await userEvent.click(refreshButton);
+			fireEvent.click(refreshButton);
 		}
 
 		await waitFor(() => {

@@ -420,6 +420,13 @@ fn delivery_age(timestamp_str: &str) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use crate::config::{AppConfig, ShellConfig};
+    use crate::runner::ProcessRunner;
+    use crate::storage::{MessageStore, NewMessage};
+
     use super::*;
 
     #[test]
@@ -441,5 +448,146 @@ mod tests {
     fn malformed_delivery_timestamp_is_treated_as_expired() {
         assert!(delivery_age("") > RETRY_MAX_AGE);
         assert!(delivery_age("not-a-timestamp") > RETRY_MAX_AGE);
+    }
+
+    /// Stub runner that returns a shell timeout error.
+    struct TimeoutRunner;
+
+    impl ProcessRunner for TimeoutRunner {
+        fn run_shell<'a>(
+            &'a self,
+            _cmd: &'a str,
+            _timeout: Duration,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<std::process::ExitStatus>> + Send + 'a>>
+        {
+            Box::pin(async { Err(anyhow::anyhow!("shell timeout")) })
+        }
+    }
+
+    /// Helper: create an in-memory store, insert a message + delivery,
+    /// claim it, and return the claimed row along with the store so the
+    /// caller can reuse the store reference in `process_delivery_inner`.
+    fn setup_claimed_delivery(
+        store: &MessageStore,
+        profile_key: &str,
+        prior_attempts: i64,
+    ) -> DeliveryRow {
+        store
+            .insert_message_with_deliveries(
+                NewMessage::inbound("+1", "delivery test body"),
+                &[profile_key.to_string()],
+            )
+            .unwrap();
+
+        // If prior_attempts > 0, simulate them via complete_delivery
+        if prior_attempts > 0 {
+            let first = store
+                .claim_due_deliveries(1, "2099-01-01T00:00:00Z")
+                .unwrap()
+                .pop()
+                .unwrap();
+            store
+                .complete_delivery(
+                    first.id,
+                    "retry_wait",
+                    Some("http_timeout"),
+                    prior_attempts,
+                    Some("2000-01-01T00:00:00Z"),
+                    &first.lease_token.unwrap(),
+                )
+                .unwrap();
+            // Release the lease so it can be reclaimed
+        }
+
+        let batch = store
+            .claim_due_deliveries(1, "2099-01-01T00:00:00Z")
+            .unwrap();
+        let mut row = batch.into_iter().next().unwrap();
+        // Override attempt_count to simulate prior retries
+        // (claim returns the stored count; we need to check it matches)
+        row.attempt_count = prior_attempts;
+        row
+    }
+
+    #[tokio::test]
+    async fn profile_missing_results_in_permanent_failure_with_no_sample() {
+        let store = MessageStore::open_in_memory().unwrap();
+        let row = setup_claimed_delivery(&store, "bark.primary", 2);
+        assert_eq!(row.attempt_count, 2);
+        let delivery_id = row.id;
+
+        // AppConfig with NO enabled profiles — profile is missing
+        let mut cfg = AppConfig::default();
+        cfg.api.enabled = true;
+        cfg.api.password = "test".to_string();
+
+        let client = reqwest::Client::new();
+        process_delivery_inner(
+            &store,
+            &cfg,
+            &client,
+            &TimeoutRunner,
+            Duration::from_secs(5),
+            row,
+        )
+        .await
+        .unwrap();
+
+        let d = store.get_delivery(delivery_id).unwrap();
+        assert_eq!(d.state, "permanent_failed");
+        assert_eq!(d.attempt_count, 3, "attempt_count must NOT regress");
+        assert_eq!(d.last_error.as_deref(), Some("profile_missing"));
+
+        // No attempt sample recorded
+        assert_eq!(
+            store
+                .list_forward_attempts("bark.primary", 5)
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_timeout_records_sample_and_retry_wait() {
+        let store = MessageStore::open_in_memory().unwrap();
+        let row = setup_claimed_delivery(&store, "shell.test", 0);
+        let delivery_id = row.id;
+
+        // Build AppConfig with a Shell profile matching "shell.test"
+        let mut cfg = AppConfig::default();
+        cfg.api.enabled = true;
+        cfg.api.password = "test".to_string();
+        cfg.forward.enabled.push("shell.test".to_string());
+        cfg.channels.shell.insert(
+            "test".to_string(),
+            ShellConfig {
+                path: "/bin/sleep".to_string(),
+            },
+        );
+
+        let client = reqwest::Client::new();
+        process_delivery_inner(
+            &store,
+            &cfg,
+            &client,
+            &TimeoutRunner,
+            Duration::from_secs(1),
+            row,
+        )
+        .await
+        .unwrap();
+
+        let d = store.get_delivery(delivery_id).unwrap();
+        assert_eq!(
+            d.state, "retry_wait",
+            "shell timeout must produce retry_wait"
+        );
+        assert_eq!(d.last_error.as_deref(), Some("shell_timeout"));
+
+        let samples = store.list_forward_attempts("shell.test", 5).unwrap();
+        assert_eq!(samples.len(), 1, "one sample must be recorded");
+        assert_eq!(samples[0].outcome, ForwardAttemptOutcome::TransientFailure);
+        assert_eq!(samples[0].error_code.as_deref(), Some("shell_timeout"));
     }
 }

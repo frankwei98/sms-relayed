@@ -10,13 +10,13 @@ use crate::api::auth::SessionStore;
 use crate::api::ApiState;
 use crate::config::AppConfig;
 use crate::dbus::FINGERPRINT_META_KEY;
-use crate::dbus::{self, SendTarget};
+use crate::dbus::{self, ReceivedSms, SendTarget};
 use crate::delivery::run_delivery_worker;
 use crate::events::{AppEvent, EventBus};
 use crate::message::{Message, MessageDirection, MessageSource, MessageStatus};
 use crate::modem::ModemService;
 use crate::runner::{build_http_client, RealProcessRunner};
-use crate::storage::{MessageStore, NewMessage};
+use crate::storage::{InboundInsertResult, MessageStore, NewMessage};
 
 pub async fn run_forwarding(config_path: &Path) -> Result<()> {
     let config = AppConfig::load(config_path)?;
@@ -51,33 +51,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
             let store = store_inbound.clone();
             let events = events_inbound.clone();
             let cfg = config_inbound.clone();
-            async move {
-                let mut profile_keys: Vec<String> = cfg
-                    .enabled_profiles()
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|p| p.key())
-                    .collect();
-                profile_keys.sort();
-                profile_keys.dedup();
-                let fingerprint = store.get_meta(FINGERPRINT_META_KEY).unwrap_or_default();
-                let msg = NewMessage::modem_inbound(
-                    &sms.phone_number,
-                    &sms.body,
-                    &sms.timestamp,
-                    &sms.modem_sms_path,
-                    &fingerprint,
-                );
-                match store.insert_inbound_message_with_deliveries(msg, &profile_keys)? {
-                    crate::storage::InboundInsertResult::Inserted(m) => {
-                        events.send(AppEvent::MessageCreated(m));
-                    }
-                    crate::storage::InboundInsertResult::Duplicate(_) => {
-                        log::debug!("duplicate inbound message suppressed");
-                    }
-                }
-                Ok(())
-            }
+            async move { process_inbound_sms(&store, &events, &sms, &cfg).await }
         },
         &dbus_modem,
         &store,
@@ -127,6 +101,41 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
             }
         }
     }
+}
+
+/// Process a received modem SMS: deduplicate, persist, and emit MessageCreated
+/// only for first-time insertions.
+pub async fn process_inbound_sms(
+    store: &MessageStore,
+    events: &EventBus,
+    sms: &ReceivedSms,
+    cfg: &AppConfig,
+) -> Result<()> {
+    let mut profile_keys: Vec<String> = cfg
+        .enabled_profiles()
+        .unwrap_or_default()
+        .iter()
+        .map(|p| p.key())
+        .collect();
+    profile_keys.sort();
+    profile_keys.dedup();
+    let fingerprint = store.get_meta(FINGERPRINT_META_KEY).unwrap_or_default();
+    let msg = NewMessage::modem_inbound(
+        &sms.phone_number,
+        &sms.body,
+        &sms.timestamp,
+        &sms.modem_sms_path,
+        &fingerprint,
+    );
+    match store.insert_inbound_message_with_deliveries(msg, &profile_keys)? {
+        InboundInsertResult::Inserted(m) => {
+            events.send(AppEvent::MessageCreated(m));
+        }
+        InboundInsertResult::Duplicate(_) => {
+            log::debug!("duplicate inbound message suppressed");
+        }
+    }
+    Ok(())
 }
 
 async fn run_retention_worker(store: MessageStore, config: AppConfig) {
@@ -210,5 +219,64 @@ async fn send_and_persist(
                 store.update_status(msg.id, MessageStatus::Failed, Some(err.to_string()))?;
             Ok(updated)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::events::EventBus;
+    use crate::storage::MessageStore;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn process_inbound_sms_twice_produces_one_message_and_event() {
+        let store = MessageStore::open_in_memory().unwrap();
+        let events = EventBus::new();
+        let mut rx = events.subscribe();
+
+        let sms = ReceivedSms {
+            phone_number: "+15550000000".to_string(),
+            body: "duplicate test".to_string(),
+            timestamp: "2026-07-12T17:00:00Z".to_string(),
+            storage: 0,
+            modem_sms_path: "/org/freedesktop/ModemManager1/SMS/42".to_string(),
+        };
+
+        // Make a minimal config with an enabled Bark profile
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.api.enabled = true;
+        cfg.forward.enabled.push("bark.primary".to_string());
+        cfg.channels.bark.insert(
+            "primary".to_string(),
+            crate::config::BarkConfig {
+                server_url: "https://api.day.app".to_string(),
+                key: "test".to_string(),
+            },
+        );
+
+        // Ensure fingerprint so dedup key is produced
+        store
+            .set_meta(crate::dbus::FINGERPRINT_META_KEY, "test-fingerprint")
+            .unwrap();
+
+        // First call: inserted
+        process_inbound_sms(&store, &events, &sms, &cfg)
+            .await
+            .unwrap();
+        assert_eq!(store.count_messages().unwrap(), 1);
+        assert_eq!(store.count_deliveries().unwrap(), 1);
+        assert_eq!(
+            rx.try_recv().ok().map(|e| e.name()),
+            Some("message.created")
+        );
+
+        // Second call: duplicate, no event, no new rows
+        process_inbound_sms(&store, &events, &sms, &cfg)
+            .await
+            .unwrap();
+        assert_eq!(store.count_messages().unwrap(), 1);
+        assert_eq!(store.count_deliveries().unwrap(), 1);
+        assert!(rx.try_recv().is_err(), "no more events after duplicate");
     }
 }
