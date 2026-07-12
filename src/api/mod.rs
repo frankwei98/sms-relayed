@@ -327,10 +327,38 @@ mod route_tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
-    #[tokio::test]
-    async fn forwarding_route_returns_profile_shapes_with_session() {
-        let state = test_state();
+    fn test_state_with_profiles(enabled: &[&str]) -> (ApiState, String) {
+        let mut cfg = AppConfig::default();
+        cfg.api.enabled = true;
+        cfg.api.password = "secret".to_string();
+        for profile_ref in enabled {
+            cfg.forward.enabled.push(profile_ref.to_string());
+            if let Some(name) = profile_ref.strip_prefix("bark.") {
+                cfg.channels.bark.insert(
+                    name.to_string(),
+                    crate::config::BarkConfig {
+                        server_url: "https://api.day.app".to_string(),
+                        key: "test-key".to_string(),
+                    },
+                );
+            }
+        }
+        let state = ApiState {
+            config: std::sync::Arc::new(cfg),
+            config_path: std::path::PathBuf::from("/tmp/sms-relayed-test.toml"),
+            store: crate::storage::MessageStore::open_in_memory().unwrap(),
+            events: crate::events::EventBus::new(),
+            started_at: std::time::Instant::now(),
+            sessions: SessionStore::default(),
+            modem: crate::modem::ModemService::new_with_runner(ApiTestRunner),
+        };
         let token = state.sessions.create_session();
+        (state, token)
+    }
+
+    #[tokio::test]
+    async fn forwarding_enabled_profile_with_empty_samples_returns_empty_array() {
+        let (state, token) = test_state_with_profiles(&["bark.primary"]);
         let app = router(state);
         let response = app
             .oneshot(
@@ -350,42 +378,122 @@ mod route_tests {
                 .unwrap(),
         )
         .unwrap();
-        assert!(body.get("generated_at").is_some());
-        assert!(body.get("profiles").is_some());
         let profiles = body["profiles"].as_array().unwrap();
-        for p in profiles {
-            assert!(p.get("profile_key").is_some());
-            assert!(p.get("enabled").is_some());
-            assert!(p.get("samples").is_some());
-            for s in p["samples"].as_array().unwrap() {
-                assert!(s.get("attempt_number").is_some());
-                assert!(s.get("is_retry").is_some());
-                assert!(s.get("started_at").is_some());
-                assert!(s.get("completed_at").is_some());
-                assert!(s.get("latency_ms").is_some());
-                assert!(s.get("outcome").is_some());
-                assert!(s.get("error_code").is_some());
-            }
+        assert_eq!(profiles.len(), 1);
+        let p = &profiles[0];
+        assert_eq!(p["profile_key"], "bark.primary");
+        assert_eq!(p["enabled"], true);
+        assert_eq!(p["samples"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn forwarding_enabled_profile_returns_latest_five_samples_and_shape() {
+        use crate::storage::{ForwardAttemptOutcome, NewForwardAttemptSample};
+        let (state, token) = test_state_with_profiles(&["bark.primary"]);
+        // Insert 6 samples, newest with attempt 6
+        for n in 1..=6 {
+            state
+                .store
+                .record_forward_attempt(NewForwardAttemptSample {
+                    profile_key: "bark.primary".to_string(),
+                    delivery_id: None,
+                    attempt_number: n,
+                    started_at: format!("2026-07-12T17:00:{:02}Z", n - 1),
+                    completed_at: format!("2026-07-12T17:00:{:02}Z", n),
+                    latency_ms: n as i64 * 100,
+                    outcome: if n % 2 == 0 {
+                        ForwardAttemptOutcome::Success
+                    } else {
+                        ForwardAttemptOutcome::TransientFailure
+                    },
+                    error_code: if n % 2 == 1 {
+                        Some("http_timeout".to_string())
+                    } else {
+                        None
+                    },
+                })
+                .unwrap();
         }
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/forwarding/attempts")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let profiles = body["profiles"].as_array().unwrap();
+        assert_eq!(profiles.len(), 1);
+        let p = &profiles[0];
+        assert_eq!(p["profile_key"], "bark.primary");
+        assert!(p["enabled"].as_bool().unwrap());
+        let samples = p["samples"].as_array().unwrap();
+        assert_eq!(samples.len(), 5, "must return at most 5 samples");
+        // Newest first: attempt_number 6, 5, 4, 3, 2
+        assert_eq!(samples[0]["attempt_number"], 6);
+        assert_eq!(samples[4]["attempt_number"], 2);
+        // Each sample has all fields
+        for s in samples {
+            assert!(s.get("attempt_number").is_some());
+            assert!(s.get("is_retry").is_some());
+            assert!(s.get("started_at").is_some());
+            assert!(s.get("completed_at").is_some());
+            assert!(s.get("latency_ms").is_some());
+            assert!(s.get("outcome").is_some());
+            assert!(s.get("error_code").is_some());
+        }
+        // Check is_retry on attempt 6
+        assert_eq!(samples[0]["is_retry"], true);
+        assert_eq!(samples[0]["latency_ms"], 600);
+        assert_eq!(samples[0]["outcome"], "success");
+        assert!(samples[0]["error_code"].is_null());
+        // Retry 5 error_code
+        assert_eq!(samples[1]["is_retry"], true);
+        assert_eq!(samples[1]["error_code"], "http_timeout");
     }
 
     #[tokio::test]
     async fn forwarding_api_does_not_expose_sensitive_fields() {
-        let state = test_state();
+        use crate::storage::{ForwardAttemptOutcome, NewForwardAttemptSample};
+        let (state, token) = test_state_with_profiles(&["bark.primary"]);
+        // Actually insert a message with phone number and body
+        let message = state
+            .store
+            .insert_message(crate::storage::NewMessage::modem_inbound(
+                "+15551234567",
+                "secret code is 1234",
+                "2026-07-12T17:00:00Z",
+                "/org/freedesktop/ModemManager1/SMS/1",
+                "fingerprint",
+            ))
+            .unwrap();
+        // Record an attempt for that message's delivery
         state
             .store
-            .record_forward_attempt(crate::storage::NewForwardAttemptSample {
-                profile_key: "bark.test".to_string(),
-                delivery_id: None,
+            .record_forward_attempt(NewForwardAttemptSample {
+                profile_key: "bark.primary".to_string(),
+                delivery_id: Some(message.id),
                 attempt_number: 1,
                 started_at: "2026-07-12T17:00:00Z".to_string(),
                 completed_at: "2026-07-12T17:00:01Z".to_string(),
                 latency_ms: 100,
-                outcome: crate::storage::ForwardAttemptOutcome::Success,
-                error_code: None,
+                outcome: ForwardAttemptOutcome::PermanentFailure,
+                error_code: Some("shell_exit_nonzero".to_string()),
             })
             .unwrap();
-        let token = state.sessions.create_session();
+
         let app = router(state);
         let response = app
             .oneshot(
@@ -403,19 +511,25 @@ mod route_tests {
             .await
             .unwrap();
         let body_str = String::from_utf8_lossy(&body_bytes);
-        assert!(!body_str.contains("+1555"), "must not contain phone number");
-        assert!(!body_str.contains("same sms"), "must not contain SMS body");
-        assert!(!body_str.contains("secret"), "must not contain tokens");
-        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-        let profiles = body["profiles"].as_array().unwrap();
-        let p = profiles
-            .iter()
-            .find(|p| p["profile_key"] == "bark.test")
-            .expect("bark.test profile must appear");
         assert!(
-            !p["enabled"].as_bool().unwrap(),
-            "bark.test is not configured"
+            !body_str.contains("+15551234567"),
+            "must not contain phone number"
         );
-        assert_eq!(p["samples"].as_array().unwrap().len(), 1);
+        assert!(
+            !body_str.contains("secret code is 1234"),
+            "must not contain SMS body"
+        );
+        assert!(!body_str.contains("secret"), "must not contain tokens");
+        assert!(
+            !body_str.contains("1234"),
+            "must not contain code from body"
+        );
+        // Standardized error code is safe
+        assert!(
+            body_str.contains("shell_exit_nonzero"),
+            "standardized error must appear"
+        );
+        // Provider raw error must not appear
+        assert!(!body_str.contains("provider_"));
     }
 }

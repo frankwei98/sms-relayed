@@ -37,7 +37,7 @@ pub fn routes() -> Router<ApiState> {
 }
 
 async fn forwarding_attempts(State(state): State<ApiState>) -> ApiResult<Json<ForwardingResponse>> {
-    let config_profiles = state.config.enabled_profiles().unwrap_or_default();
+    let config_profiles = state.config.enabled_profiles()?;
 
     let mut profiles: Vec<ProfileStatus> = Vec::new();
     let mut seen_keys = std::collections::HashSet::new();
@@ -45,7 +45,7 @@ async fn forwarding_attempts(State(state): State<ApiState>) -> ApiResult<Json<Fo
     for profile in &config_profiles {
         let key = profile.key();
         seen_keys.insert(key.clone());
-        let samples = load_samples(&state, &key);
+        let samples = load_samples(&state, &key)?;
         profiles.push(ProfileStatus {
             profile_key: key,
             enabled: true,
@@ -53,13 +53,10 @@ async fn forwarding_attempts(State(state): State<ApiState>) -> ApiResult<Json<Fo
         });
     }
 
-    let all_keys = state
-        .store
-        .list_forward_attempt_profiles()
-        .unwrap_or_default();
+    let all_keys = state.store.list_forward_attempt_profiles()?;
     for key in all_keys {
         if seen_keys.insert(key.clone()) {
-            let samples = load_samples(&state, &key);
+            let samples = load_samples(&state, &key)?;
             profiles.push(ProfileStatus {
                 profile_key: key,
                 enabled: false,
@@ -78,11 +75,9 @@ async fn forwarding_attempts(State(state): State<ApiState>) -> ApiResult<Json<Fo
     }))
 }
 
-fn load_samples(state: &ApiState, profile_key: &str) -> Vec<SampleView> {
-    state
-        .store
-        .list_forward_attempts(profile_key, 5)
-        .unwrap_or_default()
+fn load_samples(state: &ApiState, profile_key: &str) -> ApiResult<Vec<SampleView>> {
+    let samples = state.store.list_forward_attempts(profile_key, 5)?;
+    Ok(samples
         .into_iter()
         .map(|s| SampleView {
             attempt_number: s.attempt_number,
@@ -93,5 +88,5 @@ fn load_samples(state: &ApiState, profile_key: &str) -> Vec<SampleView> {
             outcome: s.outcome,
             error_code: s.error_code,
         })
-        .collect()
+        .collect())
 }

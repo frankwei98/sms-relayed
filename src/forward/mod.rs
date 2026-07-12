@@ -211,7 +211,79 @@ fn resolve_device_name(config: &AppConfig) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
+
     use super::*;
+    use crate::runner::ProcessRunner;
+
+    struct TimeoutRunner;
+
+    impl ProcessRunner for TimeoutRunner {
+        fn run_shell<'a>(
+            &'a self,
+            _cmd: &'a str,
+            _timeout: Duration,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<std::process::ExitStatus>> + Send + 'a>>
+        {
+            Box::pin(async { Err(anyhow::anyhow!("shell timeout")) })
+        }
+    }
+
+    struct ShellFailedRunner;
+
+    impl ProcessRunner for ShellFailedRunner {
+        fn run_shell<'a>(
+            &'a self,
+            _cmd: &'a str,
+            _timeout: Duration,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<std::process::ExitStatus>> + Send + 'a>>
+        {
+            Box::pin(async { Err(anyhow::anyhow!("executable not found")) })
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_timeout_produces_shell_timeout_code() {
+        let outcome = crate::forward::shell::send(
+            &TimeoutRunner,
+            Duration::from_secs(1),
+            "+1",
+            "body",
+            "2026-01-01T00:00:00Z",
+            "device",
+            &crate::config::ShellConfig {
+                path: "/bin/sleep".to_string(),
+            },
+            &AppConfig::default(),
+        )
+        .await;
+        assert!(
+            matches!(&outcome, ForwardOutcome::TransientFailure(code) if code == "shell_timeout"),
+            "expected shell_timeout, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_execution_failure_produces_execution_failed_code() {
+        let outcome = crate::forward::shell::send(
+            &ShellFailedRunner,
+            Duration::from_secs(1),
+            "+1",
+            "body",
+            "2026-01-01T00:00:00Z",
+            "device",
+            &crate::config::ShellConfig {
+                path: "/bin/does-not-exist".to_string(),
+            },
+            &AppConfig::default(),
+        )
+        .await;
+        assert!(
+            matches!(&outcome, ForwardOutcome::TransientFailure(code) if code == "shell_execution_failed"),
+            "expected shell_execution_failed, got {outcome:?}"
+        );
+    }
 
     #[test]
     fn http_status_classification_matches_retry_contract() {
