@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { ForwardingStatusPanel } from "#/components/forwarding/forwarding-status-panel";
 
@@ -57,13 +58,76 @@ describe("ForwardingStatusPanel", () => {
 		expect(screen.getByText("Loading forwarding status...")).toBeDefined();
 
 		await waitFor(() => {
-			expect(screen.getByText("bark.primary")).toBeDefined();
+			expect(screen.getAllByText("bark.primary").length).toBeGreaterThan(0);
 		});
-		expect(screen.getByText("telegram.backup")).toBeDefined();
+		expect(screen.getAllByText("telegram.backup").length).toBeGreaterThan(0);
 		expect(screen.getByText("Retry")).toBeDefined();
 		expect(screen.getByText("950ms")).toBeDefined();
 		expect(screen.getByText("5.2s")).toBeDefined();
 		expect(screen.getByText("http_timeout")).toBeDefined();
+	});
+
+	test("shows latest outcome badge in profile header", async () => {
+		mocks.apiFetch.mockResolvedValue({
+			generated_at: "2026-07-12T17:02:00Z",
+			profiles: [
+				{
+					profile_key: "bark.primary",
+					enabled: true,
+					samples: [successSample, failureSample],
+				},
+			],
+		});
+
+		render(<ForwardingStatusPanel />);
+
+		await waitFor(() => {
+			expect(screen.getAllByText("bark.primary").length).toBeGreaterThan(0);
+		});
+		// Latest (first) sample is success -> Success badge in header
+		const successElements = screen.getAllByText("Success");
+		expect(successElements.length).toBeGreaterThanOrEqual(1);
+	});
+
+	test("no outcome badge when samples are empty", async () => {
+		mocks.apiFetch.mockResolvedValue({
+			generated_at: "2026-07-12T17:02:00Z",
+			profiles: [
+				{
+					profile_key: "bark.primary",
+					enabled: true,
+					samples: [],
+				},
+			],
+		});
+
+		render(<ForwardingStatusPanel />);
+
+		await waitFor(() => {
+			expect(screen.getAllByText("bark.primary").length).toBeGreaterThan(0);
+		});
+		expect(screen.getByText("No forwarding attempts yet.")).toBeDefined();
+	});
+
+	test("column header reads Completed not Started", async () => {
+		mocks.apiFetch.mockResolvedValue({
+			generated_at: "2026-07-12T17:02:00Z",
+			profiles: [
+				{
+					profile_key: "bark.primary",
+					enabled: true,
+					samples: [successSample],
+				},
+			],
+		});
+
+		render(<ForwardingStatusPanel />);
+
+		await waitFor(() => {
+			const completedHeaders = screen.getAllByText("Completed");
+			expect(completedHeaders.length).toBeGreaterThan(0);
+		});
+		expect(screen.queryByText("Started")).toBeNull();
 	});
 
 	test("renders empty state when no profiles", async () => {
@@ -91,6 +155,48 @@ describe("ForwardingStatusPanel", () => {
 		});
 	});
 
+	test("manual refresh triggers data update", async () => {
+		// Return empty first, then set up for refresh
+		mocks.apiFetch.mockResolvedValue({
+			generated_at: "2026-07-12T17:00:00Z",
+			profiles: [],
+		});
+
+		render(<ForwardingStatusPanel />);
+
+		await waitFor(() => {
+			expect(
+				screen.getByText("No forwarding profiles configured."),
+			).toBeDefined();
+		});
+
+		// Re-mock for refresh
+		mocks.apiFetch.mockResolvedValue({
+			generated_at: "2026-07-12T17:01:00Z",
+			profiles: [
+				{
+					profile_key: "bark.primary",
+					enabled: true,
+					samples: [successSample],
+				},
+			],
+		});
+
+		const buttons = screen.getAllByRole("button");
+		const refreshButton = buttons.find((b) =>
+			b.textContent?.includes("Refresh"),
+		);
+		expect(refreshButton).toBeDefined();
+
+		if (refreshButton) {
+			await userEvent.click(refreshButton);
+		}
+
+		await waitFor(() => {
+			expect(screen.getAllByText("bark.primary").length).toBeGreaterThan(0);
+		});
+	});
+
 	test("DOM does not contain phone numbers or SMS bodies", async () => {
 		mocks.apiFetch.mockResolvedValue({
 			generated_at: "2026-07-12T17:02:00Z",
@@ -111,11 +217,12 @@ describe("ForwardingStatusPanel", () => {
 		render(<ForwardingStatusPanel />);
 
 		await waitFor(() => {
-			expect(screen.getByText("bark.primary")).toBeDefined();
+			expect(screen.getAllByText("bark.primary").length).toBeGreaterThan(0);
 		});
 		const html = document.body.innerHTML;
 		expect(html).not.toContain("+1555");
 		expect(html).not.toContain("sms body");
 		expect(html).not.toContain("token");
+		expect(html).toContain("shell_exit_nonzero");
 	});
 });

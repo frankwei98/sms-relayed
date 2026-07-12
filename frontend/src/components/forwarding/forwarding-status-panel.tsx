@@ -1,5 +1,5 @@
 import { RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge } from "#/components/ui/badge";
 import { Button } from "#/components/ui/button";
 import {
@@ -17,16 +17,27 @@ export function ForwardingStatusPanel() {
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState("");
 	const [refreshing, setRefreshing] = useState(false);
+	const generationRef = useRef(0);
 
 	const refresh = useCallback(async () => {
+		const gen = ++generationRef.current;
 		setError("");
 		try {
-			setData(await apiFetch<ForwardingResponse>("/api/forwarding/attempts"));
+			const result = await apiFetch<ForwardingResponse>(
+				"/api/forwarding/attempts",
+			);
+			if (gen === generationRef.current) {
+				setData(result);
+			}
 		} catch (e) {
-			setError((e as Error).message);
+			if (gen === generationRef.current) {
+				setError((e as Error).message);
+			}
 		} finally {
-			setLoading(false);
-			setRefreshing(false);
+			if (gen === generationRef.current) {
+				setLoading(false);
+				setRefreshing(false);
+			}
 		}
 	}, []);
 
@@ -81,6 +92,9 @@ export function ForwardingStatusPanel() {
 						) : (
 							<Badge variant="outline">Disabled</Badge>
 						)}
+						{profile.samples.length > 0 && (
+							<OutcomeBadge outcome={profile.samples[0].outcome} />
+						)}
 					</div>
 
 					{profile.samples.length === 0 ? (
@@ -92,7 +106,7 @@ export function ForwardingStatusPanel() {
 							<TableHeader>
 								<TableRow>
 									<TableHead>Attempt</TableHead>
-									<TableHead>Started</TableHead>
+									<TableHead>Completed</TableHead>
 									<TableHead>Latency</TableHead>
 									<TableHead>Outcome</TableHead>
 									<TableHead>Error</TableHead>
