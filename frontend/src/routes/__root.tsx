@@ -70,6 +70,9 @@ function RootComponent() {
 						<Link to="/modem" className="text-sm hover:underline">
 							Modem
 						</Link>
+						<Link to="/forwarding" className="text-sm hover:underline">
+							Forwarding
+						</Link>
 						<Link to="/config" className="text-sm hover:underline">
 							Config
 						</Link>
