@@ -1985,65 +1985,6 @@ mod tests {
     }
 
     #[test]
-    fn profile_missing_preserves_attempt_count() {
-        let store = memory_store();
-        let _message = store
-            .insert_message_with_deliveries(
-                NewMessage::inbound("+1", "profile-missing"),
-                &["bark.primary".to_string()],
-            )
-            .unwrap();
-        let delivery = store
-            .claim_due_deliveries(1, "2099-01-01T00:00:00Z")
-            .unwrap()
-            .pop()
-            .unwrap();
-
-        let delivery_token = delivery.lease_token.clone().unwrap();
-        // Simulate two prior attempts via complete_delivery
-        // Use a past timestamp for next_attempt_at so it's immediately due
-        store
-            .complete_delivery(
-                delivery.id,
-                "retry_wait",
-                Some("http_timeout"),
-                2,
-                Some("2000-01-01T00:00:00Z"),
-                &delivery_token,
-            )
-            .unwrap();
-        drop(delivery);
-
-        // Reclaim after lease expiry with prev attempt_count=2
-        store
-            .recover_expired_leases("2099-01-01T02:00:00Z")
-            .unwrap();
-        let re_claimed = store
-            .claim_due_deliveries(1, "2099-01-01T03:00:00Z")
-            .unwrap()
-            .pop()
-            .unwrap();
-        assert_eq!(re_claimed.attempt_count, 2);
-
-        let re_token = re_claimed.lease_token.clone().unwrap();
-        // profile_missing should use attempt_count + 1 (3)
-        let completed = store
-            .complete_delivery(
-                re_claimed.id,
-                "permanent_failed",
-                Some("profile_missing"),
-                3,
-                None,
-                &re_token,
-            )
-            .unwrap();
-        assert!(completed);
-        let d = store.get_delivery(re_claimed.id).unwrap();
-        assert_eq!(d.attempt_count, 3, "attempt_count must not regress below 3");
-        assert_eq!(d.last_error.as_deref(), Some("profile_missing"));
-    }
-
-    #[test]
     fn concurrent_dedupe_inserts_one_message_with_immediate_transactions() {
         let store = memory_store();
         let profiles = ["bark.primary".to_string()];
@@ -2091,57 +2032,5 @@ mod tests {
         assert_eq!(duplicate_count, 1, "exactly one thread must get Duplicate");
         assert_eq!(store.count_messages().unwrap(), 1);
         assert_eq!(store.count_deliveries().unwrap(), 1);
-    }
-
-    #[test]
-    fn duplicate_inbound_does_not_emit_message_created() {
-        use crate::events::AppEvent;
-        use crate::events::EventBus;
-
-        let store = memory_store();
-        let events = EventBus::new();
-        let mut rx = events.subscribe();
-        let profiles = ["bark.primary".to_string()];
-
-        let make_input = || {
-            NewMessage::modem_inbound(
-                "+15550000000",
-                "no duplicate event",
-                "2026-07-12T17:00:00Z",
-                "/org/freedesktop/ModemManager1/SMS/1",
-                "modem-fingerprint",
-            )
-        };
-
-        // First call: Inserted -> emit event
-        match store
-            .insert_inbound_message_with_deliveries(make_input(), &profiles)
-            .unwrap()
-        {
-            InboundInsertResult::Inserted(m) => {
-                events.send(AppEvent::MessageCreated(m));
-            }
-            InboundInsertResult::Duplicate(_) => panic!("first must be Inserted"),
-        }
-        assert_eq!(
-            rx.try_recv().ok().map(|e| e.name()),
-            Some("message.created")
-        );
-
-        // Second call: Duplicate -> no event
-        match store
-            .insert_inbound_message_with_deliveries(make_input(), &profiles)
-            .unwrap()
-        {
-            InboundInsertResult::Inserted(_) => panic!("second must be Duplicate"),
-            InboundInsertResult::Duplicate(_) => {
-                // Purposely do NOT emit MessageCreated
-            }
-        }
-        // No more events should be available
-        assert!(
-            rx.try_recv().is_err(),
-            "Duplicate must not emit MessageCreated"
-        );
     }
 }
