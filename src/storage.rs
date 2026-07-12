@@ -269,6 +269,21 @@ impl MessageStore {
         )?;
 
         // Backfill: compute dedup keys for legacy modem-inbound messages
+        Self::backfill_dedupe_keys_on(&tx)?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn backfill_dedupe_keys(&self) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let count = Self::backfill_dedupe_keys_on(&tx)?;
+        tx.commit()?;
+        Ok(count)
+    }
+
+    fn backfill_dedupe_keys_on(tx: &Connection) -> Result<usize> {
         let fingerprint: Option<String> = tx
             .query_row(
                 "SELECT value FROM meta WHERE key = 'modem_fingerprint'",
@@ -276,32 +291,33 @@ impl MessageStore {
                 |r| r.get(0),
             )
             .ok();
-        if let Some(ref fp) = fingerprint {
-            let mut stmt = tx.prepare(
-                "SELECT id, phone_number, body, timestamp FROM messages
-                 WHERE direction = 'inbound' AND source = 'modem' AND inbound_dedupe_key IS NULL
-                 ORDER BY id ASC",
-            )?;
-            let rows: Vec<(i64, String, String, String)> = stmt
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            drop(stmt);
-            for (id, phone, body, timestamp) in &rows {
-                let dedup_key = compute_inbound_dedupe_key(fp, timestamp, phone, body);
-                let exists: bool = tx
-                    .prepare("SELECT COUNT(*) > 0 FROM messages WHERE inbound_dedupe_key = ?1")?
-                    .query_row(params![dedup_key], |r| r.get(0))?;
-                if !exists {
-                    tx.execute(
-                        "UPDATE messages SET inbound_dedupe_key = ?1 WHERE id = ?2",
-                        params![dedup_key, id],
-                    )?;
-                }
+        let Some(fp) = fingerprint else {
+            return Ok(0);
+        };
+        let mut stmt = tx.prepare(
+            "SELECT id, phone_number, body, timestamp FROM messages
+             WHERE direction = 'inbound' AND source = 'modem' AND inbound_dedupe_key IS NULL
+             ORDER BY id ASC",
+        )?;
+        let rows: Vec<(i64, String, String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        let mut count = 0;
+        for (id, phone, body, timestamp) in &rows {
+            let dedup_key = compute_inbound_dedupe_key(&fp, timestamp, phone, body);
+            let exists: bool = tx
+                .prepare("SELECT COUNT(*) > 0 FROM messages WHERE inbound_dedupe_key = ?1")?
+                .query_row(params![dedup_key], |r| r.get(0))?;
+            if !exists {
+                tx.execute(
+                    "UPDATE messages SET inbound_dedupe_key = ?1 WHERE id = ?2",
+                    params![dedup_key, id],
+                )?;
+                count += 1;
             }
         }
-
-        tx.commit()?;
-        Ok(())
+        Ok(count)
     }
 
     pub fn get_meta(&self, key: &str) -> Option<String> {
@@ -1587,6 +1603,199 @@ mod tests {
     }
 
     #[test]
+    fn legacy_migration_backfills_dedupe_keys_with_fingerprint() {
+        let path = std::env::temp_dir().join(format!(
+            "sms-relayed-legacy-backfill-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let legacy = Connection::open(&path).unwrap();
+            legacy.execute_batch(
+                "CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    direction TEXT NOT NULL,
+                    phone_number TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    modem_sms_path TEXT NULL,
+                    read_at TEXT NULL,
+                    error TEXT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO messages
+                    (direction, phone_number, body, timestamp, status, source, created_at, updated_at)
+                VALUES
+                    ('inbound', '+1', 'original', '2026-01-01T00:00:00Z', 'received',
+                     'modem', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                INSERT INTO messages
+                    (direction, phone_number, body, timestamp, status, source, created_at, updated_at)
+                VALUES
+                    ('inbound', '+1', 'original', '2026-01-01T00:00:00Z', 'received',
+                     'modem', '2026-01-01T00:00:01Z', '2026-01-01T00:00:01Z');",
+            ).unwrap();
+            // Pre-migration deliveries are terminal
+            legacy.execute_batch(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO meta (key, value) VALUES ('modem_fingerprint', 'test-fingerprint');
+                 CREATE TABLE forward_deliveries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id INTEGER NOT NULL,
+                    profile_key TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at TEXT,
+                    lease_at TEXT,
+                    lease_token TEXT,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                 );
+                 INSERT INTO forward_deliveries
+                    (message_id, profile_key, state, attempt_count, created_at, updated_at)
+                 VALUES (1, 'bark.primary', 'succeeded', 2, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');",
+            ).unwrap();
+        }
+
+        let store = MessageStore::open(&path).unwrap();
+        // First row (id=1) gets dedupe key – verify by inserting a duplicate
+        let probe = NewMessage::modem_inbound(
+            "+1",
+            "original",
+            "2026-01-01T00:00:00Z",
+            "/org/.../SMS/99",
+            "test-fingerprint",
+        );
+        let result = store
+            .insert_inbound_message_with_deliveries(probe, &[])
+            .unwrap();
+        assert!(
+            matches!(result, InboundInsertResult::Duplicate(_)),
+            "first legacy row must get dedupe key for duplicate detection"
+        );
+
+        // Second row (duplicate content) stays NULL, but dedup still catches it
+        let probe2 = NewMessage::modem_inbound(
+            "+1",
+            "original",
+            "2026-01-01T00:00:00Z",
+            "/org/.../SMS/100",
+            "test-fingerprint",
+        );
+        let result2 = store
+            .insert_inbound_message_with_deliveries(probe2, &[])
+            .unwrap();
+        assert!(
+            matches!(result2, InboundInsertResult::Duplicate(_)),
+            "second row also deduped via the existing key"
+        );
+
+        // Only 2 original messages exist, no new ones from probes
+        assert_eq!(store.count_messages().unwrap(), 2);
+
+        // Delivery state preserved (delivery is id=1 from legacy setup)
+        let delivery = store.get_delivery(1).unwrap();
+        assert_eq!(delivery.state, "succeeded");
+        assert_eq!(delivery.attempt_count, 2);
+
+        // Idempotent re-open
+        drop(store);
+        let store = MessageStore::open(&path).unwrap();
+        assert_eq!(store.count_messages().unwrap(), 2);
+
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
+    }
+
+    #[test]
+    fn legacy_migration_defers_backfill_then_completes_after_enrollment() {
+        let path = std::env::temp_dir().join(format!(
+            "sms-relayed-deferred-backfill-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let legacy = Connection::open(&path).unwrap();
+            legacy.execute_batch(
+                "CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    direction TEXT NOT NULL,
+                    phone_number TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    modem_sms_path TEXT NULL,
+                    read_at TEXT NULL,
+                    error TEXT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO messages
+                    (direction, phone_number, body, timestamp, status, source, created_at, updated_at)
+                VALUES
+                    ('inbound', '+1', 'original', '2026-01-01T00:00:00Z', 'received',
+                     'modem', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                INSERT INTO messages
+                    (direction, phone_number, body, timestamp, status, source, created_at, updated_at)
+                VALUES
+                    ('inbound', '+2', 'other', '2026-01-02T00:00:00Z', 'received',
+                     'modem', '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z');",
+            ).unwrap();
+        }
+
+        // Open without fingerprint - backfill skipped
+        let store = MessageStore::open(&path).unwrap();
+        assert_eq!(store.count_messages().unwrap(), 2);
+        // Verify via insert that first message does not dedupe (no key set)
+        // Use a different fingerprint than the eventual enrollment to avoid key collision
+        let probe_before = NewMessage::modem_inbound(
+            "+1",
+            "original",
+            "2026-01-01T00:00:00Z",
+            "/org/.../SMS/99",
+            "temp-fp",
+        );
+        let result_before = store
+            .insert_inbound_message_with_deliveries(probe_before, &[])
+            .unwrap();
+        // No matching key → the probe creates a new message (Inserted), not Duplicate
+        assert!(
+            matches!(result_before, InboundInsertResult::Inserted(_)),
+            "without backfill, duplicate must insert a new message"
+        );
+        assert_eq!(store.count_messages().unwrap(), 3);
+
+        // Enroll fingerprint now and backfill
+        store.set_meta("modem_fingerprint", "enrolled-fp").unwrap();
+        let count = store.backfill_dedupe_keys().unwrap();
+        // Two legacy rows get backfilled with key computed from "enrolled-fp"
+        assert_eq!(count, 2, "both legacy rows should be backfilled");
+
+        // Replay with same content is suppressed
+        let input = NewMessage::modem_inbound(
+            "+1",
+            "original",
+            "2026-01-01T00:00:00Z",
+            "/org/.../SMS/99",
+            "enrolled-fp",
+        );
+        let result = store
+            .insert_inbound_message_with_deliveries(input, &[])
+            .unwrap();
+        assert!(
+            matches!(result, InboundInsertResult::Duplicate(_)),
+            "replay must be suppressed"
+        );
+
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
+    }
+
+    #[test]
     fn delivery_claims_use_owner_tokens_and_recover_expired_leases() {
         let store = memory_store();
         let message = store
@@ -1678,6 +1887,163 @@ mod tests {
     }
 
     #[test]
+    fn complete_delivery_with_attempt_preserves_last_error_for_failures() {
+        let store = memory_store();
+        // Create three separate messages with deliveries
+        for i in 1..=3 {
+            let _ = store
+                .insert_message_with_deliveries(
+                    NewMessage::inbound(&format!("+{i}"), &format!("last-error-{i}")),
+                    &["bark.primary".to_string()],
+                )
+                .unwrap();
+        }
+
+        let all = store
+            .claim_due_deliveries(3, "2099-01-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(all.len(), 3);
+        let d1 = &all[0];
+        let d2 = &all[1];
+        let d3 = &all[2];
+
+        // Success: last_error stays NULL
+        store
+            .complete_delivery_with_attempt(
+                d1.id,
+                "succeeded",
+                None,
+                1,
+                None,
+                &d1.lease_token.as_ref().unwrap(),
+                NewForwardAttemptSample {
+                    profile_key: d1.profile_key.clone(),
+                    delivery_id: Some(d1.id),
+                    attempt_number: 1,
+                    started_at: "2026-01-01T00:00:00Z".to_string(),
+                    completed_at: "2026-01-01T00:00:01Z".to_string(),
+                    latency_ms: 100,
+                    outcome: ForwardAttemptOutcome::Success,
+                    error_code: None,
+                },
+            )
+            .unwrap();
+
+        // Permanent failure: last_error gets the error_code
+        store
+            .complete_delivery_with_attempt(
+                d2.id,
+                "permanent_failed",
+                Some("shell_exit_nonzero"),
+                1,
+                None,
+                &d2.lease_token.as_ref().unwrap(),
+                NewForwardAttemptSample {
+                    profile_key: d2.profile_key.clone(),
+                    delivery_id: Some(d2.id),
+                    attempt_number: 1,
+                    started_at: "2026-01-01T00:00:00Z".to_string(),
+                    completed_at: "2026-01-01T00:00:01Z".to_string(),
+                    latency_ms: 100,
+                    outcome: ForwardAttemptOutcome::PermanentFailure,
+                    error_code: Some("shell_exit_nonzero".to_string()),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store.get_delivery(d2.id).unwrap().last_error.as_deref(),
+            Some("shell_exit_nonzero")
+        );
+        assert_eq!(store.get_delivery(d2.id).unwrap().state, "permanent_failed");
+
+        // Transient failure: last_error gets the error_code
+        store
+            .complete_delivery_with_attempt(
+                d3.id,
+                "retry_wait",
+                Some("http_timeout"),
+                1,
+                Some("2099-01-02T00:00:00Z"),
+                &d3.lease_token.as_ref().unwrap(),
+                NewForwardAttemptSample {
+                    profile_key: d3.profile_key.clone(),
+                    delivery_id: Some(d3.id),
+                    attempt_number: 1,
+                    started_at: "2026-01-01T00:00:00Z".to_string(),
+                    completed_at: "2026-01-01T00:00:01Z".to_string(),
+                    latency_ms: 100,
+                    outcome: ForwardAttemptOutcome::TransientFailure,
+                    error_code: Some("http_timeout".to_string()),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store.get_delivery(d3.id).unwrap().last_error.as_deref(),
+            Some("http_timeout")
+        );
+        assert_eq!(store.get_delivery(d3.id).unwrap().state, "retry_wait");
+    }
+
+    #[test]
+    fn profile_missing_preserves_attempt_count() {
+        let store = memory_store();
+        let _message = store
+            .insert_message_with_deliveries(
+                NewMessage::inbound("+1", "profile-missing"),
+                &["bark.primary".to_string()],
+            )
+            .unwrap();
+        let delivery = store
+            .claim_due_deliveries(1, "2099-01-01T00:00:00Z")
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        let delivery_token = delivery.lease_token.clone().unwrap();
+        // Simulate two prior attempts via complete_delivery
+        // Use a past timestamp for next_attempt_at so it's immediately due
+        store
+            .complete_delivery(
+                delivery.id,
+                "retry_wait",
+                Some("http_timeout"),
+                2,
+                Some("2000-01-01T00:00:00Z"),
+                &delivery_token,
+            )
+            .unwrap();
+        drop(delivery);
+
+        // Reclaim after lease expiry with prev attempt_count=2
+        store
+            .recover_expired_leases("2099-01-01T02:00:00Z")
+            .unwrap();
+        let re_claimed = store
+            .claim_due_deliveries(1, "2099-01-01T03:00:00Z")
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(re_claimed.attempt_count, 2);
+
+        let re_token = re_claimed.lease_token.clone().unwrap();
+        // profile_missing should use attempt_count + 1 (3)
+        let completed = store
+            .complete_delivery(
+                re_claimed.id,
+                "permanent_failed",
+                Some("profile_missing"),
+                3,
+                None,
+                &re_token,
+            )
+            .unwrap();
+        assert!(completed);
+        let d = store.get_delivery(re_claimed.id).unwrap();
+        assert_eq!(d.attempt_count, 3, "attempt_count must not regress below 3");
+        assert_eq!(d.last_error.as_deref(), Some("profile_missing"));
+    }
+
+    #[test]
     fn concurrent_dedupe_inserts_one_message_with_immediate_transactions() {
         let store = memory_store();
         let profiles = ["bark.primary".to_string()];
@@ -1725,5 +2091,57 @@ mod tests {
         assert_eq!(duplicate_count, 1, "exactly one thread must get Duplicate");
         assert_eq!(store.count_messages().unwrap(), 1);
         assert_eq!(store.count_deliveries().unwrap(), 1);
+    }
+
+    #[test]
+    fn duplicate_inbound_does_not_emit_message_created() {
+        use crate::events::AppEvent;
+        use crate::events::EventBus;
+
+        let store = memory_store();
+        let events = EventBus::new();
+        let mut rx = events.subscribe();
+        let profiles = ["bark.primary".to_string()];
+
+        let make_input = || {
+            NewMessage::modem_inbound(
+                "+15550000000",
+                "no duplicate event",
+                "2026-07-12T17:00:00Z",
+                "/org/freedesktop/ModemManager1/SMS/1",
+                "modem-fingerprint",
+            )
+        };
+
+        // First call: Inserted -> emit event
+        match store
+            .insert_inbound_message_with_deliveries(make_input(), &profiles)
+            .unwrap()
+        {
+            InboundInsertResult::Inserted(m) => {
+                events.send(AppEvent::MessageCreated(m));
+            }
+            InboundInsertResult::Duplicate(_) => panic!("first must be Inserted"),
+        }
+        assert_eq!(
+            rx.try_recv().ok().map(|e| e.name()),
+            Some("message.created")
+        );
+
+        // Second call: Duplicate -> no event
+        match store
+            .insert_inbound_message_with_deliveries(make_input(), &profiles)
+            .unwrap()
+        {
+            InboundInsertResult::Inserted(_) => panic!("second must be Duplicate"),
+            InboundInsertResult::Duplicate(_) => {
+                // Purposely do NOT emit MessageCreated
+            }
+        }
+        // No more events should be available
+        assert!(
+            rx.try_recv().is_err(),
+            "Duplicate must not emit MessageCreated"
+        );
     }
 }

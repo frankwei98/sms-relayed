@@ -133,9 +133,8 @@ async fn process_delivery_inner(
                 "permanent_failed",
                 "profile_missing",
                 lease_token,
-                next_attempt_at,
-            )
-            .await?;
+                row.attempt_count + 1,
+            )?;
             return Ok(());
         }
     };
@@ -155,7 +154,7 @@ async fn process_delivery_inner(
         completed_at,
         latency_ms: (latency_us / 1000).max(1),
         outcome: map_outcome_to_attempt(&outcome),
-        error_code,
+        error_code: error_code.clone(),
     };
 
     match outcome {
@@ -176,7 +175,7 @@ async fn process_delivery_inner(
             store.complete_delivery_with_attempt(
                 row.id,
                 "permanent_failed",
-                None,
+                error_code.as_deref(),
                 row.attempt_count + 1,
                 None,
                 lease_token,
@@ -204,7 +203,7 @@ async fn process_delivery_inner(
                 store.complete_delivery_with_attempt(
                     row.id,
                     "retry_wait",
-                    None,
+                    error_code.as_deref(),
                     row.attempt_count + 1,
                     Some(&next_attempt_at),
                     lease_token,
@@ -217,19 +216,19 @@ async fn process_delivery_inner(
 }
 
 /// For message_not_found / profile_missing: no attempt sample recorded
-async fn process_no_sample_path(
+fn process_no_sample_path(
     store: &MessageStore,
     id: i64,
     state: &str,
     error_code: &str,
     lease_token: &str,
-    _next_attempt_at: String,
+    attempt_count: i64,
 ) -> Result<()> {
     ensure_completed(store.complete_delivery(
         id,
         state,
         Some(error_code),
-        1,
+        attempt_count,
         None,
         lease_token,
     )?)?;
