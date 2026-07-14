@@ -23,6 +23,7 @@ pub enum Command {
     Setup,
     Run,
     Send,
+    Update,
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -37,9 +38,9 @@ pub enum ConfigCommand {
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
 
-    use super::Args;
+    use super::{Args, Command};
 
     #[test]
     fn version_uses_build_metadata() {
@@ -48,5 +49,12 @@ mod tests {
 
         assert_eq!(version, env!("SMS_RELAYED_BUILD_VERSION"));
         assert!(version.starts_with(concat!(env!("CARGO_PKG_VERSION"), "+")));
+    }
+
+    #[test]
+    fn update_subcommand_is_available() {
+        let args = Args::try_parse_from(["sms-relayed", "update"]).expect("update should parse");
+
+        assert_eq!(args.command, Some(Command::Update));
     }
 }

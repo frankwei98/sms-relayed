@@ -13,6 +13,7 @@ mod runner;
 mod runtime;
 mod smscode;
 mod storage;
+mod update;
 mod util;
 mod wizard;
 
@@ -68,6 +69,7 @@ async fn run(args: Args) -> Result<()> {
         }
         Some(Command::Run) => runtime::run_forwarding(&args.config).await,
         Some(Command::Send) => runtime::send_interactive(&args.config).await,
+        Some(Command::Update) => update::run().await,
         Some(Command::Config { command }) => match command {
             ConfigCommand::Check => {
                 let cfg = config::AppConfig::load(&args.config)?;
