@@ -29,6 +29,7 @@ pub async fn run_delivery_worker(
     loop {
         if let Err(e) = tick(&store, &config, &client, &shell_runner, shell_timeout).await {
             error!("delivery worker tick failed: {}", e);
+            crate::monitoring::capture_failure("delivery", "delivery.tick_failed");
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }

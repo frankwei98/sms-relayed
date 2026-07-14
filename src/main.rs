@@ -8,6 +8,7 @@ mod events;
 mod forward;
 mod message;
 mod modem;
+mod monitoring;
 mod runner;
 mod runtime;
 mod smscode;
@@ -27,7 +28,16 @@ use is_terminal::IsTerminal;
 async fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
+    let is_service = matches!(args.command.as_ref(), Some(Command::Run));
+    let _sentry = is_service.then(monitoring::init).flatten();
+    let result = run(args).await;
+    if is_service && result.is_err() {
+        monitoring::capture_failure("process", "process.exit_error");
+    }
+    result
+}
 
+async fn run(args: Args) -> Result<()> {
     match args.command {
         None => {
             if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {

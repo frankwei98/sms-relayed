@@ -156,8 +156,14 @@ async fn run_retention_worker(store: MessageStore, config: AppConfig) {
                 log::info!("retention deleted {} messages", deleted);
             }
             Ok(Ok(_)) => {}
-            Ok(Err(e)) => log::error!("retention failed: {}", e),
-            Err(e) => log::error!("retention task failed: {}", e),
+            Ok(Err(e)) => {
+                log::error!("retention failed: {}", e);
+                crate::monitoring::capture_failure("retention", "retention.cleanup_failed");
+            }
+            Err(e) => {
+                log::error!("retention task failed: {}", e);
+                crate::monitoring::capture_failure("retention", "retention.task_failed");
+            }
         }
         tokio::time::sleep(RETENTION_INTERVAL).await;
     }

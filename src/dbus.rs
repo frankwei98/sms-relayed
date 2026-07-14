@@ -308,6 +308,7 @@ where
                     Ok(()) => break,
                     Err(e) => {
                         error!("persist incoming SMS failed; retrying: {}", e);
+                        crate::monitoring::capture_failure("dbus", "dbus.inbound_persist_failed");
                         tokio::time::sleep(delay).await;
                         delay = (delay * 2).min(Duration::from_secs(30));
                     }
@@ -321,6 +322,7 @@ where
             }
             if retries > 600 {
                 warn!("短信内容为空，重试次数过多，放弃");
+                crate::monitoring::capture_failure("dbus", "dbus.sms_body_unavailable");
                 return Ok(());
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -380,6 +382,7 @@ where
             }
             Err(e) => {
                 error!("D-Bus monitor lost: {}", e);
+                crate::monitoring::capture_failure("dbus", "dbus.monitor_lost");
                 let resolved =
                     resolve_monitor_path(configured_modem_path, modem_service, store).await;
                 if let Some(new_path) = resolved {

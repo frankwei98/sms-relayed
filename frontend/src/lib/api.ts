@@ -1,18 +1,31 @@
+import { captureFailure } from "./monitoring";
+
 export type ApiErrorBody = { error: { code: string; message: string } };
 
 export async function apiFetch<T>(
 	input: RequestInfo | URL,
 	init?: RequestInit,
 ): Promise<T> {
-	const response = await fetch(input, {
-		credentials: "include",
-		headers: {
-			"Content-Type": "application/json",
-			...(init?.headers ?? {}),
-		},
-		...init,
-	});
+	let response: Response;
+	try {
+		response = await fetch(input, {
+			credentials: "include",
+			headers: {
+				"Content-Type": "application/json",
+				...(init?.headers ?? {}),
+			},
+			...init,
+		});
+	} catch (error) {
+		captureFailure("api.request_failed", { status: "network_error" });
+		throw error;
+	}
 	if (!response.ok) {
+		if (response.status >= 500) {
+			captureFailure("api.request_failed", {
+				status: response.status.toString(),
+			});
+		}
 		const body = (await response
 			.json()
 			.catch(() => null)) as ApiErrorBody | null;

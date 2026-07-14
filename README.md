@@ -232,6 +232,15 @@ path = "/etc/sms-relayed/forward.sh"
 - `ignore_storage` 支持数组，允许多个过滤值。
 - 配置文件权限会自动限制为 600。
 
+## Sentry 远程错误监测
+
+发布版默认启用独立的 Rust 后端和 Web 前端 Sentry 项目。上报会移除请求、用户、breadcrumb、额外字段、主机名和异常消息正文，不发送短信正文、电话号码或配置凭据。
+
+- 后端运行时可设置 `SMS_RELAYED_SENTRY_DSN` 覆盖默认 DSN；设为空字符串可关闭上报。
+- 前端构建时可设置 `VITE_SENTRY_DSN` 覆盖默认 DSN；设置 `VITE_SENTRY_ENABLED=false` 可关闭生产构建中的上报。
+- 前端开发模式不会发送 Sentry 事件。
+- Sentry 仅用于错误与崩溃诊断，设备在线状态仍以 `/api/health` 和外部健康检查为准。
+
 ## 服务管理
 
 ### OpenWrt
