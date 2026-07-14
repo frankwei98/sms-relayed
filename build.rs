@@ -42,6 +42,7 @@ fn emit_build_version() {
         .or_else(|| std::env::var("GITHUB_SHA").ok())
         .unwrap_or_else(|| "unknown".to_string());
 
+    println!("cargo:rustc-env=SMS_RELAYED_BUILD_COMMIT={commit}");
     println!("cargo:rustc-env=SMS_RELAYED_BUILD_VERSION={package_version}+{commit}");
 }
 
