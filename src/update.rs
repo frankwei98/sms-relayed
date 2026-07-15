@@ -86,7 +86,9 @@ fn parse_openwrt_command(contents: &str) -> Option<PathBuf> {
         if !rest.starts_with(char::is_whitespace) {
             return None;
         }
-        first_shell_word(rest.trim_start()).map(PathBuf::from)
+        first_shell_word(rest.trim_start())
+            .map(PathBuf::from)
+            .filter(|path| is_sms_relayed_binary(path))
     })
 }
 
@@ -97,16 +99,24 @@ fn parse_systemd_exec_start(value: &str) -> Option<PathBuf> {
             .split([';', ' ', '\t', '\n'])
             .next()?
             .trim_matches(['\'', '"']);
-        if path.starts_with('/') {
-            return Some(PathBuf::from(path));
+        let path = PathBuf::from(path);
+        if path.is_absolute() && is_sms_relayed_binary(&path) {
+            return Some(path);
         }
     }
 
     value
         .split(|character: char| character.is_whitespace() || matches!(character, '{' | ';'))
         .map(|word| word.trim_matches(['\'', '"']))
-        .find(|word| word.starts_with('/'))
+        .find(|word| {
+            let path = Path::new(word);
+            path.is_absolute() && is_sms_relayed_binary(path)
+        })
         .map(PathBuf::from)
+}
+
+fn is_sms_relayed_binary(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name == "sms-relayed")
 }
 
 fn first_shell_word(input: &str) -> Option<String> {
@@ -608,6 +618,18 @@ start_service() {
             Some(Path::new("/usr/local/bin/sms-relayed"))
         );
         assert_eq!(parse_systemd_exec_start("not configured"), None);
+        assert_eq!(
+            parse_openwrt_command(
+                "procd_set_param command /usr/bin/env sms-relayed run --config /etc/sms-relayed/config.toml"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_systemd_exec_start(
+                "{ path=/usr/bin/env ; argv[]=/usr/bin/env sms-relayed run ; }"
+            ),
+            None
+        );
     }
 
     #[test]
