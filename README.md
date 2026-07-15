@@ -1,189 +1,90 @@
 # sms-relayed
 
-sms-relayed 是一个面向 Linux 随身 WiFi、4G/5G 模组设备和 OpenWrt/Debian 网关的短信转发与短信发送工具。它通过 ModemManager 暴露的系统 D-Bus 接口实时监听新短信，并把短信内容转发到 企业微信、PlusPlus、Telegram、钉钉、Bark 或自定义 Shell 脚本；同时也可以通过命令行调用 ModemManager 发送短信。
+通过 ModemManager 收发、保存并转发短信的 Linux 服务。<br>
+A Linux service for receiving, storing, sending, and forwarding SMS through ModemManager.
 
-当前实现是仓库根目录下的 Rust crate，使用 Tokio、zbus 和 reqwest 编写。
+[中文](#中文) · [English](#english)
 
-## 5W1H
+---
 
-| 问题  | 答案                                                                                                                                                                                           |
-| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Who   | 适合把 SIM 卡插在随身 WiFi、软路由、OpenWrt/Debian 设备或 USB 蜂窝网卡里的用户。                                                                                                               |
-| What  | 自动读取设备收到的短信，转发到多个通知渠道；也支持通过命令行发送短信。                                                                                                              |
-| When  | 设备收到运营商短信、验证码、告警短信时；或需要远程让设备上的 SIM 卡发短信时。                                                                                                                  |
-| Where | 运行在有 ModemManager 和系统 D-Bus 的 Linux 环境中，默认监听 `/org/freedesktop/ModemManager1/Modem/0`。                                                                                        |
-| Why   | SIM 卡不在手机里时，短信容易被遗漏；把短信转成即时通知或 API 能降低维护成本。                                                                                                                  |
-| How   | 监听 `org.freedesktop.ModemManager1.Modem.Messaging` 的 `Added` 信号，读取 `org.freedesktop.ModemManager1.Sms` 属性，再按配置调用各转发渠道；发送短信时调用 `Messaging.Create` 和 `Sms.Send`。 |
+<a id="中文"></a>
 
-## 功能
+## 中文
 
-- 实时监听 ModemManager 收到的新短信。
-- 支持 PushPlus、企业微信自建应用、Telegram Bot、钉钉机器人、Bark、自定义 Shell 脚本。
-- 支持一次转发到多个渠道，同一渠道可配置多组独立凭证。
-- 支持命令行交互发送短信。
-- 支持从验证码短信中提取验证码，并把验证码放进通知标题；Bark 渠道会在识别到验证码时开启自动复制。
-- 支持按 ModemManager 的短信存储类型过滤不需要转发的短信。
-- 支持 TOML 配置文件和多 profile 转发。
-- 支持 OpenWrt procd 和 systemd 服务管理。
+### 项目简介
 
-- 支持 SQLite 短信历史存储、Web API 管理后台、密码保护（P2 功能）。
-- 默认 Web 管理地址：`http://<router-ip>:8080/`。
+sms-relayed 适用于插有 SIM 卡的 OpenWrt 路由器、Debian 网关、随身 Wi-Fi、USB 蜂窝网卡和其他 Linux 设备。它通过系统 D-Bus 连接 ModemManager，监听新短信并转发到多个通知渠道，同时提供短信历史、Web 管理控制台、命令行发送和设备状态管理。
 
-## Web API 和前端管理后台 (P2)
-
-从 v1.1 开始，sms-relayed 包含一个可选的 Web API 和 React 前端管理控制台，用于短信历史管理、发送、搜索、导出和配置编辑。
-
-### 启用
-
-通过 `setup` 向导启用 Web API，或在配置文件中设置：
-
-```toml
-[api]
-enabled = true
-bind = "0.0.0.0"
-port = 8080
-enable_ipv6 = false
-password = "your-password"
-database_path = "/etc/sms-relayed/sms-relayed.sqlite"
-
-[http]
-connect_timeout_secs = 10
-request_timeout_secs = 30
-shell_timeout_secs = 30
-
-[retention]
-enabled = false
-max_age_days = 90
-batch_size = 500
-```
-
-`api.enabled = true` 且 `api.password` 为空时，服务将拒绝启动。
-`http` 和 `retention` 都可以省略并使用以上默认值。历史保留清理默认关闭；启用后只分批删除超过保留期且没有待投递任务的消息。
+项目由 Rust 后端和嵌入二进制的 React 前端组成，不需要单独部署 Web 服务器。
 
 ### 功能
 
-- 密码登录，7 天会话 cookie（HttpOnly、SameSite=Lax）。
-- SMS 收件箱/发件箱列表，按号码分组会话，未读计数。
-- 搜索：手机号、正文全文、方向（接收/发送）、状态、未读、时间范围。
-- 标记已读/未读，单条和批量删除。
-- 以流式响应导出 CSV 或 JSON，避免将全部历史一次载入内存。
-- 发送短信（通过 ModemManager）。
-- 配置全量编辑：`app`、`sms`、`forward`、`channels`、`api` 各节。
-- 配置验证（JSON 和 TOML 均支持）。
-- 配置保存后需要重启服务。
-- SSE 实时事件推送（新短信、状态更新、配置变更）。
-- 前端资产嵌入在二进制文件中，无需独立 Web 服务器。
+- 实时接收 ModemManager 的新短信，持久化到 SQLite，并避免重复入库。
+- 将短信转发到 Bark、Telegram、PushPlus、企业微信、钉钉或自定义 Shell 脚本。
+- 支持多个命名 profile，同一条短信可投递到多个渠道，并记录投递结果、重试和延迟。
+- 从常见验证码短信中提取 4–7 位字母数字验证码；Bark 通知可自动复制验证码。
+- 通过 CLI 或密码保护的 Web 控制台发送短信。
+- 在 Web 控制台中搜索、筛选、标记已读、删除和导出 CSV/JSON。
+- 查看 Modem 状态，执行启用、禁用和确认后的重置操作。
+- 可选的历史保留策略，分批清理超过指定天数且没有待处理投递的消息。
+- 支持 OpenWrt procd 与 systemd 服务。
+- 支持带 SHA-256 校验、原子替换和服务重启的自更新。
 
-### Modem 健康与控制的运行时依赖
+### 运行要求
 
-Web Modem 页面和 `/api/health` 的 modem 子状态使用 `mmcli`（ModemManager 命令行工具）。
-SMS 收发仍然使用 ModemManager 系统 D-Bus，不受此依赖影响。
+- Linux 与可用的系统 D-Bus。
+- ModemManager，以及一个支持短信功能的 Modem。
+- 服务用户需要访问 ModemManager 系统 D-Bus；路由器上通常以 `root` 运行。
+- `mmcli` 是 Web Modem 状态、健康诊断和设备控制的运行时依赖。没有 `mmcli` 时，短信收发仍通过 D-Bus 工作，但相关状态会显示为 `unknown`。
+- 官方 Release 当前提供静态 Linux x86_64 和 aarch64 二进制。
 
-如果 `mmcli` 缺失，SmsRelayed 仍可正常启动，但 Web modem 状态/控制和健康检查会报告 `unknown`。
-在目标设备上安装 `mmcli` 即可启用 Web modem 诊断和设备控制功能。
+### 快速开始
 
-### 公开健康检查的安全说明
-
-`GET /api/health` 公开返回 `service` 和 `modem` 子状态。
-如果服务可在设备网络外访问，请仅在受信网络或置于访问控制之后暴露此接口。
-公开响应已隐去 modem 对象路径、运营商名称、信号值、SIM 标识符、手机号、短信正文和原始命令输出。
-
-### 路由
-
-| 路径 | 方法 | 说明 |
-|------|------|------|
-| `/api/auth/login` | POST | 登录 |
-| `/api/auth/logout` | POST | 登出 |
-| `/api/auth/me` | GET | 当前认证状态 |
-| `/api/messages` | GET | 消息列表（分页、筛选） |
-| `/api/messages/send` | POST | 发送短信 |
-| `/api/messages/:id/read` | POST | 标记已读 |
-| `/api/messages/:id/unread` | POST | 标记未读 |
-| `/api/conversations` | GET | 会话列表 |
-| `/api/conversations/:phone_number/read` | POST | 标记号码下所有未读为已读 |
-| `/api/messages/:id` | DELETE | 删除单条 |
-| `/api/messages/delete` | POST | 批量删除 |
-| `/api/messages/export` | GET | 导出（CSV/JSON，忽略分页 limit） |
-| `/api/events` | GET | SSE 事件流 |
-| `/api/config` | GET/PUT | 获取/保存配置 |
-| `/api/config/check` | POST | 校验配置 |
-| `/api/status` | GET | 运行时状态 |
-| `/api/service/restart` | POST | 重启服务 |
-| `/login` | - | 前端登录页 |
-| `/config` | - | 前端配置编辑页 |
-| `/modem` | - | 前端调制解调器状态和控制页 |
-| `/api/health` | GET | 公开健康检查（service + modem 子状态） |
-| `/api/modem/status` | GET | 调制解调器详细状态（需登录） |
-| `/api/modem/enable` | POST | 启用调制解调器（需登录） |
-| `/api/modem/disable` | POST | 禁用调制解调器（需登录） |
-| `/api/modem/reset` | POST | 重置调制解调器（需登录，需 `{ "confirm": true }`） |
-
-## Quick Start
-
-OpenWrt first-run install:
+在 OpenWrt 的 root shell 中，或在有写入 `/usr/bin` 和 `/etc` 权限的 Linux 环境中运行：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/frankwei98/sms-relayed/main/install.sh | sh
 ```
 
-Manual setup:
+安装脚本会：
+
+1. 检测系统和架构并下载最新 GitHub Release。
+2. 安装二进制到 `/usr/bin/sms-relayed`。
+3. 创建 `/etc/sms-relayed`。
+4. 注册 OpenWrt procd 或 systemd 服务。
+5. 在交互式终端中启动配置向导；配置存在后启用并启动服务。
+
+如果当前账号需要提权，可以先下载脚本、检查内容，再用 `sudo sh install.sh` 执行。
+
+常用安装变量：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `SMS_RELAYED_VERSION` | `latest` | 安装指定 Release tag。 |
+| `SMS_RELAYED_BIN_DIR` | `/usr/bin` | 二进制安装目录。 |
+| `SMS_RELAYED_CONFIG_DIR` | `/etc/sms-relayed` | 配置和默认数据库目录。 |
+| `SMS_RELAYED_START` | `1` | 设为 `0` 时不自动启动服务。 |
+| `SMS_RELAYED_CONFIG_ONLY` | `0` | 设为 `1` 时不安装二进制，并使用已有二进制运行配置流程。 |
+| `SMS_RELAYED_UPDATE` | 自动/交互确认 | 已安装二进制存在时，设为 `1` 强制更新，设为 `0` 跳过。 |
+| `SMS_RELAYED_ROOT` | 空 | 将文件写入指定根目录，用于镜像或离线文件系统准备；不会启动服务。 |
+
+### 配置
+
+默认配置路径是 `/etc/sms-relayed/config.toml`。推荐运行交互式向导：
 
 ```sh
 sudo sms-relayed setup
 sudo sms-relayed config check
-sudo sms-relayed run
+sudo sms-relayed config show
 ```
 
-## 编译
+也可以使用全局 `--config` 参数指定其他路径：
 
-```bash
-cargo build --release
+```sh
+sms-relayed --config /path/to/config.toml config check
 ```
 
-编译产物位于：
-
-```text
-target/release/sms-relayed
-```
-
-开发期也可以直接：
-
-```bash
-cargo run
-```
-
-## 命令行
-
-```text
-sms-relayed
-sms-relayed setup
-sms-relayed run
-sms-relayed send
-sms-relayed update
-sms-relayed config check
-sms-relayed config show
-```
-
-行为：
-- `sms-relayed`：在交互式终端中进入设置向导。
-- `sms-relayed setup`：始终进入设置向导。支持 Keep（保留现有配置）、Edit guided（引导编辑）、Replace from scratch（重建）、Cancel（取消）。
-- `sms-relayed run`：启动短信转发服务。此命令非交互式，用于 init 系统启动。
-- `sms-relayed send`：交互式发送短信。
-- `sms-relayed update`：下载最新 GitHub Release，校验发布的 SHA-256 后原子替换已安装的二进制，并重启 OpenWrt 或 systemd 服务。目标路径依次取服务注册路径、`PATH` 中的 `sms-relayed`、当前可执行文件；符号链接会解析到真实文件。已是最新版时不会覆盖或重启。目前仅支持 Linux x86_64 和 aarch64。更新系统目录通常需要使用 `sudo`；未发现服务时只更新二进制并打印警告。
-- `sms-relayed config check`：验证配置文件语法、profile 引用、必填字段、modem 路径格式。
-- `sms-relayed config show`：打印脱敏后的配置摘要。
-
-## 配置文件
-
-默认配置文件路径：
-
-```text
-/etc/sms-relayed/config.toml
-```
-
-通过 `--config` 参数指定自定义路径。
-
-配置格式：
+完整示例：
 
 ```toml
 [app]
@@ -195,10 +96,7 @@ ignore_storage = ["sm"]
 code_keywords = ["验证码", "verification", "code", "인증", "代码", "随机码"]
 
 [forward]
-enabled = [
-  "bark.personal",
-  "telegram.main",
-]
+enabled = ["bark.personal", "telegram.main"]
 
 [channels.bark.personal]
 server_url = "https://api.day.app"
@@ -224,131 +122,436 @@ secret = "..."
 
 [channels.shell.default]
 path = "/etc/sms-relayed/forward.sh"
+
+[api]
+enabled = true
+bind = "0.0.0.0"
+port = 8080
+enable_ipv6 = false
+password = "change-this-password"
+database_path = "/etc/sms-relayed/sms-relayed.sqlite"
+
+[http]
+connect_timeout_secs = 10
+request_timeout_secs = 30
+shell_timeout_secs = 30
+
+[retention]
+enabled = false
+max_age_days = 90
+batch_size = 500
 ```
 
-### 配置规则
+配置说明：
 
-- `forward.enabled` 包含 `类型.名称` 格式的 profile 引用。
-- 同类型渠道可以配置多个命名 profile。
-- `modem_path` 支持自定义 ModemManager modem 路径。
-- `ignore_storage` 支持数组，允许多个过滤值。
-- 配置文件权限会自动限制为 600。
+- `forward.enabled` 使用 `渠道类型.profile名称`，例如 `telegram.main`。同一渠道可定义多个 profile。
+- 支持的渠道类型为 `bark`、`telegram`、`pushplus`、`wecom`、`dingtalk` 和 `shell`。
+- `api.enabled = true` 时必须设置非空 `api.password`。
+- 配置文件包含凭据；程序写入配置时会将权限设为 `0600`。
+- 修改配置后需要重启服务才能生效。
 
-## Sentry 远程错误监测
+### Web 管理控制台
 
-发布版默认启用独立的 Rust 后端和 Web 前端 Sentry 项目。上报会移除请求、用户、breadcrumb、额外字段、主机名和异常消息正文，不发送短信正文、电话号码或配置凭据。
+启用 `[api]` 后，访问：
 
-- 后端运行时可设置 `SMS_RELAYED_SENTRY_DSN` 覆盖默认 DSN；设为空字符串可关闭上报。
-- 前端构建时可设置 `VITE_SENTRY_DSN` 覆盖默认 DSN；设置 `VITE_SENTRY_ENABLED=false` 可关闭生产构建中的上报。
-- 前端开发模式不会发送 Sentry 事件。
-- Sentry 仅用于错误与崩溃诊断，设备在线状态仍以 `/api/health` 和外部健康检查为准。
+```text
+http://<设备 IP>:8080/
+```
 
-## 服务管理
+控制台包含：
 
-### OpenWrt
+- SMS 收件箱/发件箱、号码会话、搜索、筛选和未读状态。
+- SMS 发送、单条/批量删除、CSV/JSON 流式导出。
+- Modem 状态与启用、禁用、重置操作。
+- 各转发 profile 最近五次已完成投递的结果与延迟。
+- 配置编辑、验证、保存和服务重启。
+- 通过 SSE 推送新消息和状态变化。
+
+主要 API：
+
+| 路径 | 用途 |
+| --- | --- |
+| `/api/auth/login`, `/api/auth/logout`, `/api/auth/me` | 会话认证。 |
+| `/api/messages`, `/api/conversations` | 消息与会话查询。 |
+| `/api/messages/send` | 发送短信。 |
+| `/api/messages/export` | 导出 CSV 或 JSON。 |
+| `/api/events` | SSE 事件流。 |
+| `/api/config`, `/api/config/check` | 配置读取、保存和验证。 |
+| `/api/status`, `/api/service/restart` | 服务状态与重启。 |
+| `/api/modem/*` | Modem 状态和控制。 |
+| `/api/forwarding/attempts` | 转发投递状态。 |
+| `/api/health` | 无需登录的服务与 Modem 健康检查。 |
+
+`/api/health` 会隐藏对象路径、运营商、信号、SIM 标识、号码、短信正文和原始命令输出。Web 服务当前直接提供 HTTP；不要将它裸露到公网，请放在可信网络、VPN 或带 TLS 和访问控制的反向代理后面。
+
+### CLI
+
+```text
+sms-relayed [--config <path>]
+sms-relayed [--config <path>] setup
+sms-relayed [--config <path>] run
+sms-relayed [--config <path>] send
+sms-relayed update
+sms-relayed [--config <path>] config check
+sms-relayed [--config <path>] config show
+```
+
+- 无子命令：在交互式终端中打开配置向导；非交互环境会返回错误。
+- `setup`：打开配置向导。
+- `run`：启动短信监听、持久化、投递 worker、保留策略 worker，以及可选 Web API。
+- `send`：交互式输入号码和正文，确认后发送并保存记录。
+- `update`：查询最新 Release，校验配套 SHA-256，验证下载文件的版本/commit，原子替换二进制并重启已检测到的服务。
+- `config check`：加载并验证配置。
+- `config show`：输出脱敏后的配置摘要。
+
+自更新当前仅支持官方发布的 Linux x86_64 与 aarch64 资产。已是相同 commit 时不会替换或重启。更新系统目录通常需要以有权限的账号运行，例如 `sudo sms-relayed update`。
+
+### 服务管理
+
+OpenWrt：
 
 ```sh
 /etc/init.d/sms-relayed enable
 /etc/init.d/sms-relayed start
+/etc/init.d/sms-relayed restart
 /etc/init.d/sms-relayed status
+logread | grep sms-relayed
 ```
 
-### systemd
+systemd：
 
 ```sh
-systemctl enable --now sms-relayed
+sudo systemctl enable --now sms-relayed
+sudo systemctl restart sms-relayed
 systemctl status sms-relayed
+journalctl -u sms-relayed
 ```
 
-## 技术原理
+### Shell 转发参数
 
-### 收短信转发链路
-
-1. 程序连接系统 D-Bus：`zbus::Connection::system()`。
-2. 对 Modem 路径添加 signal match rule。
-3. 监听接口 `org.freedesktop.ModemManager1.Modem.Messaging` 上的 `Added` 信号。
-4. `Added` 信号会带出短信对象路径和 `is_received` 标记；程序只处理 `is_received = true` 的短信。
-5. 程序对短信对象调用 `org.freedesktop.DBus.Properties.GetAll("org.freedesktop.ModemManager1.Sms")`，读取：
-   - `Number`：发信号码
-   - `Text`：短信正文
-   - `Timestamp`：短信时间
-   - `Storage`：短信存储类型
-6. 如果短信正文暂时为空，程序会每 100ms 重试，最多约 60 秒，避免 ModemManager 刚发出信号但短信内容尚未填充。
-7. 程序根据 ignore_storage 过滤存储类型，再把短信交给启用的 profile。
-
-### 转发器链路
-
-每条短信会被整理成统一字段：
-
-- 发信电话
-- 收信时间
-- 转发设备名称
-- 短信正文
-- 验证码和验证码来源，如果能识别
-
-不同渠道的实现不同：
-
-- 企业微信先获取 access token，再调用应用消息发送接口，默认发给 `@all`。
-- PushPlus 使用 `https://www.pushplus.plus/send`。
-- Telegram 默认使用 `https://api.telegram.org`，也可配置自定义 Bot API 地址。
-- 钉钉机器人使用 access token 和加签 secret。
-- Bark 使用 `{server_url}/{key}/{content}`，识别到验证码时附带 `autoCopy=1` 和 `copy=验证码`。
-- Shell 使用 `sh -c` 调用用户指定脚本，并传入 6 个参数。
-
-### 发短信链路
-
-1. 调用 `org.freedesktop.ModemManager1.Modem.Messaging.Create` 创建短信草稿。
-2. 交互式发送会询问是否确认发送。
-3. 调用短信对象上的 `org.freedesktop.ModemManager1.Sms.Send`。
-
-### 验证码识别
-
-程序用 `sms.code_keywords` 判断一条短信是否像验证码短信。默认关键字为：
+Shell profile 使用 `sh -c` 调用配置的脚本，并依次传入：
 
 ```text
-验证码, verification, code, 인증, 代码, 随机码
+1. 发信号码
+2. 短信时间
+3. 短信正文
+4. 识别出的验证码；没有则为空
+5. 验证码来源；没有则为空
+6. 设备名称
 ```
 
-命中关键字后，会从正文中提取 4 到 7 位字母数字组合；如果存在多个候选值，会优先选择数字更多的候选值。短信来源会尝试从中文方括号中提取，例如 `【某服务】`。
+脚本必须自行安全处理参数和凭据，并在 `http.shell_timeout_secs` 内结束。
 
-## Shell 转发
+### 构建与开发
 
-Shell 模式会调用配置的脚本路径，并传入 6 个参数：
+需要稳定版 Rust、Node.js 和 pnpm。发布构建应先生成前端资产，再编译 Rust：
 
-```text
-1. telnum       发信电话号码
-2. smsdate      短信时间
-3. smscontent   短信内容
-4. smscode      验证码，如果识别不到则为空
-5. smscodefrom  验证码来源，例如【某服务】，如果识别不到则为空
-6. devicename   转发设备名称
+```sh
+cd frontend
+pnpm install --frozen-lockfile
+pnpm build
+cd ..
+cargo build --release --locked
 ```
 
-示例脚本见：
+常用检查：
 
-```text
-ShellExample/sendbypushplus.sh
+```sh
+cargo fmt --check
+cargo test
+cargo build
+
+cd frontend
+pnpm check
+pnpm test
+pnpm build
 ```
 
-## 注意事项
+如果 `frontend/dist` 不存在，`build.rs` 会生成一个提示页面，便于 Rust 开发构建；正式打包前必须运行前端构建。
 
-- 默认 modem 路径为 `/org/freedesktop/ModemManager1/Modem/0`，可在配置中修改。
-- 配置文件中保存了通知渠道 token 和机器人 secret，程序会自动限制文件权限为 600。
-- 服务运行用户需要有系统 D-Bus 上的 ModemManager 访问权限；最简单的方式是用 `sudo` 或以 root 运行。
-- P2 Web API 和前端管理后台已实现（v1.1+）：SMS 历史存储、搜索、导出、密码保护、配置编辑。
+### 错误监测与隐私
 
-## License
+正式后端服务和生产前端默认启用独立的 Sentry 错误项目。上报会移除请求、用户、breadcrumb、主机名、上下文变量和异常正文，不发送短信正文、电话号码或配置凭据；重复运行时错误会限流。
 
-sms-relayed is licensed under the GNU General Public License version 3 only
-(`GPL-3.0-only`). See [LICENSE](LICENSE).
+- 后端：设置 `SMS_RELAYED_SENTRY_DSN` 可覆盖 DSN，设为空字符串可关闭。
+- 前端：构建时设置 `VITE_SENTRY_DSN` 可覆盖 DSN，设置 `VITE_SENTRY_ENABLED=false` 可关闭。
+- 前端开发模式不发送 Sentry 事件。
 
-The "sms-relayed" name, project logos, and official release names are covered by
-the separate [Trademark Policy](TRADEMARKS.md). You may include this software in
-hardware products and may truthfully describe that inclusion, but modified or
-third-party builds must not be presented as official sms-relayed releases.
+### 许可证与商标
 
-## 参考
+本项目采用 [GNU GPL v3 only](LICENSE)（`GPL-3.0-only`）。项目名称、Logo 和官方 Release 名称另受 [Trademark Policy](TRADEMARKS.md) 约束。允许将本软件集成进硬件产品并如实说明，但修改版或第三方构建不得冒充官方 Release。
+
+参考资料：
 
 - [原 C++ 上游项目](https://github.com/lkiuyu/DbusSmsForwardCPlus)
-- [ModemManager API 文档](https://www.freedesktop.org/software/ModemManager/api/latest/)
+- [ModemManager API](https://www.freedesktop.org/software/ModemManager/api/latest/)
+- [zbus](https://docs.rs/zbus/latest/zbus/)
+
+---
+
+<a id="english"></a>
+
+## English
+
+### Overview
+
+sms-relayed is designed for OpenWrt routers, Debian gateways, portable hotspots, USB cellular modems, and other Linux devices with a SIM card. It connects to ModemManager over the system D-Bus, receives and forwards SMS messages, and provides message history, a web dashboard, interactive sending, and modem status controls.
+
+The project consists of a Rust backend and a React frontend embedded in the binary. No separate web server is required.
+
+### Features
+
+- Receive new messages from ModemManager, persist them in SQLite, and suppress duplicate inserts.
+- Forward messages to Bark, Telegram, PushPlus, WeCom, DingTalk, or a custom shell script.
+- Configure multiple named profiles, deliver one message to multiple channels, and record outcomes, retries, and latency.
+- Extract 4–7 character alphanumeric codes from common verification messages; Bark can copy detected codes automatically.
+- Send SMS from the CLI or the password-protected web dashboard.
+- Search, filter, mark, delete, and export message history as CSV or JSON.
+- Inspect modem health and enable, disable, or explicitly reset the modem.
+- Optionally delete old terminal messages in batches while retaining messages with pending deliveries.
+- Run under OpenWrt procd or systemd.
+- Self-update with SHA-256 verification, atomic replacement, and service restart.
+
+### Requirements
+
+- Linux with a working system D-Bus.
+- ModemManager and an SMS-capable modem.
+- Permission to access ModemManager on the system bus; router installations commonly run as `root`.
+- `mmcli` is required for dashboard modem diagnostics, health details, and modem controls. SMS receive/send still uses D-Bus without it, but those status features report `unknown`.
+- Official releases currently provide static Linux binaries for x86_64 and aarch64.
+
+### Quick start
+
+Run this from an OpenWrt root shell or another Linux account that can write to `/usr/bin` and `/etc`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/frankwei98/sms-relayed/main/install.sh | sh
+```
+
+The installer detects the platform, downloads the latest release, installs `/usr/bin/sms-relayed`, creates `/etc/sms-relayed`, registers a procd or systemd service, and opens the setup wizard when a TTY is available. It starts the service once a configuration exists.
+
+If elevation is required, download and inspect the script first, then run it with `sudo sh install.sh`.
+
+Installer variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SMS_RELAYED_VERSION` | `latest` | Install a specific release tag. |
+| `SMS_RELAYED_BIN_DIR` | `/usr/bin` | Binary installation directory. |
+| `SMS_RELAYED_CONFIG_DIR` | `/etc/sms-relayed` | Configuration and default database directory. |
+| `SMS_RELAYED_START` | `1` | Set to `0` to avoid starting the service. |
+| `SMS_RELAYED_CONFIG_ONLY` | `0` | Set to `1` to skip binary installation and configure with an existing binary. |
+| `SMS_RELAYED_UPDATE` | automatic/prompt | Set to `1` to replace an existing binary or `0` to skip it. |
+| `SMS_RELAYED_ROOT` | empty | Write into an alternate root for image/offline filesystem preparation; services are not started. |
+
+### Configuration
+
+The default configuration path is `/etc/sms-relayed/config.toml`. The setup wizard is the recommended starting point:
+
+```sh
+sudo sms-relayed setup
+sudo sms-relayed config check
+sudo sms-relayed config show
+```
+
+Use the global `--config` option for another path:
+
+```sh
+sms-relayed --config /path/to/config.toml config check
+```
+
+Complete example:
+
+```toml
+[app]
+device_name = "router-sim"
+modem_path = "/org/freedesktop/ModemManager1/Modem/0"
+
+[sms]
+ignore_storage = ["sm"]
+code_keywords = ["验证码", "verification", "code", "인증", "代码", "随机码"]
+
+[forward]
+enabled = ["bark.personal", "telegram.main"]
+
+[channels.bark.personal]
+server_url = "https://api.day.app"
+key = "..."
+
+[channels.telegram.main]
+bot_token = "..."
+chat_id = "..."
+api_base = "https://api.telegram.org"
+
+[channels.pushplus.default]
+token = "..."
+
+[channels.wecom.default]
+corp_id = "..."
+agent_id = "..."
+secret = "..."
+to_user = "@all"
+
+[channels.dingtalk.default]
+access_token = "..."
+secret = "..."
+
+[channels.shell.default]
+path = "/etc/sms-relayed/forward.sh"
+
+[api]
+enabled = true
+bind = "0.0.0.0"
+port = 8080
+enable_ipv6 = false
+password = "change-this-password"
+database_path = "/etc/sms-relayed/sms-relayed.sqlite"
+
+[http]
+connect_timeout_secs = 10
+request_timeout_secs = 30
+shell_timeout_secs = 30
+
+[retention]
+enabled = false
+max_age_days = 90
+batch_size = 500
+```
+
+Important rules:
+
+- `forward.enabled` contains `channel.profile` references such as `telegram.main`; multiple profiles of the same channel are supported.
+- Channel types are `bark`, `telegram`, `pushplus`, `wecom`, `dingtalk`, and `shell`.
+- A non-empty `api.password` is required when `api.enabled = true`.
+- The configuration contains credentials. Files written by sms-relayed are restricted to mode `0600`.
+- Restart the service after changing the configuration.
+
+### Web dashboard
+
+With `[api]` enabled, open:
+
+```text
+http://<device-ip>:8080/
+```
+
+The dashboard provides inbox/outbox conversations, search and filters, read state, sending, deletion, streamed CSV/JSON exports, modem diagnostics and controls, recent forwarding results, configuration editing, validation, service restart, and live SSE updates.
+
+Main API groups:
+
+| Path | Purpose |
+| --- | --- |
+| `/api/auth/login`, `/api/auth/logout`, `/api/auth/me` | Session authentication. |
+| `/api/messages`, `/api/conversations` | Message and conversation queries. |
+| `/api/messages/send` | Send an SMS. |
+| `/api/messages/export` | Export CSV or JSON. |
+| `/api/events` | SSE event stream. |
+| `/api/config`, `/api/config/check` | Read, save, and validate configuration. |
+| `/api/status`, `/api/service/restart` | Service status and restart. |
+| `/api/modem/*` | Modem status and controls. |
+| `/api/forwarding/attempts` | Forwarding delivery status. |
+| `/api/health` | Public service and modem health check. |
+
+`/api/health` omits object paths, operator details, signal values, SIM identifiers, phone numbers, message bodies, and raw command output. The web service currently speaks plain HTTP. Do not expose it directly to the public Internet; use a trusted network, VPN, or a reverse proxy with TLS and access control.
+
+### CLI
+
+```text
+sms-relayed [--config <path>]
+sms-relayed [--config <path>] setup
+sms-relayed [--config <path>] run
+sms-relayed [--config <path>] send
+sms-relayed update
+sms-relayed [--config <path>] config check
+sms-relayed [--config <path>] config show
+```
+
+- No subcommand opens the setup wizard on an interactive terminal and fails in non-interactive mode.
+- `setup` opens the configuration wizard.
+- `run` starts SMS monitoring, persistence, the delivery and retention workers, and the optional web API.
+- `send` prompts for a recipient and message, asks for confirmation, sends it, and stores the result.
+- `update` queries the latest release, verifies its matching SHA-256 file and embedded version/commit, atomically replaces the binary, and restarts a detected service.
+- `config check` loads and validates the configuration.
+- `config show` prints a redacted configuration summary.
+
+Self-update supports the official Linux x86_64 and aarch64 assets. A build at the same commit is left untouched and the service is not restarted. Updating a system directory usually requires sufficient permissions, for example `sudo sms-relayed update`.
+
+### Service management
+
+OpenWrt:
+
+```sh
+/etc/init.d/sms-relayed enable
+/etc/init.d/sms-relayed start
+/etc/init.d/sms-relayed restart
+/etc/init.d/sms-relayed status
+logread | grep sms-relayed
+```
+
+systemd:
+
+```sh
+sudo systemctl enable --now sms-relayed
+sudo systemctl restart sms-relayed
+systemctl status sms-relayed
+journalctl -u sms-relayed
+```
+
+### Shell forwarding arguments
+
+A shell profile invokes the configured script through `sh -c` with these positional arguments:
+
+```text
+1. Sender phone number
+2. Message timestamp
+3. Message body
+4. Detected verification code, or empty
+5. Detected code source, or empty
+6. Device name
+```
+
+The script is responsible for safely handling arguments and credentials, and must finish within `http.shell_timeout_secs`.
+
+### Build and development
+
+Stable Rust, Node.js, and pnpm are required. Build frontend assets before the Rust release binary:
+
+```sh
+cd frontend
+pnpm install --frozen-lockfile
+pnpm build
+cd ..
+cargo build --release --locked
+```
+
+Useful checks:
+
+```sh
+cargo fmt --check
+cargo test
+cargo build
+
+cd frontend
+pnpm check
+pnpm test
+pnpm build
+```
+
+If `frontend/dist` is missing, `build.rs` creates a fallback page for Rust development builds. Always build the frontend before packaging a release.
+
+### Error monitoring and privacy
+
+The production backend and frontend use separate Sentry projects by default. Reports strip requests, users, breadcrumbs, host names, contextual variables, and exception text. SMS bodies, phone numbers, and configuration credentials are not sent, and repeated operational errors are rate-limited.
+
+- Backend: override with `SMS_RELAYED_SENTRY_DSN`, or set it to an empty string to disable reporting.
+- Frontend: override at build time with `VITE_SENTRY_DSN`, or set `VITE_SENTRY_ENABLED=false` to disable reporting.
+- Frontend development mode does not send Sentry events.
+
+### License and trademark
+
+sms-relayed is licensed under [GNU GPL v3 only](LICENSE) (`GPL-3.0-only`). The project name, logos, and official release names are separately covered by the [Trademark Policy](TRADEMARKS.md). You may integrate the software into hardware and describe that inclusion truthfully, but modified or third-party builds must not be presented as official releases.
+
+References:
+
+- [Original C++ upstream project](https://github.com/lkiuyu/DbusSmsForwardCPlus)
+- [ModemManager API](https://www.freedesktop.org/software/ModemManager/api/latest/)
 - [zbus](https://docs.rs/zbus/latest/zbus/)
