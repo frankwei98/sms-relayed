@@ -4,9 +4,11 @@ use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures_util::{future::BoxFuture, StreamExt};
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
@@ -14,6 +16,20 @@ const LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/frankwei98/sms-relayed/releases/latest";
 const OPENWRT_SERVICE: &str = "/etc/init.d/sms-relayed";
 const SYSTEMD_SERVICE: &str = "sms-relayed";
+const SERVICE_PROCESS_TIMEOUT: Duration = Duration::from_secs(120);
+const VERSION_PROCESS_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_TIMEOUTS: HttpTimeouts = HttpTimeouts {
+    connect: Duration::from_secs(10),
+    read: Duration::from_secs(30),
+    request: Duration::from_secs(120),
+};
+
+#[derive(Clone, Copy)]
+struct HttpTimeouts {
+    connect: Duration,
+    read: Duration,
+    request: Duration,
+}
 
 #[derive(Debug, Deserialize)]
 struct Release {
@@ -42,6 +58,25 @@ fn select_release_asset<'a>(release: &'a Release, suffix: &str) -> Result<&'a Re
         );
     }
     Ok(asset.expect("asset presence checked above"))
+}
+
+fn select_checksum_asset<'a>(
+    release: &'a Release,
+    binary: &ReleaseAsset,
+) -> Result<&'a ReleaseAsset> {
+    let expected_name = format!("{}.sha256", binary.name);
+    let mut matches = release
+        .assets
+        .iter()
+        .filter(|asset| asset.name == expected_name);
+    let asset = matches.next();
+    if asset.is_none() || matches.next().is_some() {
+        anyhow::bail!(
+            "expected exactly one checksum asset named {expected_name} for release {}",
+            release.tag_name
+        );
+    }
+    Ok(asset.expect("checksum asset presence checked above"))
 }
 
 fn release_asset_for_update<'a>(
@@ -86,9 +121,9 @@ async fn release_asset_for_installed_binary<'a>(
     suffix: &str,
     target: &Path,
 ) -> Result<(String, Option<&'a ReleaseAsset>)> {
-    let output = tokio::process::Command::new(target)
-        .arg("--version")
-        .output()
+    let mut command = tokio::process::Command::new(target);
+    command.arg("--version");
+    let output = command_output_with_timeout(&mut command, VERSION_PROCESS_TIMEOUT)
         .await
         .with_context(|| format!("failed to inspect installed binary at {}", target.display()))?;
     if !output.status.success() {
@@ -254,10 +289,9 @@ impl CommandExecutor for SystemCommandExecutor {
         arguments: &'a [&'a str],
     ) -> BoxFuture<'a, std::io::Result<CommandResult>> {
         Box::pin(async move {
-            let output = tokio::process::Command::new(program)
-                .args(arguments)
-                .output()
-                .await?;
+            let mut command = tokio::process::Command::new(program);
+            command.args(arguments);
+            let output = command_output_with_timeout(&mut command, SERVICE_PROCESS_TIMEOUT).await?;
             Ok(CommandResult {
                 success: output.status.success(),
                 status: output.status.to_string(),
@@ -267,46 +301,81 @@ impl CommandExecutor for SystemCommandExecutor {
     }
 }
 
-async fn detect_service() -> (Option<ServiceManager>, Option<PathBuf>) {
+async fn command_output_with_timeout(
+    command: &mut tokio::process::Command,
+    duration: Duration,
+) -> std::io::Result<std::process::Output> {
+    command.kill_on_drop(true);
+    match tokio::time::timeout(duration, command.output()).await {
+        Ok(output) => output,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "process exceeded timeout of {} seconds",
+                duration.as_secs_f64()
+            ),
+        )),
+    }
+}
+
+async fn detect_service() -> Result<(Option<ServiceManager>, Option<PathBuf>)> {
     detect_service_with(Path::new(OPENWRT_SERVICE), &SystemCommandExecutor).await
 }
 
 async fn detect_service_with(
     openwrt_service: &Path,
     executor: &dyn CommandExecutor,
-) -> (Option<ServiceManager>, Option<PathBuf>) {
+) -> Result<(Option<ServiceManager>, Option<PathBuf>)> {
     if openwrt_service.is_file() {
         let registered_path = tokio::fs::read_to_string(openwrt_service)
             .await
             .ok()
             .and_then(|contents| parse_openwrt_command(&contents));
-        return (Some(ServiceManager::OpenWrt), registered_path);
+        return Ok((Some(ServiceManager::OpenWrt), registered_path));
     }
 
-    let load_state = executor
+    let load_state = match executor
         .run(
             "systemctl",
             &["show", "--property=LoadState", "--value", SYSTEMD_SERVICE],
         )
-        .await;
-    let systemd_loaded = load_state.as_ref().is_ok_and(|output| {
+        .await
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+            return Err(anyhow::Error::new(error)
+                .context("failed to run systemctl while inspecting the sms-relayed service"));
+        }
+        Err(_) => return Ok((None, None)),
+    };
+    let systemd_loaded = {
+        let output = &load_state;
         output.success && String::from_utf8_lossy(&output.stdout).trim().eq("loaded")
-    });
+    };
     if !systemd_loaded {
-        return (None, None);
+        return Ok((None, None));
     }
 
-    let registered_path = executor
+    let command = match executor
         .run(
             "systemctl",
             &["show", "--property=ExecStart", "--value", SYSTEMD_SERVICE],
         )
         .await
-        .ok()
-        .filter(|output| output.success)
-        .and_then(|output| String::from_utf8(output.stdout).ok())
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+            return Err(anyhow::Error::new(error)
+                .context("failed to run systemctl while inspecting the sms-relayed command"));
+        }
+        Err(_) => return Ok((Some(ServiceManager::Systemd), None)),
+    };
+    let registered_path = command
+        .success
+        .then_some(command.stdout)
+        .and_then(|stdout| String::from_utf8(stdout).ok())
         .and_then(|value| parse_systemd_exec_start(&value));
-    (Some(ServiceManager::Systemd), registered_path)
+    Ok((Some(ServiceManager::Systemd), registered_path))
 }
 
 fn find_on_path() -> Option<PathBuf> {
@@ -355,8 +424,12 @@ fn asset_suffix_for(os: &str, architecture: &str) -> Result<&'static str> {
 }
 
 async fn fetch_latest_release(client: &reqwest::Client) -> Result<Release> {
+    fetch_release(client, LATEST_RELEASE_URL).await
+}
+
+async fn fetch_release(client: &reqwest::Client, url: &str) -> Result<Release> {
     client
-        .get(LATEST_RELEASE_URL)
+        .get(url)
         .send()
         .await
         .context("failed to query the latest GitHub release")?
@@ -365,6 +438,16 @@ async fn fetch_latest_release(client: &reqwest::Client) -> Result<Release> {
         .json()
         .await
         .context("failed to parse the latest GitHub release")
+}
+
+fn build_update_client_with_timeouts(timeouts: HttpTimeouts) -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(format!("sms-relayed/{}", env!("SMS_RELAYED_BUILD_VERSION")))
+        .connect_timeout(timeouts.connect)
+        .read_timeout(timeouts.read)
+        .timeout(timeouts.request)
+        .build()
+        .context("failed to create the update HTTP client")
 }
 
 async fn download_and_replace(
@@ -420,9 +503,9 @@ async fn download_validate_and_replace(
 
     fs::set_permissions(temporary, fs::Permissions::from_mode(0o755))
         .map_err(|error| update_io_error(error, target))?;
-    let output = tokio::process::Command::new(temporary)
-        .arg("--version")
-        .output()
+    let mut command = tokio::process::Command::new(temporary);
+    command.arg("--version");
+    let output = command_output_with_timeout(&mut command, VERSION_PROCESS_TIMEOUT)
         .await
         .context("downloaded release binary could not be executed for validation")?;
     let version = String::from_utf8_lossy(&output.stdout);
@@ -452,12 +535,9 @@ fn update_io_error(error: std::io::Error, target: &Path) -> anyhow::Error {
 
 pub async fn run() -> Result<()> {
     let suffix = asset_suffix()?;
-    let (service_manager, registered_path) = detect_service().await;
+    let (service_manager, registered_path) = detect_service().await?;
     let target = resolve_update_target(registered_path)?;
-    let client = reqwest::Client::builder()
-        .user_agent(format!("sms-relayed/{}", env!("SMS_RELAYED_BUILD_VERSION")))
-        .build()
-        .context("failed to create the update HTTP client")?;
+    let client = build_update_client_with_timeouts(HTTP_TIMEOUTS)?;
     let release = fetch_latest_release(&client).await?;
 
     let (installed_version, asset) =
@@ -488,6 +568,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::path::Path;
     use std::sync::Mutex;
+    use std::time::Duration;
     use std::{
         fs, io,
         os::unix::fs::{symlink, PermissionsExt},
@@ -499,12 +580,13 @@ mod tests {
     use futures_util::stream;
 
     use super::{
-        asset_suffix_for, detect_service_with, download_and_replace, find_executable_on_path,
+        asset_suffix_for, build_update_client_with_timeouts, command_output_with_timeout,
+        detect_service_with, download_and_replace, fetch_release, find_executable_on_path,
         parse_openwrt_command, parse_systemd_exec_start, release_asset_for_installed_binary,
         release_asset_for_update, release_matches_commit, restart_after_update,
-        select_release_asset, select_update_target, update_io_error,
-        version_output_matches_release, CommandExecutor, CommandResult, Release, ReleaseAsset,
-        RestartOutcome, ServiceManager,
+        select_checksum_asset, select_release_asset, select_update_target, update_io_error,
+        version_output_matches_release, CommandExecutor, CommandResult, HttpTimeouts, Release,
+        ReleaseAsset, RestartOutcome, ServiceManager,
     };
 
     #[derive(Default)]
@@ -843,7 +925,7 @@ start_service() {
         .unwrap();
         let executor = FakeCommandExecutor::default();
 
-        let detected = detect_service_with(&service, &executor).await;
+        let detected = detect_service_with(&service, &executor).await.unwrap();
 
         assert_eq!(detected.0, Some(ServiceManager::OpenWrt));
         assert_eq!(detected.1.as_deref(), Some(Path::new("/opt/sms-relayed")));
@@ -860,7 +942,9 @@ start_service() {
             ),
         ]);
 
-        let detected = detect_service_with(Path::new("/definitely/missing"), &executor).await;
+        let detected = detect_service_with(Path::new("/definitely/missing"), &executor)
+            .await
+            .unwrap();
 
         assert_eq!(detected.0, Some(ServiceManager::Systemd));
         assert_eq!(
@@ -868,6 +952,61 @@ start_service() {
             Some(Path::new("/usr/bin/sms-relayed"))
         );
         assert_eq!(executor.calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn systemd_detection_propagates_command_timeouts() {
+        let executor = FakeCommandExecutor {
+            responses: Mutex::new(VecDeque::from([Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "systemctl timed out",
+            ))])),
+            calls: Mutex::new(Vec::new()),
+        };
+
+        let error = detect_service_with(Path::new("/definitely/missing"), &executor)
+            .await
+            .expect_err("a systemctl timeout should abort the update");
+
+        assert!(error.to_string().contains("systemctl"));
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::TimedOut
+        );
+
+        let executor = FakeCommandExecutor {
+            responses: Mutex::new(VecDeque::from([
+                Ok(command_result(true, "loaded\n")),
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "systemctl timed out",
+                )),
+            ])),
+            calls: Mutex::new(Vec::new()),
+        };
+        assert!(
+            detect_service_with(Path::new("/definitely/missing"), &executor)
+                .await
+                .is_err(),
+            "an ExecStart timeout should abort the update"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_systemctl_is_treated_as_no_service() {
+        let executor = FakeCommandExecutor {
+            responses: Mutex::new(VecDeque::from([Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "systemctl not found",
+            ))])),
+            calls: Mutex::new(Vec::new()),
+        };
+
+        let detected = detect_service_with(Path::new("/definitely/missing"), &executor)
+            .await
+            .expect("a missing service manager should not prevent a binary-only update");
+
+        assert_eq!(detected, (None, None));
     }
 
     #[tokio::test]
@@ -893,6 +1032,57 @@ start_service() {
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         format!("http://{address}/binary")
+    }
+
+    async fn serve_contents(contents: String) -> String {
+        let app = Router::new().route(
+            "/content",
+            get(move || {
+                let contents = contents.clone();
+                async move { contents }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{address}/content")
+    }
+
+    async fn serve_delayed_release() -> String {
+        let app = Router::new().route(
+            "/release",
+            get(|| async {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                r#"{"tag_name":"0937382","target_commitish":"09373820cd4ab63023359acf300d708d47c9f509","assets":[]}"#
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{address}/release")
+    }
+
+    #[tokio::test]
+    async fn update_http_and_process_operations_time_out() {
+        let release_url = serve_delayed_release().await;
+        let short = Duration::from_millis(20);
+        let client = build_update_client_with_timeouts(HttpTimeouts {
+            connect: short,
+            read: short,
+            request: short,
+        })
+        .unwrap();
+
+        fetch_release(&client, &release_url)
+            .await
+            .expect_err("a stalled release request should time out");
+
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "sleep 1"]);
+        let error = command_output_with_timeout(&mut command, short)
+            .await
+            .expect_err("a stalled process should time out");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
 
     async fn serve_interrupted_binary() -> String {
