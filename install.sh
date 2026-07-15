@@ -110,7 +110,7 @@ resolve_asset_url_from_json() {
   tr ',' '\n' |
     grep -o '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*"' |
     sed 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"//; s/"$//' |
-    grep "$suffix" |
+    grep "$suffix$" |
     head -n 1
 }
 
