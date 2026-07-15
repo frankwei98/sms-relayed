@@ -453,14 +453,23 @@ fn build_update_client_with_timeouts(timeouts: HttpTimeouts) -> Result<reqwest::
 async fn download_and_replace(
     client: &reqwest::Client,
     release: &Release,
-    asset: &ReleaseAsset,
+    binary_asset: &ReleaseAsset,
+    checksum_asset: &ReleaseAsset,
     target: &Path,
 ) -> Result<()> {
     let directory = target
         .parent()
         .context("update target does not have a parent directory")?;
     let temporary = directory.join(format!(".sms-relayed.update-{}", Uuid::new_v4()));
-    let result = download_validate_and_replace(client, release, asset, target, &temporary).await;
+    let result = download_validate_and_replace(
+        client,
+        release,
+        binary_asset,
+        checksum_asset,
+        target,
+        &temporary,
+    )
+    .await;
     if result.is_err() {
         let _ = tokio::fs::remove_file(&temporary).await;
     }
@@ -470,12 +479,14 @@ async fn download_and_replace(
 async fn download_validate_and_replace(
     client: &reqwest::Client,
     release: &Release,
-    asset: &ReleaseAsset,
+    binary_asset: &ReleaseAsset,
+    checksum_asset: &ReleaseAsset,
     target: &Path,
     temporary: &Path,
 ) -> Result<()> {
+    let expected_checksum = fetch_published_checksum(client, checksum_asset, binary_asset).await?;
     let response = client
-        .get(&asset.browser_download_url)
+        .get(&binary_asset.browser_download_url)
         .send()
         .await
         .context("failed to download the release binary")?
@@ -488,8 +499,11 @@ async fn download_validate_and_replace(
         .await
         .map_err(|error| update_io_error(error, target))?;
     let mut stream = response.bytes_stream();
+    let mut hasher = Sha256::new();
     while let Some(chunk) = stream.next().await {
-        file.write_all(&chunk.context("release download was interrupted")?)
+        let chunk = chunk.context("release download was interrupted")?;
+        hasher.update(&chunk);
+        file.write_all(&chunk)
             .await
             .context("failed to write the downloaded release binary")?;
     }
@@ -500,6 +514,14 @@ async fn download_validate_and_replace(
         .await
         .context("failed to sync the downloaded release binary")?;
     drop(file);
+
+    let actual_checksum = format!("{:x}", hasher.finalize());
+    if !actual_checksum.eq_ignore_ascii_case(&expected_checksum) {
+        anyhow::bail!(
+            "downloaded release binary failed checksum verification for {}",
+            binary_asset.name
+        );
+    }
 
     fs::set_permissions(temporary, fs::Permissions::from_mode(0o755))
         .map_err(|error| update_io_error(error, target))?;
@@ -520,6 +542,46 @@ async fn download_validate_and_replace(
         .await
         .map_err(|error| update_io_error(error, target))?;
     Ok(())
+}
+
+async fn fetch_published_checksum(
+    client: &reqwest::Client,
+    checksum_asset: &ReleaseAsset,
+    binary_asset: &ReleaseAsset,
+) -> Result<String> {
+    let contents = client
+        .get(&checksum_asset.browser_download_url)
+        .send()
+        .await
+        .context("failed to download the release checksum")?
+        .error_for_status()
+        .context("GitHub returned an error while downloading the release checksum")?
+        .text()
+        .await
+        .context("failed to read the release checksum")?;
+    parse_published_checksum(&contents, &binary_asset.name)
+}
+
+fn parse_published_checksum(contents: &str, binary_name: &str) -> Result<String> {
+    let mut lines = contents.lines().filter(|line| !line.trim().is_empty());
+    let line = lines.next().context("release checksum file is empty")?;
+    if lines.next().is_some() {
+        anyhow::bail!("release checksum file must contain exactly one checksum");
+    }
+    let mut fields = line.split_whitespace();
+    let checksum = fields.next().context("release checksum value is missing")?;
+    let filename = fields
+        .next()
+        .context("release checksum filename is missing")?
+        .trim_start_matches('*');
+    if fields.next().is_some()
+        || checksum.len() != 64
+        || !checksum.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || filename != binary_name
+    {
+        anyhow::bail!("release checksum file is invalid for {binary_name}");
+    }
+    Ok(checksum.to_ascii_lowercase())
 }
 
 fn update_io_error(error: std::io::Error, target: &Path) -> anyhow::Error {
@@ -549,9 +611,10 @@ pub async fn run() -> Result<()> {
         println!("sms-relayed is already up to date");
         return Ok(());
     };
+    let checksum_asset = select_checksum_asset(&release, asset)?;
 
     println!("downloading asset: {}", asset.browser_download_url);
-    download_and_replace(&client, &release, asset, &target).await?;
+    download_and_replace(&client, &release, asset, checksum_asset, &target).await?;
     println!("updated binary: {}", target.display());
 
     match restart_after_update(service_manager, &SystemCommandExecutor).await? {
@@ -578,6 +641,7 @@ mod tests {
     use axum::http::Response;
     use axum::{routing::get, Router};
     use futures_util::stream;
+    use sha2::{Digest, Sha256};
 
     use super::{
         asset_suffix_for, build_update_client_with_timeouts, command_output_with_timeout,
@@ -696,6 +760,24 @@ mod tests {
             selected.browser_download_url,
             "https://example.test/sms-relayed-0937382-linux-musl-x64"
         );
+    }
+
+    #[test]
+    fn release_requires_the_matching_checksum_asset() {
+        let release = release_with_assets(&[
+            "sms-relayed-0937382-linux-musl-x64",
+            "sms-relayed-0937382-linux-musl-x64.sha256",
+        ]);
+        let binary = select_release_asset(&release, "linux-musl-x64").unwrap();
+
+        let checksum = select_checksum_asset(&release, binary)
+            .expect("the matching checksum asset should be selected");
+
+        assert_eq!(checksum.name, "sms-relayed-0937382-linux-musl-x64.sha256");
+
+        let missing = release_with_assets(&["sms-relayed-0937382-linux-musl-x64"]);
+        let binary = select_release_asset(&missing, "linux-musl-x64").unwrap();
+        assert!(select_checksum_asset(&missing, binary).is_err());
     }
 
     #[test]
@@ -1115,18 +1197,38 @@ start_service() {
         )
     }
 
+    async fn checksum_asset_for(binary: &ReleaseAsset, contents: &[u8]) -> ReleaseAsset {
+        let checksum = format!("{:x}", Sha256::digest(contents));
+        checksum_asset_with_value(binary, &checksum).await
+    }
+
+    async fn checksum_asset_with_value(binary: &ReleaseAsset, checksum: &str) -> ReleaseAsset {
+        let checksum_url = serve_contents(format!("{checksum}  {}\n", binary.name)).await;
+        ReleaseAsset {
+            name: format!("{}.sha256", binary.name),
+            browser_download_url: checksum_url,
+        }
+    }
+
     #[tokio::test]
     async fn valid_download_atomically_replaces_the_installed_binary() {
         const BINARY: &str = "#!/bin/sh\nprintf '%s\\n' 'sms-relayed 1.0.7+09373820cd4ab63023359acf300d708d47c9f509'\n";
         let asset_url = serve_binary(BINARY).await;
         let (release, asset) = update_fixture(asset_url);
+        let checksum = checksum_asset_for(&asset, BINARY.as_bytes()).await;
         let directory = TestDirectory::new();
         let target = directory.path().join("sms-relayed");
         fs::write(&target, b"old binary").unwrap();
 
-        download_and_replace(&reqwest::Client::new(), &release, &asset, &target)
-            .await
-            .expect("a valid release binary should replace the target");
+        download_and_replace(
+            &reqwest::Client::new(),
+            &release,
+            &asset,
+            &checksum,
+            &target,
+        )
+        .await
+        .expect("a valid release binary should replace the target");
 
         assert_eq!(fs::read_to_string(&target).unwrap(), BINARY);
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
@@ -1137,13 +1239,20 @@ start_service() {
         const WRONG_BINARY: &str = "#!/bin/sh\nprintf '%s\\n' 'sms-relayed 1.0.7+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n";
         let asset_url = serve_binary(WRONG_BINARY).await;
         let (release, asset) = update_fixture(asset_url);
+        let checksum = checksum_asset_for(&asset, WRONG_BINARY.as_bytes()).await;
         let directory = TestDirectory::new();
         let target = directory.path().join("sms-relayed");
         fs::write(&target, b"old binary").unwrap();
 
-        let error = download_and_replace(&reqwest::Client::new(), &release, &asset, &target)
-            .await
-            .expect_err("a mismatched release binary should be rejected");
+        let error = download_and_replace(
+            &reqwest::Client::new(),
+            &release,
+            &asset,
+            &checksum,
+            &target,
+        )
+        .await
+        .expect_err("a mismatched release binary should be rejected");
 
         assert!(error.to_string().contains("version validation"));
         assert_eq!(fs::read(&target).unwrap(), b"old binary");
@@ -1154,14 +1263,59 @@ start_service() {
     async fn interrupted_download_preserves_the_installed_binary_and_cleans_up() {
         let asset_url = serve_interrupted_binary().await;
         let (release, asset) = update_fixture(asset_url);
+        let checksum = checksum_asset_with_value(&asset, &"0".repeat(64)).await;
         let directory = TestDirectory::new();
         let target = directory.path().join("sms-relayed");
         fs::write(&target, b"old binary").unwrap();
 
-        download_and_replace(&reqwest::Client::new(), &release, &asset, &target)
-            .await
-            .expect_err("an interrupted release download should fail");
+        download_and_replace(
+            &reqwest::Client::new(),
+            &release,
+            &asset,
+            &checksum,
+            &target,
+        )
+        .await
+        .expect_err("an interrupted release download should fail");
 
+        assert_eq!(fs::read(&target).unwrap(), b"old binary");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn checksum_mismatch_is_rejected_before_the_download_is_executed() {
+        let directory = TestDirectory::new();
+        let marker = directory.path().join("executed");
+        let binary_contents = format!(
+            "#!/bin/sh\ntouch '{}'\nprintf '%s\\n' 'sms-relayed 1.0.7+09373820cd4ab63023359acf300d708d47c9f509'\n",
+            marker.display()
+        );
+        let binary_url = serve_contents(binary_contents).await;
+        let checksum_url = serve_contents(format!(
+            "{}  sms-relayed-0937382-linux-musl-x64\n",
+            "0".repeat(64)
+        ))
+        .await;
+        let (release, binary) = update_fixture(binary_url);
+        let checksum = ReleaseAsset {
+            name: format!("{}.sha256", binary.name),
+            browser_download_url: checksum_url,
+        };
+        let target = directory.path().join("sms-relayed");
+        fs::write(&target, b"old binary").unwrap();
+
+        let error = download_and_replace(
+            &reqwest::Client::new(),
+            &release,
+            &binary,
+            &checksum,
+            &target,
+        )
+        .await
+        .expect_err("a mismatched checksum should reject the download");
+
+        assert!(error.to_string().contains("checksum"));
+        assert!(!marker.exists());
         assert_eq!(fs::read(&target).unwrap(), b"old binary");
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }

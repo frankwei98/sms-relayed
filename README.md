@@ -169,7 +169,7 @@ sms-relayed config show
 - `sms-relayed setup`：始终进入设置向导。支持 Keep（保留现有配置）、Edit guided（引导编辑）、Replace from scratch（重建）、Cancel（取消）。
 - `sms-relayed run`：启动短信转发服务。此命令非交互式，用于 init 系统启动。
 - `sms-relayed send`：交互式发送短信。
-- `sms-relayed update`：下载最新 GitHub Release，验证后原子替换已安装的二进制，并重启 OpenWrt 或 systemd 服务。目标路径依次取服务注册路径、`PATH` 中的 `sms-relayed`、当前可执行文件；符号链接会解析到真实文件。已是最新版时不会覆盖或重启。目前仅支持 Linux x86_64 和 aarch64。更新系统目录通常需要使用 `sudo`；未发现服务时只更新二进制并打印警告。
+- `sms-relayed update`：下载最新 GitHub Release，校验发布的 SHA-256 后原子替换已安装的二进制，并重启 OpenWrt 或 systemd 服务。目标路径依次取服务注册路径、`PATH` 中的 `sms-relayed`、当前可执行文件；符号链接会解析到真实文件。已是最新版时不会覆盖或重启。目前仅支持 Linux x86_64 和 aarch64。更新系统目录通常需要使用 `sudo`；未发现服务时只更新二进制并打印警告。
 - `sms-relayed config check`：验证配置文件语法、profile 引用、必填字段、modem 路径格式。
 - `sms-relayed config show`：打印脱敏后的配置摘要。
 

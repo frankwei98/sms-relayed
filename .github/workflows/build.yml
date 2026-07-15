@@ -77,12 +77,15 @@ jobs:
           binary="sms-relayed-${VERSION}-${{ matrix.artifact }}"
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/sms-relayed" "dist/$binary"
+          (cd dist && sha256sum "$binary" > "$binary.sha256")
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: sms-relayed-${{ steps.version.outputs.version }}-${{ matrix.artifact }}
-          path: dist/sms-relayed-${{ steps.version.outputs.version }}-${{ matrix.artifact }}
+          path: |
+            dist/sms-relayed-${{ steps.version.outputs.version }}-${{ matrix.artifact }}
+            dist/sms-relayed-${{ steps.version.outputs.version }}-${{ matrix.artifact }}.sha256
           if-no-files-found: error
 
   release:
