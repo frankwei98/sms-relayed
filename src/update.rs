@@ -66,13 +66,48 @@ fn release_matches_commit(release: &Release, current_commit: &str) -> bool {
 }
 
 fn version_output_matches_release(output: &str, release: &Release) -> bool {
+    build_commit_from_version_output(output)
+        .map(|commit| release_matches_commit(release, commit))
+        .unwrap_or(false)
+}
+
+fn build_commit_from_version_output(output: &str) -> Option<&str> {
     let Some(build_version) = output.trim().strip_prefix("sms-relayed ") else {
-        return false;
+        return None;
     };
     build_version
         .rsplit_once('+')
-        .map(|(version, commit)| !version.is_empty() && release_matches_commit(release, commit))
-        .unwrap_or(false)
+        .and_then(|(version, commit)| (!version.is_empty() && !commit.is_empty()).then_some(commit))
+}
+
+async fn release_asset_for_installed_binary<'a>(
+    release: &'a Release,
+    suffix: &str,
+    target: &Path,
+) -> Result<(String, Option<&'a ReleaseAsset>)> {
+    let output = tokio::process::Command::new(target)
+        .arg("--version")
+        .output()
+        .await
+        .with_context(|| format!("failed to inspect installed binary at {}", target.display()))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "installed binary at {} failed version inspection with {}",
+            target.display(),
+            output.status
+        );
+    }
+    let version = String::from_utf8(output.stdout)
+        .context("installed binary returned a non-UTF-8 version")?;
+    let version = version.trim().to_string();
+    let commit = build_commit_from_version_output(&version).with_context(|| {
+        format!(
+            "installed binary at {} returned an invalid version: {version}",
+            target.display()
+        )
+    })?;
+    let asset = release_asset_for_update(release, suffix, commit)?;
+    Ok((version, asset))
 }
 
 fn is_hex_commit(value: &str) -> bool {
@@ -416,10 +451,11 @@ pub async fn run() -> Result<()> {
         .context("failed to create the update HTTP client")?;
     let release = fetch_latest_release(&client).await?;
 
-    println!("current version: {}", env!("SMS_RELAYED_BUILD_VERSION"));
+    let (installed_version, asset) =
+        release_asset_for_installed_binary(&release, suffix, &target).await?;
+    println!("current version: {installed_version}");
     println!("latest release: {}", release.tag_name);
     println!("update target: {}", target.display());
-    let asset = release_asset_for_update(&release, suffix, env!("SMS_RELAYED_BUILD_COMMIT"))?;
     let Some(asset) = asset else {
         println!("sms-relayed is already up to date");
         return Ok(());
@@ -443,7 +479,10 @@ mod tests {
     use std::collections::VecDeque;
     use std::path::Path;
     use std::sync::Mutex;
-    use std::{fs, io, os::unix::fs::symlink};
+    use std::{
+        fs, io,
+        os::unix::fs::{symlink, PermissionsExt},
+    };
 
     use axum::body::{Body, Bytes};
     use axum::http::Response;
@@ -452,10 +491,10 @@ mod tests {
 
     use super::{
         asset_suffix_for, detect_service_with, download_and_replace, parse_openwrt_command,
-        parse_systemd_exec_start, release_asset_for_update, release_matches_commit,
-        restart_after_update, select_release_asset, select_update_target, update_io_error,
-        version_output_matches_release, CommandExecutor, CommandResult, Release, ReleaseAsset,
-        RestartOutcome, ServiceManager,
+        parse_systemd_exec_start, release_asset_for_installed_binary, release_asset_for_update,
+        release_matches_commit, restart_after_update, select_release_asset, select_update_target,
+        update_io_error, version_output_matches_release, CommandExecutor, CommandResult, Release,
+        ReleaseAsset, RestartOutcome, ServiceManager,
     };
 
     #[derive(Default)]
@@ -526,6 +565,17 @@ mod tests {
         }
     }
 
+    fn write_version_binary(directory: &Path, name: &str, commit: &str) -> std::path::PathBuf {
+        let path = directory.join(name);
+        fs::write(
+            &path,
+            format!("#!/bin/sh\nprintf '%s\\n' 'sms-relayed 1.0.7+{commit}'\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
     fn release_with_assets(names: &[&str]) -> Release {
         Release {
             tag_name: "0937382".to_string(),
@@ -584,6 +634,34 @@ mod tests {
         .expect("the current release should be a successful no-op");
 
         assert!(asset.is_none());
+    }
+
+    #[tokio::test]
+    async fn selected_target_version_drives_the_update_decision() {
+        let directory = TestDirectory::new();
+        let old_target = write_version_binary(
+            directory.path(),
+            "old-sms-relayed",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        let current_target = write_version_binary(
+            directory.path(),
+            "current-sms-relayed",
+            "09373820cd4ab63023359acf300d708d47c9f509",
+        );
+        let release = release_with_assets(&["sms-relayed-0937382-linux-musl-x64"]);
+
+        let (_, old_asset) =
+            release_asset_for_installed_binary(&release, "linux-musl-x64", &old_target)
+                .await
+                .expect("an old selected target should be inspectable");
+        let (_, current_asset) =
+            release_asset_for_installed_binary(&release, "linux-musl-x64", &current_target)
+                .await
+                .expect("a current selected target should be inspectable");
+
+        assert!(old_asset.is_some());
+        assert!(current_asset.is_none());
     }
 
     #[test]
