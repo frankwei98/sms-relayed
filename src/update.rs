@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -310,9 +311,17 @@ async fn detect_service_with(
 
 fn find_on_path() -> Option<PathBuf> {
     let path = env::var_os("PATH")?;
-    env::split_paths(&path)
+    find_executable_on_path(&path)
+}
+
+fn find_executable_on_path(path: &OsStr) -> Option<PathBuf> {
+    env::split_paths(path)
         .map(|directory| directory.join("sms-relayed"))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| {
+            fs::metadata(candidate).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        })
 }
 
 fn resolve_update_target(registered_path: Option<PathBuf>) -> Result<PathBuf> {
@@ -490,11 +499,12 @@ mod tests {
     use futures_util::stream;
 
     use super::{
-        asset_suffix_for, detect_service_with, download_and_replace, parse_openwrt_command,
-        parse_systemd_exec_start, release_asset_for_installed_binary, release_asset_for_update,
-        release_matches_commit, restart_after_update, select_release_asset, select_update_target,
-        update_io_error, version_output_matches_release, CommandExecutor, CommandResult, Release,
-        ReleaseAsset, RestartOutcome, ServiceManager,
+        asset_suffix_for, detect_service_with, download_and_replace, find_executable_on_path,
+        parse_openwrt_command, parse_systemd_exec_start, release_asset_for_installed_binary,
+        release_asset_for_update, release_matches_commit, restart_after_update,
+        select_release_asset, select_update_target, update_io_error,
+        version_output_matches_release, CommandExecutor, CommandResult, Release, ReleaseAsset,
+        RestartOutcome, ServiceManager,
     };
 
     #[derive(Default)]
@@ -788,6 +798,27 @@ start_service() {
             select_update_target([None, None, Some(current_binary.clone())]).unwrap(),
             current_binary.canonicalize().unwrap()
         );
+    }
+
+    #[test]
+    fn path_lookup_skips_non_executable_shadow_files() {
+        let directory = TestDirectory::new();
+        let shadow_directory = directory.path().join("shadow");
+        let executable_directory = directory.path().join("executable");
+        fs::create_dir(&shadow_directory).unwrap();
+        fs::create_dir(&executable_directory).unwrap();
+        fs::write(shadow_directory.join("sms-relayed"), b"not executable").unwrap();
+        let expected = write_version_binary(
+            &executable_directory,
+            "sms-relayed",
+            "09373820cd4ab63023359acf300d708d47c9f509",
+        );
+        let path = std::env::join_paths([shadow_directory, executable_directory]).unwrap();
+
+        let selected = find_executable_on_path(&path)
+            .expect("PATH lookup should find the executable sms-relayed");
+
+        assert_eq!(selected, expected);
     }
 
     #[test]
