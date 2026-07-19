@@ -417,6 +417,7 @@ fn asset_suffix_for(os: &str, architecture: &str) -> Result<&'static str> {
     match architecture {
         "x86_64" => Ok("linux-musl-x64"),
         "aarch64" => Ok("linux-musl-aarch64"),
+        "arm" => Ok("linux-musl-armv7l"),
         architecture => anyhow::bail!(
             "no published self-update binary is available for architecture {architecture}"
         ),
@@ -848,8 +849,11 @@ mod tests {
             asset_suffix_for("linux", "aarch64").unwrap(),
             "linux-musl-aarch64"
         );
+        assert_eq!(
+            asset_suffix_for("linux", "arm").unwrap(),
+            "linux-musl-armv7l"
+        );
         assert!(asset_suffix_for("macos", "aarch64").is_err());
-        assert!(asset_suffix_for("linux", "arm").is_err());
     }
 
     #[test]
