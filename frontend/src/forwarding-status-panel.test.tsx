@@ -22,6 +22,7 @@ const successSample = {
 	started_at: "2026-07-12T17:00:00Z",
 	completed_at: "2026-07-12T17:00:01Z",
 	latency_ms: 950,
+	dispatch_delay_ms: 18,
 	outcome: "success" as const,
 	error_code: null,
 };
@@ -32,6 +33,7 @@ const failureSample = {
 	started_at: "2026-07-12T17:01:00Z",
 	completed_at: "2026-07-12T17:01:05Z",
 	latency_ms: 5200,
+	dispatch_delay_ms: null,
 	outcome: "transient_failure" as const,
 	error_code: "http_timeout",
 };
@@ -68,8 +70,8 @@ describe("ForwardingStatusPanel", () => {
 		});
 		expect(screen.getAllByText("telegram.backup").length).toBeGreaterThan(0);
 		expect(screen.getByText("Retry")).toBeDefined();
-		expect(screen.getByText("950ms")).toBeDefined();
-		expect(screen.getByText("5.2s")).toBeDefined();
+		expect(screen.getByText("Dispatch 18ms · Request 950ms")).toBeDefined();
+		expect(screen.getByText("Dispatch — · Request 5.2s")).toBeDefined();
 		expect(screen.getByText("http_timeout")).toBeDefined();
 	});
 

@@ -401,6 +401,7 @@ mod route_tests {
                     started_at: format!("2026-07-12T17:00:{:02}Z", n - 1),
                     completed_at: format!("2026-07-12T17:00:{:02}Z", n),
                     latency_ms: n as i64 * 100,
+                    dispatch_delay_ms: 0,
                     outcome: if n % 2 == 0 {
                         ForwardAttemptOutcome::Success
                     } else {
@@ -451,12 +452,14 @@ mod route_tests {
             assert!(s.get("started_at").is_some());
             assert!(s.get("completed_at").is_some());
             assert!(s.get("latency_ms").is_some());
+            assert!(s.get("dispatch_delay_ms").is_some());
             assert!(s.get("outcome").is_some());
             assert!(s.get("error_code").is_some());
         }
         // Check is_retry on attempt 6
         assert_eq!(samples[0]["is_retry"], true);
         assert_eq!(samples[0]["latency_ms"], 600);
+        assert_eq!(samples[0]["dispatch_delay_ms"], 0);
         assert_eq!(samples[0]["outcome"], "success");
         assert!(samples[0]["error_code"].is_null());
         // Retry 5 error_code
@@ -489,6 +492,7 @@ mod route_tests {
                 started_at: "2026-07-12T17:00:00Z".to_string(),
                 completed_at: "2026-07-12T17:00:01Z".to_string(),
                 latency_ms: 100,
+                dispatch_delay_ms: 0,
                 outcome: ForwardAttemptOutcome::PermanentFailure,
                 error_code: Some("shell_exit_nonzero".to_string()),
             })

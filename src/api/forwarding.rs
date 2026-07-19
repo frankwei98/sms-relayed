@@ -28,6 +28,7 @@ struct SampleView {
     started_at: String,
     completed_at: String,
     latency_ms: i64,
+    dispatch_delay_ms: Option<i64>,
     outcome: ForwardAttemptOutcome,
     error_code: Option<String>,
 }
@@ -85,6 +86,7 @@ fn load_samples(state: &ApiState, profile_key: &str) -> ApiResult<Vec<SampleView
             started_at: s.started_at,
             completed_at: s.completed_at,
             latency_ms: s.latency_ms,
+            dispatch_delay_ms: s.dispatch_delay_ms,
             outcome: s.outcome,
             error_code: s.error_code,
         })

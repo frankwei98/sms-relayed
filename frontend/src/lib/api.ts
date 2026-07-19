@@ -74,6 +74,7 @@ export type ForwardAttemptSample = {
 	started_at: string;
 	completed_at: string;
 	latency_ms: number;
+	dispatch_delay_ms: number | null;
 	outcome: ForwardAttemptOutcome;
 	error_code: string | null;
 };

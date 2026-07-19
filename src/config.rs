@@ -16,6 +16,8 @@ pub struct AppConfig {
     pub sms: SmsSection,
     pub forward: ForwardSection,
     #[serde(default)]
+    pub delivery: DeliverySection,
+    #[serde(default)]
     pub channels: ChannelsSection,
     #[serde(default)]
     pub api: ApiSection,
@@ -100,6 +102,24 @@ pub struct SmsSection {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ForwardSection {
     pub enabled: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeliverySection {
+    #[serde(default = "default_delivery_concurrency")]
+    pub concurrency: usize,
+}
+
+fn default_delivery_concurrency() -> usize {
+    2
+}
+
+impl Default for DeliverySection {
+    fn default() -> Self {
+        Self {
+            concurrency: default_delivery_concurrency(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -294,6 +314,7 @@ impl Default for AppConfig {
                 ],
             },
             forward: ForwardSection::default(),
+            delivery: DeliverySection::default(),
             channels: ChannelsSection::default(),
             api: ApiSection::default(),
             http: HttpSection::default(),
@@ -435,6 +456,9 @@ impl AppConfig {
         for reference in &self.forward.enabled {
             let parsed = ProfileRef::parse(reference)?;
             self.profile_for_ref(&parsed)?;
+        }
+        if !(1..=16).contains(&self.delivery.concurrency) {
+            bail!("delivery.concurrency must be between 1 and 16");
         }
         if self.api.enabled {
             if self.api.password.trim().is_empty() {
@@ -594,6 +618,42 @@ mod tests {
         assert_eq!(cfg.app.modem_path, "/org/freedesktop/ModemManager1/Modem/0");
         assert_eq!(cfg.sms.ignore_storage, vec!["sm"]);
         assert!(cfg.sms.code_keywords.contains(&"验证码".to_string()));
+        assert_eq!(cfg.delivery.concurrency, 2);
+    }
+
+    #[test]
+    fn legacy_config_uses_default_delivery_concurrency() {
+        let serialized = toml::to_string(&AppConfig::default()).unwrap();
+        let without_delivery = serialized
+            .lines()
+            .take_while(|line| *line != "[delivery]")
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let cfg: AppConfig = toml::from_str(&without_delivery).unwrap();
+
+        assert_eq!(cfg.delivery.concurrency, 2);
+    }
+
+    #[test]
+    fn delivery_concurrency_must_be_between_one_and_sixteen() {
+        let mut cfg = AppConfig::default();
+        cfg.delivery.concurrency = 0;
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("delivery.concurrency"));
+
+        cfg.delivery.concurrency = 17;
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("delivery.concurrency"));
+
+        cfg.delivery.concurrency = 16;
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

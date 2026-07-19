@@ -43,6 +43,7 @@ pub struct ForwardAttemptSample {
     pub started_at: String,
     pub completed_at: String,
     pub latency_ms: i64,
+    pub dispatch_delay_ms: Option<i64>,
     pub outcome: ForwardAttemptOutcome,
     pub error_code: Option<String>,
 }
@@ -61,6 +62,7 @@ pub struct NewForwardAttemptSample {
     pub started_at: String,
     pub completed_at: String,
     pub latency_ms: i64,
+    pub dispatch_delay_ms: i64,
     pub outcome: ForwardAttemptOutcome,
     pub error_code: Option<String>,
 }
@@ -243,6 +245,7 @@ impl MessageStore {
                 started_at TEXT NOT NULL,
                 completed_at TEXT NOT NULL,
                 latency_ms INTEGER NOT NULL,
+                dispatch_delay_ms INTEGER NULL,
                 outcome TEXT NOT NULL,
                 error_code TEXT NULL,
                 created_at TEXT NOT NULL
@@ -258,6 +261,21 @@ impl MessageStore {
         if !has_dedupe {
             tx.execute(
                 "ALTER TABLE messages ADD COLUMN inbound_dedupe_key TEXT NULL",
+                [],
+            )?;
+        }
+
+        let has_dispatch_delay: bool = tx
+            .prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('forward_attempt_samples')
+                 WHERE name = 'dispatch_delay_ms'",
+            )?
+            .query_row([], |r| r.get::<_, i64>(0))
+            .map(|count| count > 0)?;
+        if !has_dispatch_delay {
+            tx.execute(
+                "ALTER TABLE forward_attempt_samples
+                 ADD COLUMN dispatch_delay_ms INTEGER NULL",
                 [],
             )?;
         }
@@ -567,7 +585,7 @@ impl MessageStore {
              FROM forward_deliveries
              WHERE state IN ('pending', 'retry_wait')
                AND (next_attempt_at IS NULL OR next_attempt_at <= ?1)
-             ORDER BY id ASC
+             ORDER BY COALESCE(next_attempt_at, created_at) ASC, id ASC
              LIMIT ?2",
         )?;
         let rows: Vec<DeliveryRow> = stmt
@@ -593,6 +611,18 @@ impl MessageStore {
         drop(claimed_stmt);
         tx.commit()?;
         Ok(claimed)
+    }
+
+    pub fn next_delivery_due_at(&self) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT MIN(COALESCE(next_attempt_at, created_at))
+             FROM forward_deliveries
+             WHERE state IN ('pending', 'retry_wait')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
     }
 
     pub fn complete_delivery(
@@ -705,22 +735,7 @@ impl MessageStore {
         let now = now_string();
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        tx.execute(
-            "INSERT INTO forward_attempt_samples (profile_key, delivery_id, attempt_number, started_at, completed_at, latency_ms, outcome, error_code, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                sample.profile_key,
-                sample.delivery_id,
-                sample.attempt_number,
-                sample.started_at,
-                sample.completed_at,
-                sample.latency_ms,
-                outcome_to_str(&sample.outcome),
-                sample.error_code,
-                now,
-            ],
-        )?;
-        let id = tx.last_insert_rowid();
+        let id = Self::insert_forward_attempt_on(&tx, &sample, &now)?;
         self.prune_forward_attempts_on(&tx, &sample.profile_key)?;
         tx.commit()?;
         Ok(ForwardAttemptSample {
@@ -731,6 +746,7 @@ impl MessageStore {
             started_at: sample.started_at,
             completed_at: sample.completed_at,
             latency_ms: sample.latency_ms,
+            dispatch_delay_ms: Some(sample.dispatch_delay_ms),
             outcome: sample.outcome,
             error_code: sample.error_code,
         })
@@ -747,6 +763,32 @@ impl MessageStore {
             params![profile_key],
         )?;
         Ok(())
+    }
+
+    fn insert_forward_attempt_on(
+        conn: &Connection,
+        sample: &NewForwardAttemptSample,
+        created_at: &str,
+    ) -> Result<i64> {
+        conn.execute(
+            "INSERT INTO forward_attempt_samples
+             (profile_key, delivery_id, attempt_number, started_at, completed_at,
+              latency_ms, dispatch_delay_ms, outcome, error_code, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                &sample.profile_key,
+                sample.delivery_id,
+                sample.attempt_number,
+                &sample.started_at,
+                &sample.completed_at,
+                sample.latency_ms,
+                sample.dispatch_delay_ms,
+                outcome_to_str(&sample.outcome),
+                &sample.error_code,
+                created_at,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
     }
 
     pub fn list_forward_attempt_profiles(&self) -> Result<Vec<String>> {
@@ -766,7 +808,8 @@ impl MessageStore {
     ) -> Result<Vec<ForwardAttemptSample>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, profile_key, delivery_id, attempt_number, started_at, completed_at, latency_ms, outcome, error_code
+            "SELECT id, profile_key, delivery_id, attempt_number, started_at, completed_at,
+                    latency_ms, dispatch_delay_ms, outcome, error_code
              FROM forward_attempt_samples
              WHERE profile_key = ?1
              ORDER BY completed_at DESC, id DESC
@@ -790,21 +833,7 @@ impl MessageStore {
         let now = now_string();
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        tx.execute(
-            "INSERT INTO forward_attempt_samples (profile_key, delivery_id, attempt_number, started_at, completed_at, latency_ms, outcome, error_code, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                sample.profile_key,
-                sample.delivery_id,
-                sample.attempt_number,
-                sample.started_at,
-                sample.completed_at,
-                sample.latency_ms,
-                outcome_to_str(&sample.outcome),
-                sample.error_code,
-                now,
-            ],
-        )?;
+        Self::insert_forward_attempt_on(&tx, &sample, &now)?;
         self.prune_forward_attempts_on(&tx, &sample.profile_key)?;
         let changed = tx.execute(
             "UPDATE forward_deliveries
@@ -1012,8 +1041,9 @@ fn row_to_attempt_sample(row: &Row) -> rusqlite::Result<ForwardAttemptSample> {
         started_at: row.get(4)?,
         completed_at: row.get(5)?,
         latency_ms: row.get(6)?,
-        outcome: str_to_outcome(&row.get::<_, String>(7)?),
-        error_code: row.get(8)?,
+        dispatch_delay_ms: row.get(7)?,
+        outcome: str_to_outcome(&row.get::<_, String>(8)?),
+        error_code: row.get(9)?,
     })
 }
 
@@ -1477,6 +1507,7 @@ mod tests {
                     started_at: format!("2026-07-12T16:57:0{}Z", attempt_number - 1),
                     completed_at: format!("2026-07-12T16:57:0{attempt_number}Z"),
                     latency_ms: attempt_number as i64 * 100,
+                    dispatch_delay_ms: 0,
                     outcome: ForwardAttemptOutcome::Success,
                     error_code: None,
                 })
@@ -1490,6 +1521,7 @@ mod tests {
                 started_at: "2026-07-12T16:58:00Z".to_string(),
                 completed_at: "2026-07-12T16:58:01Z".to_string(),
                 latency_ms: 1_000,
+                dispatch_delay_ms: 0,
                 outcome: ForwardAttemptOutcome::TransientFailure,
                 error_code: Some("http_timeout".to_string()),
             })
@@ -1507,6 +1539,114 @@ mod tests {
         assert!(bark[0].is_retry());
         assert_eq!(telegram.len(), 1);
         assert_eq!(telegram[0].error_code.as_deref(), Some("http_timeout"));
+    }
+
+    #[test]
+    fn migrates_legacy_attempt_samples_with_unknown_dispatch_delay() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE forward_attempt_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_key TEXT NOT NULL,
+                delivery_id INTEGER NULL,
+                attempt_number INTEGER NOT NULL,
+                started_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                outcome TEXT NOT NULL,
+                error_code TEXT NULL,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO forward_attempt_samples
+                (profile_key, delivery_id, attempt_number, started_at, completed_at,
+                 latency_ms, outcome, error_code, created_at)
+            VALUES
+                ('bark.primary', NULL, 1, '2026-07-12T16:57:00Z',
+                 '2026-07-12T16:57:01Z', 1000, 'success', NULL,
+                 '2026-07-12T16:57:01Z');",
+        )
+        .unwrap();
+        let store = MessageStore {
+            conn: Arc::new(Mutex::new(conn)),
+            path: None,
+        };
+
+        store.migrate().unwrap();
+
+        let samples = store.list_forward_attempts("bark.primary", 5).unwrap();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].dispatch_delay_ms, None);
+    }
+
+    #[test]
+    fn claims_deliveries_by_due_time_instead_of_creation_id() {
+        let store = memory_store();
+        store
+            .insert_message_with_deliveries(
+                NewMessage::inbound("+1", "older retry"),
+                &["bark.primary".to_string()],
+            )
+            .unwrap();
+        store
+            .insert_message_with_deliveries(
+                NewMessage::inbound("+1", "earlier due pending"),
+                &["telegram.primary".to_string()],
+            )
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE forward_deliveries
+                 SET state = 'retry_wait', next_attempt_at = '2026-01-01T00:00:20Z'
+                 WHERE id = 1",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE forward_deliveries SET created_at = '2026-01-01T00:00:10Z'
+                 WHERE id = 2",
+                [],
+            )
+            .unwrap();
+        }
+
+        let claimed = store
+            .claim_due_deliveries(1, "2099-01-01T00:00:00Z")
+            .unwrap();
+
+        assert_eq!(claimed[0].id, 2);
+    }
+
+    #[test]
+    fn reports_the_earliest_pending_or_retry_deadline() {
+        let store = memory_store();
+        assert_eq!(store.next_delivery_due_at().unwrap(), None);
+        store
+            .insert_message_with_deliveries(
+                NewMessage::inbound("+1", "deadline"),
+                &["bark.primary".to_string()],
+            )
+            .unwrap();
+        let delivery = store
+            .claim_due_deliveries(1, "2099-01-01T00:00:00Z")
+            .unwrap()
+            .pop()
+            .unwrap();
+        store
+            .complete_delivery(
+                delivery.id,
+                "retry_wait",
+                Some("http_timeout"),
+                1,
+                Some("2099-01-02T00:00:00Z"),
+                delivery.lease_token.as_deref().unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.next_delivery_due_at().unwrap().as_deref(),
+            Some("2099-01-02T00:00:00Z")
+        );
     }
 
     #[test]
@@ -1539,6 +1679,7 @@ mod tests {
                     started_at: "2026-07-12T16:57:00Z".to_string(),
                     completed_at: "2026-07-12T16:57:01Z".to_string(),
                     latency_ms: 1_000,
+                    dispatch_delay_ms: 0,
                     outcome: ForwardAttemptOutcome::Success,
                     error_code: None,
                 },
@@ -1923,6 +2064,7 @@ mod tests {
                     started_at: "2026-01-01T00:00:00Z".to_string(),
                     completed_at: "2026-01-01T00:00:01Z".to_string(),
                     latency_ms: 100,
+                    dispatch_delay_ms: 0,
                     outcome: ForwardAttemptOutcome::Success,
                     error_code: None,
                 },
@@ -1945,6 +2087,7 @@ mod tests {
                     started_at: "2026-01-01T00:00:00Z".to_string(),
                     completed_at: "2026-01-01T00:00:01Z".to_string(),
                     latency_ms: 100,
+                    dispatch_delay_ms: 0,
                     outcome: ForwardAttemptOutcome::PermanentFailure,
                     error_code: Some("shell_exit_nonzero".to_string()),
                 },
@@ -1972,6 +2115,7 @@ mod tests {
                     started_at: "2026-01-01T00:00:00Z".to_string(),
                     completed_at: "2026-01-01T00:00:01Z".to_string(),
                     latency_ms: 100,
+                    dispatch_delay_ms: 0,
                     outcome: ForwardAttemptOutcome::TransientFailure,
                     error_code: Some("http_timeout".to_string()),
                 },
