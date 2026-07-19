@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use rusqlite::{params, params_from_iter, Connection, Row, TransactionBehavior};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, TransactionBehavior};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
@@ -237,6 +237,9 @@ impl MessageStore {
             );
             CREATE INDEX IF NOT EXISTS idx_deliveries_state ON forward_deliveries(state);
             CREATE INDEX IF NOT EXISTS idx_deliveries_next_attempt ON forward_deliveries(next_attempt_at);
+            CREATE INDEX IF NOT EXISTS idx_deliveries_due
+                ON forward_deliveries(julianday(COALESCE(next_attempt_at, created_at)), id)
+                WHERE state IN ('pending', 'retry_wait');
             CREATE TABLE IF NOT EXISTS forward_attempt_samples (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 profile_key TEXT NOT NULL,
@@ -429,6 +432,11 @@ impl MessageStore {
         map_get(&conn, id)
     }
 
+    pub fn get_message_optional(&self, id: i64) -> Result<Option<Message>> {
+        let conn = self.conn.lock().unwrap();
+        map_find(&conn, id)
+    }
+
     pub fn list_messages(&self, filter: &MessageFilter) -> Result<Vec<Message>> {
         self.query_messages(filter, true)
     }
@@ -577,15 +585,16 @@ impl MessageStore {
             "UPDATE forward_deliveries
              SET state = 'retry_wait', lease_at = NULL, lease_token = NULL,
                  next_attempt_at = ?1, updated_at = ?1
-             WHERE state = 'in_flight' AND lease_at IS NOT NULL AND lease_at <= ?1",
+             WHERE state = 'in_flight' AND lease_at IS NOT NULL
+               AND julianday(lease_at) <= julianday(?1)",
             params![now],
         )?;
         let mut stmt = tx.prepare(
             "SELECT id, message_id, profile_key, state, attempt_count, next_attempt_at, lease_at, lease_token, last_error, created_at, updated_at
              FROM forward_deliveries
              WHERE state IN ('pending', 'retry_wait')
-               AND (next_attempt_at IS NULL OR next_attempt_at <= ?1)
-             ORDER BY COALESCE(next_attempt_at, created_at) ASC, id ASC
+               AND julianday(COALESCE(next_attempt_at, created_at)) <= julianday(?1)
+             ORDER BY julianday(COALESCE(next_attempt_at, created_at)) ASC, id ASC
              LIMIT ?2",
         )?;
         let rows: Vec<DeliveryRow> = stmt
@@ -616,12 +625,15 @@ impl MessageStore {
     pub fn next_delivery_due_at(&self) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT MIN(COALESCE(next_attempt_at, created_at))
+            "SELECT COALESCE(next_attempt_at, created_at)
              FROM forward_deliveries
-             WHERE state IN ('pending', 'retry_wait')",
+             WHERE state IN ('pending', 'retry_wait')
+             ORDER BY julianday(COALESCE(next_attempt_at, created_at)) ASC, id ASC
+             LIMIT 1",
             [],
             |row| row.get(0),
         )
+        .optional()
         .map_err(Into::into)
     }
 
@@ -659,7 +671,8 @@ impl MessageStore {
         let conn = self.conn.lock().unwrap();
         let count = conn.execute(
             "UPDATE forward_deliveries SET state = 'retry_wait', lease_at = NULL, lease_token = NULL, next_attempt_at = ?1, updated_at = ?1
-             WHERE state = 'in_flight' AND lease_at IS NOT NULL AND lease_at < ?2",
+             WHERE state = 'in_flight' AND lease_at IS NOT NULL
+               AND julianday(lease_at) < julianday(?2)",
             params![now, before],
         )?;
         Ok(count)
@@ -856,12 +869,17 @@ impl MessageStore {
 }
 
 fn map_get(conn: &Connection, id: i64) -> Result<Message> {
-    let mut stmt = conn.prepare("SELECT * FROM messages WHERE id = ?1")?;
-    let mut rows = stmt.query_map(params![id], row_to_message)?;
-    match rows.next() {
-        Some(row) => row.map_err(Into::into),
-        None => anyhow::bail!("message {} not found", id),
-    }
+    map_find(conn, id)?.ok_or_else(|| anyhow::anyhow!("message {} not found", id))
+}
+
+fn map_find(conn: &Connection, id: i64) -> Result<Option<Message>> {
+    conn.query_row(
+        "SELECT * FROM messages WHERE id = ?1",
+        params![id],
+        row_to_message,
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 fn insert_message_on(conn: &Connection, input: NewMessage) -> Result<Message> {
@@ -1107,6 +1125,19 @@ mod tests {
             rows[1].modem_sms_path.as_deref(),
             Some("/org/freedesktop/ModemManager1/SMS/1")
         );
+    }
+
+    #[test]
+    fn optional_message_lookup_distinguishes_absence_from_query_failure() {
+        let store = memory_store();
+        assert_eq!(store.get_message_optional(42).unwrap(), None);
+
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute("DROP TABLE messages", []).unwrap();
+        }
+
+        assert!(store.get_message_optional(42).is_err());
     }
 
     #[test]
@@ -1615,6 +1646,37 @@ mod tests {
             .unwrap();
 
         assert_eq!(claimed[0].id, 2);
+    }
+
+    #[test]
+    fn claims_due_delivery_when_rfc3339_precision_differs_from_now() {
+        let store = memory_store();
+        store
+            .insert_message_with_deliveries(
+                NewMessage::inbound("+1", "due at whole second"),
+                &["bark.primary".to_string()],
+            )
+            .unwrap();
+        let due_at = OffsetDateTime::now_utc()
+            .replace_nanosecond(0)
+            .unwrap()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE forward_deliveries
+                 SET state = 'retry_wait', next_attempt_at = ?1",
+                params![due_at],
+            )
+            .unwrap();
+        }
+
+        let claimed = store
+            .claim_due_deliveries(1, "2099-01-01T00:00:00Z")
+            .unwrap();
+
+        assert_eq!(claimed.len(), 1);
     }
 
     #[test]

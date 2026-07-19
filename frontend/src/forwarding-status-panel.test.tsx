@@ -38,6 +38,11 @@ const failureSample = {
 	error_code: "http_timeout",
 };
 
+const legacySample = {
+	...successSample,
+	dispatch_delay_ms: undefined,
+};
+
 afterEach(() => {
 	cleanup();
 	vi.clearAllMocks();
@@ -94,6 +99,25 @@ describe("ForwardingStatusPanel", () => {
 		});
 		const successElements = screen.getAllByText("Success");
 		expect(successElements.length).toBeGreaterThanOrEqual(1);
+	});
+
+	test("shows unknown dispatch timing when an older backend omits the field", async () => {
+		mocks.apiFetch.mockResolvedValue({
+			generated_at: "2026-07-12T17:02:00Z",
+			profiles: [
+				{
+					profile_key: "bark.primary",
+					enabled: true,
+					samples: [legacySample],
+				},
+			],
+		});
+
+		render(<ForwardingStatusPanel />);
+
+		await waitFor(() => {
+			expect(screen.getByText("Dispatch — · Request 950ms")).toBeDefined();
+		});
 	});
 
 	test("no outcome badge when samples are empty", async () => {
