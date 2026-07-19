@@ -11,7 +11,7 @@ use crate::api::ApiState;
 use crate::config::AppConfig;
 use crate::dbus::FINGERPRINT_META_KEY;
 use crate::dbus::{self, ReceivedSms, SendTarget};
-use crate::delivery::run_delivery_worker;
+use crate::delivery::{run_delivery_worker, DeliveryWakeup};
 use crate::events::{AppEvent, EventBus};
 use crate::message::{Message, MessageDirection, MessageSource, MessageStatus};
 use crate::modem::ModemService;
@@ -24,6 +24,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
 
     let store = MessageStore::open(Path::new(&config.api.database_path))?;
     let events = EventBus::new();
+    let delivery_wakeup = DeliveryWakeup::new();
 
     let client = Arc::new(build_http_client(&config.http));
     let shell_timeout = Duration::from_secs(config.http.shell_timeout_secs);
@@ -42,6 +43,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
     let store_inbound = store.clone();
     let events_inbound = events.clone();
     let config_inbound = config.clone();
+    let wakeup_inbound = delivery_wakeup.clone();
 
     let dbus_modem = modem_service.clone();
     let dbus_future = dbus::monitor_dbus_with_handler(
@@ -51,7 +53,8 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
             let store = store_inbound.clone();
             let events = events_inbound.clone();
             let cfg = config_inbound.clone();
-            async move { process_inbound_sms(&store, &events, &sms, &cfg).await }
+            let wakeup = wakeup_inbound.clone();
+            async move { process_inbound_sms(&store, &events, &sms, &cfg, &wakeup).await }
         },
         &dbus_modem,
         &store,
@@ -63,6 +66,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
         client.clone(),
         Arc::new(shell_runner),
         shell_timeout,
+        delivery_wakeup,
     );
     let retention_worker = run_retention_worker(store.clone(), config.clone());
 
@@ -110,6 +114,7 @@ pub async fn process_inbound_sms(
     events: &EventBus,
     sms: &ReceivedSms,
     cfg: &AppConfig,
+    delivery_wakeup: &DeliveryWakeup,
 ) -> Result<()> {
     let mut profile_keys: Vec<String> = cfg
         .enabled_profiles()
@@ -129,6 +134,9 @@ pub async fn process_inbound_sms(
     );
     match store.insert_inbound_message_with_deliveries(msg, &profile_keys)? {
         InboundInsertResult::Inserted(m) => {
+            if !profile_keys.is_empty() {
+                delivery_wakeup.notify();
+            }
             events.send(AppEvent::MessageCreated(m));
         }
         InboundInsertResult::Duplicate(_) => {
@@ -239,6 +247,7 @@ mod tests {
     async fn process_inbound_sms_twice_produces_one_message_and_event() {
         let store = MessageStore::open_in_memory().unwrap();
         let events = EventBus::new();
+        let delivery_wakeup = DeliveryWakeup::new();
         let mut rx = events.subscribe();
 
         let sms = ReceivedSms {
@@ -267,22 +276,63 @@ mod tests {
             .unwrap();
 
         // First call: inserted
-        process_inbound_sms(&store, &events, &sms, &cfg)
+        process_inbound_sms(&store, &events, &sms, &cfg, &delivery_wakeup)
             .await
             .unwrap();
         assert_eq!(store.count_messages().unwrap(), 1);
         assert_eq!(store.count_deliveries().unwrap(), 1);
+        tokio::time::timeout(Duration::from_millis(50), delivery_wakeup.wait())
+            .await
+            .expect("inserted delivery should notify the worker");
         assert_eq!(
             rx.try_recv().ok().map(|e| e.name()),
             Some("message.created")
         );
 
         // Second call: duplicate, no event, no new rows
-        process_inbound_sms(&store, &events, &sms, &cfg)
+        process_inbound_sms(&store, &events, &sms, &cfg, &delivery_wakeup)
             .await
             .unwrap();
         assert_eq!(store.count_messages().unwrap(), 1);
         assert_eq!(store.count_deliveries().unwrap(), 1);
         assert!(rx.try_recv().is_err(), "no more events after duplicate");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), delivery_wakeup.wait())
+                .await
+                .is_err(),
+            "duplicate reception must not notify the worker"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_without_forwarding_profiles_does_not_wake_delivery_worker() {
+        let store = MessageStore::open_in_memory().unwrap();
+        let events = EventBus::new();
+        let delivery_wakeup = DeliveryWakeup::new();
+        let sms = ReceivedSms {
+            phone_number: "+15550000000".to_string(),
+            body: "store only".to_string(),
+            timestamp: "2026-07-12T17:01:00Z".to_string(),
+            storage: 0,
+            modem_sms_path: "/org/freedesktop/ModemManager1/SMS/43".to_string(),
+        };
+
+        process_inbound_sms(
+            &store,
+            &events,
+            &sms,
+            &AppConfig::default(),
+            &delivery_wakeup,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(store.count_messages().unwrap(), 1);
+        assert_eq!(store.count_deliveries().unwrap(), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), delivery_wakeup.wait())
+                .await
+                .is_err()
+        );
     }
 }

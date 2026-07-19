@@ -5,19 +5,39 @@ use std::time::Instant;
 use anyhow::Result;
 use log::{error, info};
 use time::OffsetDateTime;
+use tokio::sync::Notify;
 
 use crate::config::AppConfig;
 use crate::forward::ForwardOutcome;
 use crate::runner::ProcessRunner;
 use crate::storage::{DeliveryRow, ForwardAttemptOutcome, MessageStore, NewForwardAttemptSample};
 
-const WORKER_CONCURRENCY: usize = 2;
-const CLAIM_BATCH: u32 = WORKER_CONCURRENCY as u32;
 const LEASE_SECS: u64 = 90;
 const RETRY_INITIAL_DELAY: u64 = 30;
 const RETRY_MAX_DELAY: u64 = 3600;
 const RETRY_MAX_AGE: Duration = Duration::from_secs(86400);
-const POLL_INTERVAL: Duration = Duration::from_secs(15);
+const SAFETY_SCAN_INTERVAL: Duration = Duration::from_secs(30);
+const WORKER_ERROR_INITIAL_DELAY: Duration = Duration::from_secs(1);
+const WORKER_ERROR_MAX_DELAY: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Default)]
+pub struct DeliveryWakeup {
+    notify: Arc<Notify>,
+}
+
+impl DeliveryWakeup {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn notify(&self) {
+        self.notify.notify_one();
+    }
+
+    pub(crate) async fn wait(&self) {
+        self.notify.notified().await;
+    }
+}
 
 pub async fn run_delivery_worker(
     store: MessageStore,
@@ -25,37 +45,99 @@ pub async fn run_delivery_worker(
     client: Arc<reqwest::Client>,
     shell_runner: Arc<dyn ProcessRunner>,
     shell_timeout: Duration,
+    wakeup: DeliveryWakeup,
 ) {
+    let mut error_delay = WORKER_ERROR_INITIAL_DELAY;
     loop {
-        if let Err(e) = tick(&store, &config, &client, &shell_runner, shell_timeout).await {
-            error!("delivery worker tick failed: {}", e);
-            crate::monitoring::capture_failure("delivery", "delivery.tick_failed");
+        match drain_due_deliveries(&store, &config, &client, &shell_runner, shell_timeout).await {
+            Ok(processed) => {
+                if processed > 0 {
+                    log::debug!("delivery queue drained; processed={processed}");
+                }
+            }
+            Err(e) => {
+                backoff_after_worker_error("queue drain", &e, &mut error_delay).await;
+                continue;
+            }
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
+
+        let retry_delay = match next_delivery_delay(&store) {
+            Ok(delay) => delay,
+            Err(e) => {
+                backoff_after_worker_error("deadline scheduling", &e, &mut error_delay).await;
+                continue;
+            }
+        };
+        error_delay = WORKER_ERROR_INITIAL_DELAY;
+
+        let reason = tokio::select! {
+            _ = wakeup.wait() => "new_delivery",
+            _ = wait_for_retry_deadline(retry_delay) => "retry_deadline",
+            _ = tokio::time::sleep(SAFETY_SCAN_INTERVAL) => "safety_scan",
+        };
+        log::debug!("delivery worker woke; reason={reason}");
     }
 }
 
-async fn tick(
+async fn backoff_after_worker_error(operation: &str, error: &anyhow::Error, delay: &mut Duration) {
+    log::error!("delivery worker {operation} failed: {error}");
+    crate::monitoring::capture_failure("delivery", "delivery.worker_failed");
+    log::debug!(
+        "delivery worker backing off; operation={operation} delay_secs={}",
+        delay.as_secs()
+    );
+    tokio::time::sleep(*delay).await;
+    *delay = (*delay * 2).min(WORKER_ERROR_MAX_DELAY);
+}
+
+async fn drain_due_deliveries(
     store: &MessageStore,
     config: &AppConfig,
     client: &reqwest::Client,
     shell_runner: &Arc<dyn ProcessRunner>,
     shell_timeout: Duration,
-) -> Result<()> {
+) -> Result<usize> {
+    let mut processed = 0;
+    loop {
+        let count = process_delivery_batch(
+            store,
+            config,
+            client,
+            shell_runner,
+            shell_timeout,
+            config.delivery.concurrency as u32,
+        )
+        .await?;
+        if count == 0 {
+            return Ok(processed);
+        }
+        processed += count;
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn process_delivery_batch(
+    store: &MessageStore,
+    config: &AppConfig,
+    client: &reqwest::Client,
+    shell_runner: &Arc<dyn ProcessRunner>,
+    shell_timeout: Duration,
+    batch_size: u32,
+) -> Result<usize> {
     let lease_until = (OffsetDateTime::now_utc() + time::Duration::seconds(LEASE_SECS as i64))
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
 
-    let rows = store.claim_due_deliveries(CLAIM_BATCH, &lease_until)?;
+    let rows = store.claim_due_deliveries(batch_size, &lease_until)?;
     if rows.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
 
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(WORKER_CONCURRENCY));
+    let count = rows.len();
+    log::debug!("delivery worker claimed batch; count={count}");
     let mut handles = Vec::new();
 
     for row in rows {
-        let permit = semaphore.clone().acquire_owned().await.unwrap();
         let store = store.clone();
         let config = config.clone();
         let client = client.clone();
@@ -63,16 +145,45 @@ async fn tick(
         let st = shell_timeout;
 
         handles.push(tokio::spawn(async move {
-            let _permit = permit;
             process_delivery_inner(&store, &config, &client, &*runner, st, row).await
         }));
     }
 
-    for h in handles {
-        h.await??;
+    let mut first_error = None;
+    for handle in handles {
+        let result = match handle.await {
+            Ok(result) => result,
+            Err(error) => Err(error.into()),
+        };
+        if let Err(error) = result {
+            first_error.get_or_insert(error);
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
     }
 
-    Ok(())
+    Ok(count)
+}
+
+fn next_delivery_delay(store: &MessageStore) -> Result<Option<Duration>> {
+    let Some(value) = store.next_delivery_due_at()? else {
+        return Ok(None);
+    };
+    let deadline = OffsetDateTime::parse(&value, &time::format_description::well_known::Rfc3339)?;
+    let now = OffsetDateTime::now_utc();
+    Ok(Some(if deadline <= now {
+        Duration::ZERO
+    } else {
+        (deadline - now).unsigned_abs()
+    }))
+}
+
+async fn wait_for_retry_deadline(delay: Option<Duration>) {
+    match delay {
+        Some(delay) => tokio::time::sleep(delay).await,
+        None => std::future::pending::<()>().await,
+    }
 }
 
 async fn process_delivery_inner(
@@ -109,6 +220,8 @@ async fn process_delivery_inner(
 
     let profiles = config.enabled_profiles().unwrap_or_default();
     let profile = profiles.iter().find(|p| p.key() == *profile_key).cloned();
+    let attempt_started_at = OffsetDateTime::now_utc();
+    let dispatch_delay_ms = dispatch_delay_ms(&row, attempt_started_at);
 
     let (outcome, latency_us) = match profile {
         Some(ref p) => {
@@ -141,7 +254,7 @@ async fn process_delivery_inner(
     };
 
     let (_state, error_code) = map_outcome_to_delivery_state(&outcome);
-    let started_at = (OffsetDateTime::now_utc() - time::Duration::microseconds(latency_us))
+    let started_at = attempt_started_at
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
     let completed_at = OffsetDateTime::now_utc()
@@ -154,6 +267,7 @@ async fn process_delivery_inner(
         started_at,
         completed_at,
         latency_ms: (latency_us / 1000).max(1),
+        dispatch_delay_ms,
         outcome: map_outcome_to_attempt(&outcome),
         error_code: error_code.clone(),
     };
@@ -214,6 +328,20 @@ async fn process_delivery_inner(
         }
     }
     Ok(())
+}
+
+fn dispatch_delay_ms(row: &DeliveryRow, started_at: OffsetDateTime) -> i64 {
+    let due_at = if row.attempt_count == 0 {
+        &row.created_at
+    } else {
+        row.next_attempt_at.as_deref().unwrap_or(&row.created_at)
+    };
+    let Ok(due_at) = OffsetDateTime::parse(due_at, &time::format_description::well_known::Rfc3339)
+    else {
+        return 0;
+    };
+    let delay = (started_at - due_at).whole_milliseconds().max(0);
+    delay.min(i64::MAX as i128) as i64
 }
 
 /// For message_not_found / profile_missing: no attempt sample recorded
@@ -423,6 +551,12 @@ fn delivery_age(timestamp_str: &str) -> Duration {
 mod tests {
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt;
+    use tokio::sync::Notify;
 
     use crate::config::{AppConfig, ShellConfig};
     use crate::runner::ProcessRunner;
@@ -463,6 +597,213 @@ mod tests {
         {
             Box::pin(async { Err(anyhow::anyhow!("shell timeout")) })
         }
+    }
+
+    struct RecordingRunner {
+        calls: AtomicUsize,
+        called: Notify,
+    }
+
+    impl RecordingRunner {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                called: Notify::new(),
+            }
+        }
+
+        async fn wait_for_calls(&self, expected: usize) {
+            while self.calls.load(Ordering::SeqCst) < expected {
+                self.called.notified().await;
+            }
+        }
+    }
+
+    impl ProcessRunner for RecordingRunner {
+        fn run_shell<'a>(
+            &'a self,
+            _cmd: &'a str,
+            _timeout: Duration,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<std::process::ExitStatus>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.called.notify_waiters();
+                #[cfg(unix)]
+                {
+                    Ok(std::process::ExitStatus::from_raw(0))
+                }
+                #[cfg(not(unix))]
+                {
+                    unreachable!("delivery tests run on Unix")
+                }
+            })
+        }
+    }
+
+    struct ConcurrencyRunner {
+        calls: AtomicUsize,
+        active: AtomicUsize,
+        max_active: AtomicUsize,
+        called: Notify,
+    }
+
+    impl ConcurrencyRunner {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                active: AtomicUsize::new(0),
+                max_active: AtomicUsize::new(0),
+                called: Notify::new(),
+            }
+        }
+
+        async fn wait_for_calls(&self, expected: usize) {
+            while self.calls.load(Ordering::SeqCst) < expected {
+                self.called.notified().await;
+            }
+        }
+    }
+
+    impl ProcessRunner for ConcurrencyRunner {
+        fn run_shell<'a>(
+            &'a self,
+            _cmd: &'a str,
+            _timeout: Duration,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<std::process::ExitStatus>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_active.fetch_max(active, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.called.notify_waiters();
+                #[cfg(unix)]
+                {
+                    Ok(std::process::ExitStatus::from_raw(0))
+                }
+                #[cfg(not(unix))]
+                {
+                    unreachable!("delivery tests run on Unix")
+                }
+            })
+        }
+    }
+
+    fn shell_config(profile_count: usize, concurrency: usize) -> AppConfig {
+        let mut cfg = AppConfig::default();
+        cfg.delivery.concurrency = concurrency;
+        for index in 0..profile_count {
+            let name = format!("test{index}");
+            cfg.forward.enabled.push(format!("shell.{name}"));
+            cfg.channels.shell.insert(
+                name,
+                ShellConfig {
+                    path: "/bin/true".to_string(),
+                },
+            );
+        }
+        cfg
+    }
+
+    #[tokio::test]
+    async fn committed_delivery_notification_wakes_idle_worker_immediately() {
+        let store = MessageStore::open_in_memory().unwrap();
+        let config = shell_config(1, 1);
+        let runner = Arc::new(RecordingRunner::new());
+        let wakeup = DeliveryWakeup::new();
+        let worker = tokio::spawn(run_delivery_worker(
+            store.clone(),
+            config,
+            Arc::new(reqwest::Client::new()),
+            runner.clone(),
+            Duration::from_secs(1),
+            wakeup.clone(),
+        ));
+        tokio::task::yield_now().await;
+        store
+            .insert_message_with_deliveries(
+                NewMessage::inbound("+1", "wake now"),
+                &["shell.test0".to_string()],
+            )
+            .unwrap();
+
+        wakeup.notify();
+
+        tokio::time::timeout(Duration::from_secs(1), runner.wait_for_calls(1))
+            .await
+            .expect("notified delivery should not wait for the safety scan");
+        worker.abort();
+    }
+
+    #[tokio::test]
+    async fn worker_drains_more_than_one_batch_at_configured_concurrency() {
+        let store = MessageStore::open_in_memory().unwrap();
+        let config = shell_config(5, 2);
+        let profile_keys = config.forward.enabled.clone();
+        store
+            .insert_message_with_deliveries(NewMessage::inbound("+1", "drain queue"), &profile_keys)
+            .unwrap();
+        let runner = Arc::new(ConcurrencyRunner::new());
+        let worker = tokio::spawn(run_delivery_worker(
+            store,
+            config,
+            Arc::new(reqwest::Client::new()),
+            runner.clone(),
+            Duration::from_secs(1),
+            DeliveryWakeup::new(),
+        ));
+
+        tokio::time::timeout(Duration::from_secs(1), runner.wait_for_calls(5))
+            .await
+            .expect("worker should drain every due delivery");
+        assert_eq!(runner.max_active.load(Ordering::SeqCst), 2);
+        worker.abort();
+    }
+
+    #[tokio::test]
+    async fn retry_deadline_wakes_worker_without_a_new_delivery_notification() {
+        let store = MessageStore::open_in_memory().unwrap();
+        let config = shell_config(1, 1);
+        store
+            .insert_message_with_deliveries(
+                NewMessage::inbound("+1", "retry deadline"),
+                &["shell.test0".to_string()],
+            )
+            .unwrap();
+        let claimed = store
+            .claim_due_deliveries(1, "2099-01-01T00:00:00Z")
+            .unwrap()
+            .pop()
+            .unwrap();
+        let retry_at = (OffsetDateTime::now_utc() + time::Duration::milliseconds(100))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        store
+            .complete_delivery(
+                claimed.id,
+                "retry_wait",
+                Some("http_timeout"),
+                1,
+                Some(&retry_at),
+                claimed.lease_token.as_deref().unwrap(),
+            )
+            .unwrap();
+        let runner = Arc::new(RecordingRunner::new());
+        let worker = tokio::spawn(run_delivery_worker(
+            store,
+            config,
+            Arc::new(reqwest::Client::new()),
+            runner.clone(),
+            Duration::from_secs(1),
+            DeliveryWakeup::new(),
+        ));
+
+        tokio::time::timeout(Duration::from_secs(1), runner.wait_for_calls(1))
+            .await
+            .expect("retry should run at its own deadline");
+        worker.abort();
     }
 
     /// Helper: create an in-memory store, insert a message + delivery,
@@ -552,7 +893,10 @@ mod tests {
     #[tokio::test]
     async fn shell_timeout_records_sample_and_retry_wait() {
         let store = MessageStore::open_in_memory().unwrap();
-        let row = setup_claimed_delivery(&store, "shell.test", 0);
+        let mut row = setup_claimed_delivery(&store, "shell.test", 0);
+        row.created_at = (OffsetDateTime::now_utc() - time::Duration::seconds(1))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
         let delivery_id = row.id;
 
         // Build AppConfig with a Shell profile matching "shell.test"
@@ -590,5 +934,41 @@ mod tests {
         assert_eq!(samples.len(), 1, "one sample must be recorded");
         assert_eq!(samples[0].outcome, ForwardAttemptOutcome::TransientFailure);
         assert_eq!(samples[0].error_code.as_deref(), Some("shell_timeout"));
+        assert!(matches!(
+            samples[0].dispatch_delay_ms,
+            Some(delay) if (900..=2_000).contains(&delay)
+        ));
+    }
+
+    #[tokio::test]
+    async fn recovered_first_attempt_measures_dispatch_from_original_creation() {
+        let store = MessageStore::open_in_memory().unwrap();
+        let mut row = setup_claimed_delivery(&store, "shell.test0", 0);
+        row.created_at = (OffsetDateTime::now_utc() - time::Duration::seconds(1))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        row.next_attempt_at = Some(
+            OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap(),
+        );
+        let config = shell_config(1, 1);
+
+        process_delivery_inner(
+            &store,
+            &config,
+            &reqwest::Client::new(),
+            &TimeoutRunner,
+            Duration::from_secs(1),
+            row,
+        )
+        .await
+        .unwrap();
+
+        let samples = store.list_forward_attempts("shell.test0", 1).unwrap();
+        assert!(matches!(
+            samples[0].dispatch_delay_ms,
+            Some(delay) if (900..=2_000).contains(&delay)
+        ));
     }
 }

@@ -107,7 +107,7 @@ export function ForwardingStatusPanel() {
 								<TableRow>
 									<TableHead>Attempt</TableHead>
 									<TableHead>Completed</TableHead>
-									<TableHead>Latency</TableHead>
+									<TableHead>Timing</TableHead>
 									<TableHead>Outcome</TableHead>
 									<TableHead>Error</TableHead>
 								</TableRow>
@@ -127,7 +127,7 @@ export function ForwardingStatusPanel() {
 											{new Date(s.completed_at).toLocaleString()}
 										</TableCell>
 										<TableCell className="font-mono text-xs">
-											{formatLatency(s.latency_ms)}
+											{formatAttemptTiming(s.dispatch_delay_ms, s.latency_ms)}
 										</TableCell>
 										<TableCell>
 											<OutcomeBadge outcome={s.outcome} />
@@ -171,4 +171,13 @@ function formatLatency(ms: number): string {
 		return `${ms}ms`;
 	}
 	return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function formatAttemptTiming(
+	dispatchDelayMs: number | null,
+	requestLatencyMs: number,
+): string {
+	const dispatch =
+		dispatchDelayMs === null ? "—" : formatLatency(dispatchDelayMs);
+	return `Dispatch ${dispatch} · Request ${formatLatency(requestLatencyMs)}`;
 }
