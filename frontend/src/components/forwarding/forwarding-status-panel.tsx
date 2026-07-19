@@ -174,10 +174,10 @@ function formatLatency(ms: number): string {
 }
 
 function formatAttemptTiming(
-	dispatchDelayMs: number | null,
+	dispatchDelayMs: number | null | undefined,
 	requestLatencyMs: number,
 ): string {
 	const dispatch =
-		dispatchDelayMs === null ? "—" : formatLatency(dispatchDelayMs);
+		dispatchDelayMs == null ? "—" : formatLatency(dispatchDelayMs);
 	return `Dispatch ${dispatch} · Request ${formatLatency(requestLatencyMs)}`;
 }
