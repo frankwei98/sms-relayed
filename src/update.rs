@@ -514,6 +514,9 @@ async fn download_validate_and_replace(
     file.sync_all()
         .await
         .context("failed to sync the downloaded release binary")?;
+    // Executing a file while any writer still has it open fails with ETXTBSY on Linux.
+    // Consume the Tokio handle so all background file operations finish before closing it.
+    let file = file.into_std().await;
     drop(file);
 
     let actual_checksum = format!("{:x}", hasher.finalize());
@@ -1258,7 +1261,10 @@ start_service() {
         .await
         .expect_err("a mismatched release binary should be rejected");
 
-        assert!(error.to_string().contains("version validation"));
+        assert!(
+            error.to_string().contains("version validation"),
+            "expected a version validation error, got: {error:#}"
+        );
         assert_eq!(fs::read(&target).unwrap(), b"old binary");
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
