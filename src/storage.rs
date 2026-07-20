@@ -462,7 +462,7 @@ impl MessageStore {
     fn query_messages(&self, filter: &MessageFilter, apply_limit: bool) -> Result<Vec<Message>> {
         let conn = self.conn.lock().unwrap();
         let cursor = resolve_message_cursor(&conn, filter.before.as_ref())?;
-        let (sql, values) = build_message_query(filter, cursor.as_ref(), apply_limit);
+        let (sql, values) = build_message_query(&conn, filter, cursor.as_ref(), apply_limit)?;
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(values.iter()), row_to_message)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -953,10 +953,11 @@ fn resolve_message_cursor(
 }
 
 fn build_message_query(
+    conn: &Connection,
     filter: &MessageFilter,
     cursor: Option<&ResolvedMessageCursor>,
     apply_limit: bool,
-) -> (String, Vec<Value>) {
+) -> Result<(String, Vec<Value>)> {
     let limit = filter.limit.unwrap_or(10).min(500);
     let mut sql = "SELECT * FROM messages WHERE 1=1".to_string();
     let mut values = Vec::new();
@@ -977,12 +978,12 @@ fn build_message_query(
         values.push(Value::Text(phone.clone()));
     }
     if let Some(from) = &filter.from {
-        sql.push_str(" AND timestamp >= ?");
-        values.push(Value::Text(from.clone()));
+        sql.push_str(" AND COALESCE(julianday(timestamp), julianday(created_at)) >= ?");
+        values.push(julian_day_value(conn, from)?);
     }
     if let Some(to) = &filter.to {
-        sql.push_str(" AND timestamp <= ?");
-        values.push(Value::Text(to.clone()));
+        sql.push_str(" AND COALESCE(julianday(timestamp), julianday(created_at)) <= ?");
+        values.push(julian_day_value(conn, to)?);
     }
     if let Some(q) = &filter.q {
         sql.push_str(" AND (phone_number LIKE ? OR body LIKE ?)");
@@ -1009,7 +1010,14 @@ fn build_message_query(
         sql.push_str(" LIMIT ");
         sql.push_str(&limit.to_string());
     }
-    (sql, values)
+    Ok((sql, values))
+}
+
+fn julian_day_value(conn: &Connection, timestamp: &str) -> Result<Value> {
+    let value = conn.query_row("SELECT julianday(?1)", params![timestamp], |row| {
+        row.get::<_, Option<f64>>(0)
+    })?;
+    Ok(value.map_or(Value::Null, Value::Real))
 }
 
 fn for_each_export_on<F>(conn: &Connection, filter: &MessageFilter, visit: &mut F) -> Result<()>
@@ -1017,7 +1025,7 @@ where
     F: FnMut(Message) -> Result<bool>,
 {
     let cursor = resolve_message_cursor(conn, filter.before.as_ref())?;
-    let (sql, values) = build_message_query(filter, cursor.as_ref(), false);
+    let (sql, values) = build_message_query(conn, filter, cursor.as_ref(), false)?;
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(values.iter()), row_to_message)?;
     for row in rows {
@@ -1326,7 +1334,7 @@ mod tests {
         };
         let conn = store.conn.lock().unwrap();
         let cursor = resolve_message_cursor(&conn, filter.before.as_ref()).unwrap();
-        let (sql, values) = build_message_query(&filter, cursor.as_ref(), true);
+        let (sql, values) = build_message_query(&conn, &filter, cursor.as_ref(), true).unwrap();
         let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
         let details = statement
             .query_map(params_from_iter(values.iter()), |row| {
@@ -1606,12 +1614,12 @@ mod tests {
     #[test]
     fn filters_by_timestamp_range() {
         let store = memory_store();
-        store
+        let lower_bound = store
             .insert_message(NewMessage {
                 direction: MessageDirection::Inbound,
                 phone_number: "+1".to_string(),
-                body: "early".to_string(),
-                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                body: "lower bound".to_string(),
+                timestamp: "not-a-timestamp".to_string(),
                 status: MessageStatus::Received,
                 source: MessageSource::Modem,
                 modem_sms_path: None,
@@ -1619,6 +1627,15 @@ mod tests {
                 error: None,
                 inbound_dedupe_key: None,
             })
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE messages SET created_at = '2026-06-01T00:00:00Z' WHERE id = ?1",
+                params![lower_bound.id],
+            )
             .unwrap();
         store
             .insert_message(NewMessage {
@@ -1638,6 +1655,20 @@ mod tests {
             .insert_message(NewMessage {
                 direction: MessageDirection::Inbound,
                 phone_number: "+3".to_string(),
+                body: "upper bound".to_string(),
+                timestamp: "2026-07-01T00:00:00Z".to_string(),
+                status: MessageStatus::Received,
+                source: MessageSource::Modem,
+                modem_sms_path: None,
+                read_at: None,
+                error: None,
+                inbound_dedupe_key: None,
+            })
+            .unwrap();
+        store
+            .insert_message(NewMessage {
+                direction: MessageDirection::Inbound,
+                phone_number: "+4".to_string(),
                 body: "late".to_string(),
                 timestamp: "2026-12-31T23:59:59Z".to_string(),
                 status: MessageStatus::Received,
@@ -1651,13 +1682,17 @@ mod tests {
 
         let rows = store
             .list_messages(&MessageFilter {
-                from: Some("2026-06-01T00:00:00Z".to_string()),
-                to: Some("2026-07-01T00:00:00Z".to_string()),
+                from: Some("2026-06-01T04:00:00+04:00".to_string()),
+                to: Some("2026-06-30T20:00:00-04:00".to_string()),
                 ..MessageFilter::default()
             })
             .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].body, "middle");
+        assert_eq!(
+            rows.iter()
+                .map(|message| message.body.as_str())
+                .collect::<Vec<_>>(),
+            vec!["upper bound", "middle", "lower bound"]
+        );
     }
 
     #[test]
