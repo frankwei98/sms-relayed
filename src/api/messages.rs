@@ -96,7 +96,17 @@ async fn list_messages(
     let filter = to_filter(&query)?;
     let rows = tokio::task::spawn_blocking(move || store.list_messages(&filter))
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))??;
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(|error| {
+            if error
+                .downcast_ref::<crate::storage::InvalidMessageCursor>()
+                .is_some()
+            {
+                ApiError::bad_request(error.to_string())
+            } else {
+                ApiError::internal(error.to_string())
+            }
+        })?;
     Ok(Json(rows))
 }
 
@@ -375,6 +385,42 @@ mod tests {
             ..MessageQuery::default()
         })
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn deleted_legacy_cursor_returns_bad_request() {
+        use tower::ServiceExt;
+
+        let store = crate::storage::MessageStore::open_in_memory().unwrap();
+        store
+            .insert_message(NewMessage::inbound("+1", "older"))
+            .unwrap();
+        let cursor = store
+            .insert_message(NewMessage::inbound("+1", "cursor"))
+            .unwrap();
+        store.delete_messages(&[cursor.id]).unwrap();
+        let state = super::super::ApiState {
+            config: std::sync::Arc::new(crate::config::AppConfig::default()),
+            config_path: std::path::PathBuf::from("/tmp/not-used.toml"),
+            store,
+            events: crate::events::EventBus::new(),
+            started_at: std::time::Instant::now(),
+            sessions: super::super::auth::SessionStore::default(),
+            modem: crate::modem::ModemService::new(),
+        };
+        let app = routes().with_state(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/messages?before_id={}", cursor.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

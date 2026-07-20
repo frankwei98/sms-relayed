@@ -58,21 +58,45 @@ dayjs.locale(navigator.language.toLowerCase());
 const ALL_DIRECTIONS = "all-directions";
 const ALL_STATUSES = "all-statuses";
 const MESSAGE_PAGE_SIZE = 10;
+const SERVER_MESSAGE_PAGE_LIMIT = 500;
+const SQLITE_TIMESTAMP_PATTERN =
+	/^(?:\d{4}-\d{2}-\d{2}|\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))$/;
 
-function compareMessagesChronologically(left: Message, right: Message) {
-	const timestampDifference =
-		Date.parse(left.timestamp) - Date.parse(right.timestamp);
-	return timestampDifference || left.id - right.id;
+function messageDisplayTimestamp(
+	message: Pick<Message, "created_at" | "timestamp">,
+) {
+	return !SQLITE_TIMESTAMP_PATTERN.test(message.timestamp) ||
+		Number.isNaN(Date.parse(message.timestamp))
+		? message.created_at
+		: message.timestamp;
+}
+
+function messageFromEvent(payload: unknown) {
+	if (!payload || typeof payload !== "object" || !("payload" in payload)) {
+		return null;
+	}
+	const message = payload.payload;
+	if (
+		!message ||
+		typeof message !== "object" ||
+		!("id" in message) ||
+		!("phone_number" in message)
+	) {
+		return null;
+	}
+	return message as Message;
 }
 
 function sortMessagesChronologically(messages: Message[]) {
-	return [...messages].sort(compareMessagesChronologically);
+	return [...messages].reverse();
 }
 
 function mergeMessagesChronologically(current: Message[], incoming: Message[]) {
-	const byId = new Map(current.map((message) => [message.id, message]));
-	for (const message of incoming) byId.set(message.id, message);
-	return sortMessagesChronologically(Array.from(byId.values()));
+	const incomingIds = new Set(incoming.map((message) => message.id));
+	return [
+		...sortMessagesChronologically(incoming),
+		...current.filter((message) => !incomingIds.has(message.id)),
+	];
 }
 
 export function MessageConsole() {
@@ -93,11 +117,17 @@ export function MessageConsole() {
 	const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
 	const markingReadPhonesRef = useRef<Set<string>>(new Set());
 	const loadedMessageCountRef = useRef(0);
-	const messageRequestVersionRef = useRef(0);
+	const messageWindowGenerationRef = useRef(0);
+	const messageReloadVersionRef = useRef(0);
+	const messageRefreshEpochRef = useRef(0);
+	const oldestLoadedMessageIdRef = useRef<number | null>(null);
 
 	const resetMessageWindow = useCallback(() => {
-		messageRequestVersionRef.current += 1;
+		messageWindowGenerationRef.current += 1;
+		messageReloadVersionRef.current += 1;
+		messageRefreshEpochRef.current += 1;
 		loadedMessageCountRef.current = 0;
+		oldestLoadedMessageIdRef.current = null;
 		setMessages([]);
 		setHasOlderMessages(false);
 		setLoadingOlderMessages(false);
@@ -119,7 +149,7 @@ export function MessageConsole() {
 	const fetchMessagePage = useCallback(
 		async (
 			phone: string,
-			before?: Pick<Message, "id" | "timestamp">,
+			before?: Pick<Message, "created_at" | "id" | "timestamp">,
 			limit = MESSAGE_PAGE_SIZE,
 		) => {
 			const p = buildParams(phone);
@@ -133,17 +163,63 @@ export function MessageConsole() {
 		[buildParams],
 	);
 
-	const loadMessagesForPhone = useCallback(
-		async (phone: string, limit = MESSAGE_PAGE_SIZE) => {
-			const requestVersion = ++messageRequestVersionRef.current;
-			const data = await fetchMessagePage(phone, undefined, limit);
-			if (requestVersion !== messageRequestVersionRef.current) return;
-			const ordered = sortMessagesChronologically(data);
-			loadedMessageCountRef.current = ordered.length;
-			setMessages(ordered);
-			setHasOlderMessages(data.length === limit);
+	const fetchMessageWindow = useCallback(
+		async (phone: string, limit: number) => {
+			const window: Message[] = [];
+			let before: Message | undefined;
+			while (window.length < limit) {
+				const pageLimit = Math.min(
+					SERVER_MESSAGE_PAGE_LIMIT,
+					limit - window.length,
+				);
+				const page = await fetchMessagePage(phone, before, pageLimit);
+				window.push(...page);
+				if (page.length < pageLimit) break;
+				before = page.at(-1);
+				if (!before) break;
+			}
+			return window;
 		},
 		[fetchMessagePage],
+	);
+
+	const loadMessagesForPhone = useCallback(
+		async (phone: string, limit = MESSAGE_PAGE_SIZE, createdMessages = 0) => {
+			const generation = messageWindowGenerationRef.current;
+			const reloadVersion = ++messageReloadVersionRef.current;
+			const loadedAtStart = loadedMessageCountRef.current;
+			const baseRequestedLimit = limit + createdMessages;
+			let requestedLimit = baseRequestedLimit;
+			let data: Message[];
+			while (true) {
+				data = await fetchMessageWindow(phone, requestedLimit);
+				if (
+					generation !== messageWindowGenerationRef.current ||
+					reloadVersion !== messageReloadVersionRef.current
+				) {
+					return;
+				}
+				const expandedLimit =
+					baseRequestedLimit +
+					Math.max(0, loadedMessageCountRef.current - loadedAtStart);
+				if (expandedLimit <= requestedLimit) break;
+				requestedLimit = expandedLimit;
+			}
+			const serverWindowFilled = data.length === requestedLimit;
+			if (createdMessages > 0 && oldestLoadedMessageIdRef.current !== null) {
+				const boundaryIndex = data.findIndex(
+					(message) => message.id === oldestLoadedMessageIdRef.current,
+				);
+				if (boundaryIndex >= 0) data = data.slice(0, boundaryIndex + 1);
+			}
+			const ordered = sortMessagesChronologically(data);
+			messageRefreshEpochRef.current += 1;
+			loadedMessageCountRef.current = ordered.length;
+			oldestLoadedMessageIdRef.current = ordered[0]?.id ?? null;
+			setMessages(ordered);
+			setHasOlderMessages(serverWindowFilled);
+		},
+		[fetchMessageWindow],
 	);
 
 	const loadMessages = useCallback(async () => {
@@ -165,13 +241,20 @@ export function MessageConsole() {
 		}
 
 		setLoadingOlderMessages(true);
-		const requestVersion = ++messageRequestVersionRef.current;
+		const generation = messageWindowGenerationRef.current;
+		const refreshEpoch = messageRefreshEpochRef.current;
 		try {
 			const data = await fetchMessagePage(selectedPhone, messages[0]);
-			if (requestVersion !== messageRequestVersionRef.current) return;
+			if (
+				generation !== messageWindowGenerationRef.current ||
+				refreshEpoch !== messageRefreshEpochRef.current
+			) {
+				return;
+			}
 			setMessages((current) => {
 				const merged = mergeMessagesChronologically(current, data);
 				loadedMessageCountRef.current = merged.length;
+				oldestLoadedMessageIdRef.current = merged[0]?.id ?? null;
 				return merged;
 			});
 			setHasOlderMessages(data.length === MESSAGE_PAGE_SIZE);
@@ -193,15 +276,19 @@ export function MessageConsole() {
 		setConversations(data);
 	}, []);
 
-	const reloadActiveViews = useCallback(async () => {
-		const messageReload = selectedPhone
-			? loadMessagesForPhone(
-					selectedPhone,
-					Math.max(MESSAGE_PAGE_SIZE, loadedMessageCountRef.current),
-				)
-			: Promise.resolve();
-		await Promise.all([messageReload, loadConversations()]);
-	}, [loadConversations, loadMessagesForPhone, selectedPhone]);
+	const reloadActiveViews = useCallback(
+		async (createdMessages = 0) => {
+			const messageReload = selectedPhone
+				? loadMessagesForPhone(
+						selectedPhone,
+						Math.max(MESSAGE_PAGE_SIZE, loadedMessageCountRef.current),
+						createdMessages,
+					)
+				: Promise.resolve();
+			await Promise.all([messageReload, loadConversations()]);
+		},
+		[loadConversations, loadMessagesForPhone, selectedPhone],
+	);
 
 	useEffect(() => {
 		loadConversations();
@@ -212,26 +299,37 @@ export function MessageConsole() {
 	}, [loadMessages]);
 
 	const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const pendingCreatedMessagesRef = useRef(0);
 
-	const scheduleRefresh = useCallback(() => {
-		if (refreshTimeoutRef.current) clearTimeout(refreshTimeoutRef.current);
-		refreshTimeoutRef.current = setTimeout(() => {
-			reloadActiveViews();
-			refreshTimeoutRef.current = null;
-		}, 100);
-	}, [reloadActiveViews]);
+	const scheduleRefresh = useCallback(
+		(createdMessage?: Message | null) => {
+			if (createdMessage?.phone_number === selectedPhone) {
+				pendingCreatedMessagesRef.current += 1;
+			}
+			if (refreshTimeoutRef.current) clearTimeout(refreshTimeoutRef.current);
+			refreshTimeoutRef.current = setTimeout(() => {
+				const additionalMessages = pendingCreatedMessagesRef.current;
+				pendingCreatedMessagesRef.current = 0;
+				reloadActiveViews(additionalMessages);
+				refreshTimeoutRef.current = null;
+			}, 100);
+		},
+		[reloadActiveViews, selectedPhone],
+	);
 
 	useEffect(() => {
 		const unsub = subscribeEvents({
-			"message.created": scheduleRefresh,
-			"message.updated": scheduleRefresh,
-			"message.deleted": scheduleRefresh,
-			"message.read_state_changed": scheduleRefresh,
-			"conversation.read": scheduleRefresh,
+			"message.created": (payload) =>
+				scheduleRefresh(messageFromEvent(payload)),
+			"message.updated": () => scheduleRefresh(),
+			"message.deleted": () => scheduleRefresh(),
+			"message.read_state_changed": () => scheduleRefresh(),
+			"conversation.read": () => scheduleRefresh(),
 		});
 		return () => {
 			unsub();
 			if (refreshTimeoutRef.current) clearTimeout(refreshTimeoutRef.current);
+			pendingCreatedMessagesRef.current = 0;
 		};
 	}, [scheduleRefresh]);
 
@@ -304,6 +402,7 @@ export function MessageConsole() {
 	const hasThreadOpen = Boolean(selectedPhone || isComposingNew);
 
 	function selectConversation(phone: string) {
+		if (!isComposingNew && phone === selectedPhone) return;
 		resetMessageWindow();
 		setSelectedPhone(phone);
 		setPhoneNumber(phone);
@@ -353,7 +452,7 @@ export function MessageConsole() {
 			setIsComposingNew(false);
 			const windowSize =
 				recipient === selectedPhone
-					? Math.max(MESSAGE_PAGE_SIZE, loadedMessageCountRef.current)
+					? Math.max(MESSAGE_PAGE_SIZE, loadedMessageCountRef.current + 1)
 					: MESSAGE_PAGE_SIZE;
 			await Promise.all([
 				loadMessagesForPhone(recipient, windowSize),
@@ -738,8 +837,8 @@ function ConversationCard({
 							)}
 						>
 							{active
-								? formatAbsoluteLocalTime(last.timestamp)
-								: formatRelativeTime(last.timestamp)}
+								? formatAbsoluteLocalTime(messageDisplayTimestamp(last))
+								: formatRelativeTime(messageDisplayTimestamp(last))}
 						</span>
 						{conversation.unread_count > 0 && (
 							<Badge
@@ -842,6 +941,8 @@ function ThreadPanel({
 	const threadScrollRef = useRef<HTMLDivElement>(null);
 	const loadingOlderRef = useRef(false);
 	const scrolledConversationRef = useRef<string | null>(null);
+	const activeConversationRef = useRef<string | null>(null);
+	activeConversationRef.current = conversation?.phone_number ?? null;
 	const title = isComposingNew
 		? "New message"
 		: (conversation?.phone_number ?? "Select a conversation");
@@ -854,7 +955,11 @@ function ThreadPanel({
 
 	useEffect(() => {
 		const phone = conversation?.phone_number;
-		if (!phone || messages.length === 0) return;
+		if (!phone) {
+			scrolledConversationRef.current = null;
+			return;
+		}
+		if (messages.length === 0) return;
 		if (scrolledConversationRef.current === phone) return;
 		scrolledConversationRef.current = phone;
 		requestAnimationFrame(() => {
@@ -865,6 +970,7 @@ function ThreadPanel({
 
 	const loadOlderPreservingScroll = useCallback(async () => {
 		if (loadingOlderRef.current || !hasOlderMessages) return;
+		const conversationAtStart = activeConversationRef.current;
 		const element = threadScrollRef.current;
 		const previousScrollHeight = element?.scrollHeight ?? 0;
 		const previousScrollTop = element?.scrollTop ?? 0;
@@ -872,7 +978,9 @@ function ThreadPanel({
 		loadingOlderRef.current = true;
 		try {
 			await onLoadOlderMessages();
+			if (activeConversationRef.current !== conversationAtStart) return;
 			requestAnimationFrame(() => {
+				if (activeConversationRef.current !== conversationAtStart) return;
 				const currentElement = threadScrollRef.current;
 				if (!currentElement) return;
 				currentElement.scrollTop =
@@ -948,6 +1056,8 @@ function ThreadPanel({
 				<>
 					<div
 						ref={threadScrollRef}
+						role="log"
+						aria-label="Message timeline"
 						onScroll={handleThreadScroll}
 						className="min-h-0 flex-1 overflow-y-auto px-3 py-4 md:px-6"
 					>
@@ -1132,7 +1242,7 @@ function MessageThread({
 	return (
 		<div className="mx-auto flex max-w-3xl flex-col gap-2">
 			{messages.map((message) => {
-				const day = formatRelativeDay(message.timestamp);
+				const day = formatRelativeDay(messageDisplayTimestamp(message));
 				const showDay = day !== lastDay;
 				lastDay = day;
 				return (
@@ -1195,7 +1305,7 @@ function MessageBubble({
 						outbound ? "text-primary-foreground/70" : "text-muted-foreground",
 					)}
 				>
-					<span>{formatRelativeTime(message.timestamp)}</span>
+					<span>{formatRelativeTime(messageDisplayTimestamp(message))}</span>
 					<span>{message.status}</span>
 					{message.error && (
 						<span
