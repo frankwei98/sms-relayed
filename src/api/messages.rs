@@ -30,6 +30,7 @@ pub struct DeleteManyRequest {
 #[derive(Deserialize)]
 pub struct MessageQuery {
     limit: Option<u32>,
+    before_timestamp: Option<String>,
     before_id: Option<i64>,
     phone_number: Option<String>,
     q: Option<String>,
@@ -44,6 +45,7 @@ pub struct MessageQuery {
 fn to_filter(q: &MessageQuery) -> MessageFilter {
     MessageFilter {
         limit: q.limit,
+        before_timestamp: q.before_timestamp.clone(),
         before_id: q.before_id,
         phone_number: q.phone_number.clone(),
         q: q.q.clone(),

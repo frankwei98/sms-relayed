@@ -214,6 +214,8 @@ impl MessageStore {
             );
             CREATE INDEX IF NOT EXISTS idx_messages_phone_number ON messages(phone_number);
             CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_messages_timeline ON messages(julianday(timestamp) DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_messages_phone_timeline ON messages(phone_number, julianday(timestamp) DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_messages_direction ON messages(direction);
             CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
             CREATE INDEX IF NOT EXISTS idx_messages_read_at ON messages(read_at);
@@ -508,21 +510,24 @@ impl MessageStore {
     pub fn list_conversations(&self) -> Result<Vec<ConversationSummary>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "WITH agg AS (
-                SELECT phone_number,
-                       COUNT(*) as total_count,
-                       SUM(CASE WHEN direction = 'inbound' AND read_at IS NULL THEN 1 ELSE 0 END) as unread_count,
-                       MAX(id) as last_id
+            "WITH ranked AS (
+                SELECT messages.*,
+                       COUNT(*) OVER (PARTITION BY phone_number) AS total_count,
+                       SUM(CASE WHEN direction = 'inbound' AND read_at IS NULL THEN 1 ELSE 0 END)
+                           OVER (PARTITION BY phone_number) AS unread_count,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY phone_number
+                           ORDER BY julianday(timestamp) DESC, id DESC
+                       ) AS timeline_rank
                 FROM messages
-                GROUP BY phone_number
             )
-            SELECT agg.phone_number, agg.total_count, agg.unread_count,
-                   m.id, m.direction, m.phone_number, m.body, m.timestamp,
-                   m.status, m.source, m.modem_sms_path, m.read_at, m.error,
-                   m.created_at, m.updated_at
-            FROM agg
-            JOIN messages m ON m.id = agg.last_id
-            ORDER BY m.id DESC",
+            SELECT phone_number, total_count, unread_count,
+                   id, direction, phone_number, body, timestamp,
+                   status, source, modem_sms_path, read_at, error,
+                   created_at, updated_at
+            FROM ranked
+            WHERE timeline_rank = 1
+            ORDER BY julianday(timestamp) DESC, id DESC",
         )?;
         let rows = stmt.query_map([], |row| {
             let phone_number: String = row.get(0)?;
@@ -907,12 +912,24 @@ fn insert_message_on(conn: &Connection, input: NewMessage) -> Result<Message> {
 }
 
 fn build_message_query(filter: &MessageFilter, apply_limit: bool) -> (String, Vec<String>) {
-    let limit = filter.limit.unwrap_or(50).min(500);
+    let limit = filter.limit.unwrap_or(10).min(500);
     let mut sql = "SELECT * FROM messages WHERE 1=1".to_string();
     let mut values = Vec::new();
-    if let Some(before_id) = filter.before_id {
-        sql.push_str(" AND id < ");
-        sql.push_str(&before_id.to_string());
+    match (&filter.before_timestamp, filter.before_id) {
+        (Some(timestamp), Some(id)) => {
+            sql.push_str(
+                " AND (julianday(timestamp) < julianday(?) OR (julianday(timestamp) = julianday(?) AND id < ?))",
+            );
+            values.push(timestamp.clone());
+            values.push(timestamp.clone());
+            values.push(id.to_string());
+        }
+        (None, Some(id)) => {
+            // Keep the legacy ID-only cursor working for existing API clients.
+            sql.push_str(" AND id < ?");
+            values.push(id.to_string());
+        }
+        _ => {}
     }
     if let Some(phone) = &filter.phone_number {
         sql.push_str(" AND phone_number = ?");
@@ -946,7 +963,7 @@ fn build_message_query(filter: &MessageFilter, apply_limit: bool) -> (String, Ve
             " AND read_at IS NOT NULL"
         });
     }
-    sql.push_str(" ORDER BY id DESC");
+    sql.push_str(" ORDER BY julianday(timestamp) DESC, id DESC");
     if apply_limit {
         sql.push_str(" LIMIT ");
         sql.push_str(&limit.to_string());
@@ -1129,6 +1146,106 @@ mod tests {
     }
 
     #[test]
+    fn lists_latest_messages_by_sms_timestamp_not_insert_order() {
+        let store = memory_store();
+        store
+            .insert_message(NewMessage {
+                direction: MessageDirection::Inbound,
+                phone_number: "+15550000000".to_string(),
+                body: "yesterday-current".to_string(),
+                timestamp: "2026-07-19T12:00:00Z".to_string(),
+                status: MessageStatus::Received,
+                source: MessageSource::Modem,
+                modem_sms_path: None,
+                read_at: None,
+                error: None,
+                inbound_dedupe_key: None,
+            })
+            .unwrap();
+
+        for day in 1..=12 {
+            store
+                .insert_message(NewMessage {
+                    direction: MessageDirection::Inbound,
+                    phone_number: "+15550000000".to_string(),
+                    body: format!("historical-{day}"),
+                    timestamp: format!("2025-01-{day:02}T12:00:00Z"),
+                    status: MessageStatus::Received,
+                    source: MessageSource::Modem,
+                    modem_sms_path: None,
+                    read_at: None,
+                    error: None,
+                    inbound_dedupe_key: None,
+                })
+                .unwrap();
+        }
+
+        let rows = store.list_messages(&MessageFilter::default()).unwrap();
+
+        assert_eq!(rows.len(), 10);
+        assert_eq!(rows[0].body, "yesterday-current");
+        assert_eq!(rows[1].body, "historical-12");
+    }
+
+    #[test]
+    fn timeline_cursor_pages_by_timestamp_and_id_without_duplicates() {
+        let store = memory_store();
+        for (body, timestamp) in [
+            ("newest", "2026-03-01T00:00:00Z"),
+            ("same-time-first", "2026-02-01T00:00:00Z"),
+            ("same-time-second", "2026-02-01T00:00:00Z"),
+            ("oldest-imported-last", "2026-01-01T00:00:00Z"),
+        ] {
+            store
+                .insert_message(NewMessage {
+                    direction: MessageDirection::Inbound,
+                    phone_number: "+1".to_string(),
+                    body: body.to_string(),
+                    timestamp: timestamp.to_string(),
+                    status: MessageStatus::Received,
+                    source: MessageSource::Modem,
+                    modem_sms_path: None,
+                    read_at: None,
+                    error: None,
+                    inbound_dedupe_key: None,
+                })
+                .unwrap();
+        }
+
+        let first_page = store
+            .list_messages(&MessageFilter {
+                limit: Some(2),
+                phone_number: Some("+1".to_string()),
+                ..MessageFilter::default()
+            })
+            .unwrap();
+        let cursor = first_page.last().unwrap();
+        let second_page = store
+            .list_messages(&MessageFilter {
+                limit: Some(2),
+                before_timestamp: Some(cursor.timestamp.clone()),
+                before_id: Some(cursor.id),
+                phone_number: Some("+1".to_string()),
+                ..MessageFilter::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            first_page
+                .iter()
+                .chain(&second_page)
+                .map(|message| message.body.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "newest",
+                "same-time-second",
+                "same-time-first",
+                "oldest-imported-last",
+            ]
+        );
+    }
+
+    #[test]
     fn optional_message_lookup_distinguishes_absence_from_query_failure() {
         let store = memory_store();
         assert_eq!(store.get_message_optional(42).unwrap(), None);
@@ -1254,6 +1371,44 @@ mod tests {
         assert_eq!(conversations[1].last_message.id, latest.id);
         assert_eq!(conversations[1].unread_count, 2);
         assert_eq!(conversations[1].total_count, 2);
+    }
+
+    #[test]
+    fn conversations_use_latest_sms_timestamp_not_insert_order() {
+        let store = memory_store();
+        store
+            .insert_message(NewMessage {
+                direction: MessageDirection::Inbound,
+                phone_number: "+1".to_string(),
+                body: "current".to_string(),
+                timestamp: "2026-07-19T12:00:00Z".to_string(),
+                status: MessageStatus::Received,
+                source: MessageSource::Modem,
+                modem_sms_path: None,
+                read_at: None,
+                error: None,
+                inbound_dedupe_key: None,
+            })
+            .unwrap();
+        store
+            .insert_message(NewMessage {
+                direction: MessageDirection::Inbound,
+                phone_number: "+1".to_string(),
+                body: "imported history".to_string(),
+                timestamp: "2025-01-01T12:00:00Z".to_string(),
+                status: MessageStatus::Received,
+                source: MessageSource::Modem,
+                modem_sms_path: None,
+                read_at: None,
+                error: None,
+                inbound_dedupe_key: None,
+            })
+            .unwrap();
+
+        let conversations = store.list_conversations().unwrap();
+
+        assert_eq!(conversations[0].last_message.body, "current");
+        assert_eq!(conversations[0].total_count, 2);
     }
 
     #[test]

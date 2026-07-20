@@ -7,6 +7,7 @@ import {
 	Download,
 	Filter,
 	Inbox,
+	LoaderCircle,
 	MessageCircle,
 	MoreHorizontal,
 	Plus,
@@ -56,6 +57,23 @@ dayjs.locale(navigator.language.toLowerCase());
 
 const ALL_DIRECTIONS = "all-directions";
 const ALL_STATUSES = "all-statuses";
+const MESSAGE_PAGE_SIZE = 10;
+
+function compareMessagesChronologically(left: Message, right: Message) {
+	const timestampDifference =
+		Date.parse(left.timestamp) - Date.parse(right.timestamp);
+	return timestampDifference || left.id - right.id;
+}
+
+function sortMessagesChronologically(messages: Message[]) {
+	return [...messages].sort(compareMessagesChronologically);
+}
+
+function mergeMessagesChronologically(current: Message[], incoming: Message[]) {
+	const byId = new Map(current.map((message) => [message.id, message]));
+	for (const message of incoming) byId.set(message.id, message);
+	return sortMessagesChronologically(Array.from(byId.values()));
+}
 
 export function MessageConsole() {
 	const [conversations, setConversations] = useState<ConversationSummary[]>([]);
@@ -71,7 +89,10 @@ export function MessageConsole() {
 	const [phoneNumber, setPhoneNumber] = useState("");
 	const [body, setBody] = useState("");
 	const [sending, setSending] = useState(false);
+	const [hasOlderMessages, setHasOlderMessages] = useState(false);
+	const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
 	const markingReadPhonesRef = useRef<Set<string>>(new Set());
+	const loadedMessageCountRef = useRef(0);
 
 	const buildParams = useCallback(
 		(phone?: string | null) => {
@@ -86,22 +107,75 @@ export function MessageConsole() {
 		[q, direction, statusFilter, unreadOnly],
 	);
 
-	const loadMessagesForPhone = useCallback(
-		async (phone: string) => {
+	const fetchMessagePage = useCallback(
+		async (
+			phone: string,
+			before?: Pick<Message, "id" | "timestamp">,
+			limit = MESSAGE_PAGE_SIZE,
+		) => {
 			const p = buildParams(phone);
-			const data = await apiFetch<Message[]>(`/api/messages?${p.toString()}`);
-			setMessages(data);
+			p.set("limit", String(limit));
+			if (before) {
+				p.set("before_timestamp", before.timestamp);
+				p.set("before_id", String(before.id));
+			}
+			return apiFetch<Message[]>(`/api/messages?${p.toString()}`);
 		},
 		[buildParams],
 	);
 
+	const loadMessagesForPhone = useCallback(
+		async (phone: string, limit = MESSAGE_PAGE_SIZE) => {
+			const data = await fetchMessagePage(phone, undefined, limit);
+			const ordered = sortMessagesChronologically(data);
+			loadedMessageCountRef.current = ordered.length;
+			setMessages(ordered);
+			setHasOlderMessages(data.length === limit);
+		},
+		[fetchMessagePage],
+	);
+
 	const loadMessages = useCallback(async () => {
 		if (!selectedPhone) {
+			loadedMessageCountRef.current = 0;
 			setMessages([]);
+			setHasOlderMessages(false);
 			return;
 		}
 		await loadMessagesForPhone(selectedPhone);
 	}, [loadMessagesForPhone, selectedPhone]);
+
+	const loadOlderMessages = useCallback(async () => {
+		if (
+			!selectedPhone ||
+			loadingOlderMessages ||
+			!hasOlderMessages ||
+			messages.length === 0
+		) {
+			return;
+		}
+
+		setLoadingOlderMessages(true);
+		try {
+			const data = await fetchMessagePage(selectedPhone, messages[0]);
+			setMessages((current) => {
+				const merged = mergeMessagesChronologically(current, data);
+				loadedMessageCountRef.current = merged.length;
+				return merged;
+			});
+			setHasOlderMessages(data.length === MESSAGE_PAGE_SIZE);
+		} catch (err) {
+			console.error(err);
+		} finally {
+			setLoadingOlderMessages(false);
+		}
+	}, [
+		fetchMessagePage,
+		hasOlderMessages,
+		loadingOlderMessages,
+		messages,
+		selectedPhone,
+	]);
 
 	const loadConversations = useCallback(async () => {
 		const data = await apiFetch<ConversationSummary[]>("/api/conversations");
@@ -109,8 +183,14 @@ export function MessageConsole() {
 	}, []);
 
 	const reloadActiveViews = useCallback(async () => {
-		await Promise.all([loadMessages(), loadConversations()]);
-	}, [loadMessages, loadConversations]);
+		const messageReload = selectedPhone
+			? loadMessagesForPhone(
+					selectedPhone,
+					Math.max(MESSAGE_PAGE_SIZE, loadedMessageCountRef.current),
+				)
+			: Promise.resolve();
+		await Promise.all([messageReload, loadConversations()]);
+	}, [loadConversations, loadMessagesForPhone, selectedPhone]);
 
 	useEffect(() => {
 		loadConversations();
@@ -209,7 +289,6 @@ export function MessageConsole() {
 		[conversations, selectedPhone],
 	);
 
-	const orderedMessages = useMemo(() => [...messages].reverse(), [messages]);
 	const activePhone = isComposingNew ? phoneNumber : selectedPhone;
 	const hasThreadOpen = Boolean(selectedPhone || isComposingNew);
 
@@ -224,7 +303,9 @@ export function MessageConsole() {
 	function startNewMessage() {
 		setSelectedPhone(null);
 		setPhoneNumber("");
+		loadedMessageCountRef.current = 0;
 		setMessages([]);
+		setHasOlderMessages(false);
 		setIsComposingNew(true);
 		setSelectionMode(false);
 		setSelectedIds(new Set());
@@ -362,7 +443,9 @@ export function MessageConsole() {
 				>
 					<ThreadPanel
 						conversation={selectedConversation}
-						messages={orderedMessages}
+						messages={messages}
+						hasOlderMessages={hasOlderMessages}
+						loadingOlderMessages={loadingOlderMessages}
 						isComposingNew={isComposingNew}
 						phoneNumber={phoneNumber}
 						setPhoneNumber={setPhoneNumber}
@@ -373,6 +456,7 @@ export function MessageConsole() {
 						setSelectionMode={setSelectionMode}
 						selectedIds={selectedIds}
 						onToggleSelect={toggleSelect}
+						onLoadOlderMessages={loadOlderMessages}
 						onBack={closeMobileThread}
 						onSend={handleSend}
 						onMarkConversationRead={handleMarkConversationRead}
@@ -695,6 +779,8 @@ function DirectionPill({
 function ThreadPanel({
 	conversation,
 	messages,
+	hasOlderMessages,
+	loadingOlderMessages,
 	isComposingNew,
 	phoneNumber,
 	setPhoneNumber,
@@ -705,6 +791,7 @@ function ThreadPanel({
 	setSelectionMode,
 	selectedIds,
 	onToggleSelect,
+	onLoadOlderMessages,
 	onBack,
 	onSend,
 	onMarkConversationRead,
@@ -714,6 +801,8 @@ function ThreadPanel({
 }: {
 	conversation: ConversationSummary | null;
 	messages: Message[];
+	hasOlderMessages: boolean;
+	loadingOlderMessages: boolean;
 	isComposingNew: boolean;
 	phoneNumber: string;
 	setPhoneNumber: (value: string) => void;
@@ -724,6 +813,7 @@ function ThreadPanel({
 	setSelectionMode: (value: boolean) => void;
 	selectedIds: Set<number>;
 	onToggleSelect: (id: number) => void;
+	onLoadOlderMessages: () => Promise<void>;
 	onBack: () => void;
 	onSend: () => void;
 	onMarkConversationRead: () => void;
@@ -731,6 +821,9 @@ function ThreadPanel({
 	onMarkSelectedUnread: () => void;
 	onDeleteSelected: () => void;
 }) {
+	const threadScrollRef = useRef<HTMLDivElement>(null);
+	const loadingOlderRef = useRef(false);
+	const scrolledConversationRef = useRef<string | null>(null);
 	const title = isComposingNew
 		? "New message"
 		: (conversation?.phone_number ?? "Select a conversation");
@@ -740,6 +833,51 @@ function ThreadPanel({
 			? `${conversation.total_count} messages`
 			: "Pick a thread from the list";
 	const selectedCount = selectedIds.size;
+
+	useEffect(() => {
+		const phone = conversation?.phone_number;
+		if (!phone || messages.length === 0) return;
+		if (scrolledConversationRef.current === phone) return;
+		scrolledConversationRef.current = phone;
+		requestAnimationFrame(() => {
+			const element = threadScrollRef.current;
+			if (element) element.scrollTop = element.scrollHeight;
+		});
+	}, [conversation?.phone_number, messages.length]);
+
+	const loadOlderPreservingScroll = useCallback(async () => {
+		if (loadingOlderRef.current || !hasOlderMessages) return;
+		const element = threadScrollRef.current;
+		const previousScrollHeight = element?.scrollHeight ?? 0;
+		const previousScrollTop = element?.scrollTop ?? 0;
+
+		loadingOlderRef.current = true;
+		try {
+			await onLoadOlderMessages();
+			requestAnimationFrame(() => {
+				const currentElement = threadScrollRef.current;
+				if (!currentElement) return;
+				currentElement.scrollTop =
+					previousScrollTop +
+					(currentElement.scrollHeight - previousScrollHeight);
+			});
+		} finally {
+			loadingOlderRef.current = false;
+		}
+	}, [hasOlderMessages, onLoadOlderMessages]);
+
+	const handleThreadScroll = useCallback(
+		(event: React.UIEvent<HTMLDivElement>) => {
+			const element = event.currentTarget;
+			if (
+				element.scrollHeight > element.clientHeight &&
+				element.scrollTop <= 64
+			) {
+				void loadOlderPreservingScroll();
+			}
+		},
+		[loadOlderPreservingScroll],
+	);
 
 	return (
 		<div className="flex h-full min-h-0 flex-col">
@@ -790,19 +928,43 @@ function ThreadPanel({
 
 			{conversation || isComposingNew ? (
 				<>
-					<div className="min-h-0 flex-1 overflow-y-auto px-3 py-4 md:px-6">
+					<div
+						ref={threadScrollRef}
+						onScroll={handleThreadScroll}
+						className="min-h-0 flex-1 overflow-y-auto px-3 py-4 md:px-6"
+					>
 						{isComposingNew ? (
 							<NewMessageRecipient
 								phoneNumber={phoneNumber}
 								setPhoneNumber={setPhoneNumber}
 							/>
 						) : (
-							<MessageThread
-								messages={messages}
-								selectionMode={selectionMode}
-								selectedIds={selectedIds}
-								onToggleSelect={onToggleSelect}
-							/>
+							<>
+								{hasOlderMessages && (
+									<div className="flex justify-center pb-3">
+										<Button
+											type="button"
+											variant="ghost"
+											size="sm"
+											disabled={loadingOlderMessages}
+											onClick={() => void loadOlderPreservingScroll()}
+										>
+											{loadingOlderMessages && (
+												<LoaderCircle className="animate-spin" />
+											)}
+											{loadingOlderMessages
+												? "Loading older messages"
+												: "Load older messages"}
+										</Button>
+									</div>
+								)}
+								<MessageThread
+									messages={messages}
+									selectionMode={selectionMode}
+									selectedIds={selectedIds}
+									onToggleSelect={onToggleSelect}
+								/>
+							</>
 						)}
 					</div>
 					<MessageComposer

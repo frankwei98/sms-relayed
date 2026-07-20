@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+	cleanup,
+	fireEvent,
+	render,
+	screen,
+	waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { MessageConsole } from "#/components/messages/message-console";
 
@@ -33,6 +39,7 @@ const unreadMessage = {
 };
 
 afterEach(() => {
+	cleanup();
 	vi.clearAllMocks();
 	mocks.handlers = {};
 });
@@ -103,5 +110,68 @@ describe("MessageConsole bulk read", () => {
 
 		resolveRead?.();
 		await waitFor(() => expect(markedRead).toBe(true));
+	});
+});
+
+describe("MessageConsole timeline pagination", () => {
+	test("loads the latest ten messages, then prepends an older cursor page", async () => {
+		const messageRequests: string[] = [];
+		const latestPage = Array.from({ length: 10 }, (_, index) => ({
+			...unreadMessage,
+			id: 100 - index,
+			body: index === 0 ? "latest message" : `recent-${index}`,
+			timestamp: `2026-07-${String(20 - index).padStart(2, "0")}T00:00:00Z`,
+			read_at: "2026-07-20T00:01:00Z",
+		}));
+		const olderMessage = {
+			...unreadMessage,
+			id: 90,
+			body: "older message",
+			timestamp: "2026-07-10T00:00:00Z",
+			read_at: "2026-07-20T00:01:00Z",
+		};
+
+		mocks.apiFetch.mockImplementation((input: string) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: unreadMessage.phone_number,
+						last_message: latestPage[0],
+						unread_count: 0,
+						total_count: 11,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?")) {
+				messageRequests.push(input);
+				const params = new URL(input, "http://localhost").searchParams;
+				return Promise.resolve(
+					params.has("before_timestamp") ? [olderMessage] : latestPage,
+				);
+			}
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+		fireEvent.click(
+			await screen.findByRole("button", { name: /\+15550000001/ }),
+		);
+		await waitFor(() => expect(messageRequests.length).toBeGreaterThan(0));
+
+		const firstPageUrl = messageRequests[0];
+		expect(firstPageUrl).toContain("limit=10");
+
+		fireEvent.click(
+			await screen.findByRole("button", { name: "Load older messages" }),
+		);
+		await screen.findByText("older message");
+
+		const cursorRequest = messageRequests.find((input) =>
+			input.includes("before_timestamp"),
+		);
+		const cursorParams = new URL(cursorRequest ?? "", "http://localhost")
+			.searchParams;
+		expect(cursorParams.get("before_timestamp")).toBe("2026-07-11T00:00:00Z");
+		expect(cursorParams.get("before_id")).toBe("91");
 	});
 });
