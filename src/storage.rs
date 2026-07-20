@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, TransactionBehavior};
+use rusqlite::{
+    params, params_from_iter, types::Value, Connection, OptionalExtension, Row, TransactionBehavior,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
@@ -26,6 +28,17 @@ pub struct DeliveryRow {
     pub created_at: String,
     pub updated_at: String,
 }
+
+#[derive(Debug)]
+pub struct InvalidMessageCursor;
+
+impl std::fmt::Display for InvalidMessageCursor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("message cursor no longer references an existing message")
+    }
+}
+
+impl std::error::Error for InvalidMessageCursor {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -215,8 +228,10 @@ impl MessageStore {
             );
             CREATE INDEX IF NOT EXISTS idx_messages_phone_number ON messages(phone_number);
             CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_messages_timeline ON messages(julianday(timestamp) DESC, id DESC);
-            CREATE INDEX IF NOT EXISTS idx_messages_phone_timeline ON messages(phone_number, julianday(timestamp) DESC, id DESC);
+            DROP INDEX IF EXISTS idx_messages_timeline;
+            DROP INDEX IF EXISTS idx_messages_phone_timeline;
+            CREATE INDEX IF NOT EXISTS idx_messages_timeline_v2 ON messages(COALESCE(julianday(timestamp), julianday(created_at)) DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_messages_phone_timeline_v2 ON messages(phone_number, COALESCE(julianday(timestamp), julianday(created_at)) DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_messages_direction ON messages(direction);
             CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
             CREATE INDEX IF NOT EXISTS idx_messages_read_at ON messages(read_at);
@@ -446,7 +461,8 @@ impl MessageStore {
 
     fn query_messages(&self, filter: &MessageFilter, apply_limit: bool) -> Result<Vec<Message>> {
         let conn = self.conn.lock().unwrap();
-        let (sql, values) = build_message_query(filter, apply_limit);
+        let cursor = resolve_message_cursor(&conn, filter.before.as_ref())?;
+        let (sql, values) = build_message_query(filter, cursor.as_ref(), apply_limit);
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(values.iter()), row_to_message)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -518,7 +534,7 @@ impl MessageStore {
                            OVER (PARTITION BY phone_number) AS unread_count,
                        ROW_NUMBER() OVER (
                            PARTITION BY phone_number
-                           ORDER BY julianday(timestamp) DESC, id DESC
+                           ORDER BY COALESCE(julianday(timestamp), julianday(created_at)) DESC, id DESC
                        ) AS timeline_rank
                 FROM messages
             )
@@ -528,7 +544,7 @@ impl MessageStore {
                    created_at, updated_at
             FROM ranked
             WHERE timeline_rank = 1
-            ORDER BY julianday(timestamp) DESC, id DESC",
+            ORDER BY COALESCE(julianday(timestamp), julianday(created_at)) DESC, id DESC",
         )?;
         let rows = stmt.query_map([], |row| {
             let phone_number: String = row.get(0)?;
@@ -912,53 +928,74 @@ fn insert_message_on(conn: &Connection, input: NewMessage) -> Result<Message> {
     map_get(conn, conn.last_insert_rowid())
 }
 
-fn build_message_query(filter: &MessageFilter, apply_limit: bool) -> (String, Vec<String>) {
+enum ResolvedMessageCursor {
+    Timeline { sort_key: f64, id: i64 },
+}
+
+fn resolve_message_cursor(
+    conn: &Connection,
+    cursor: Option<&MessageCursor>,
+) -> Result<Option<ResolvedMessageCursor>> {
+    let Some(cursor) = cursor else {
+        return Ok(None);
+    };
+    let (provided_timestamp, id) = match cursor {
+        MessageCursor::Timeline { timestamp, id } => (Some(timestamp.as_str()), *id),
+        MessageCursor::LegacyId(id) => (None, *id),
+    };
+    let sort_key: Option<f64> = conn.query_row(
+        "SELECT COALESCE(julianday(?1), (SELECT COALESCE(julianday(timestamp), julianday(created_at)) FROM messages WHERE id = ?2))",
+        params![provided_timestamp, id],
+        |row| row.get(0),
+    )?;
+    let sort_key = sort_key.ok_or(InvalidMessageCursor)?;
+    Ok(Some(ResolvedMessageCursor::Timeline { sort_key, id }))
+}
+
+fn build_message_query(
+    filter: &MessageFilter,
+    cursor: Option<&ResolvedMessageCursor>,
+    apply_limit: bool,
+) -> (String, Vec<Value>) {
     let limit = filter.limit.unwrap_or(10).min(500);
     let mut sql = "SELECT * FROM messages WHERE 1=1".to_string();
     let mut values = Vec::new();
-    match &filter.before {
-        Some(MessageCursor::Timeline { timestamp, id }) => {
+    match cursor {
+        Some(ResolvedMessageCursor::Timeline { sort_key, id }) => {
             sql.push_str(
-                " AND (julianday(timestamp) < julianday(?) OR (julianday(timestamp) = julianday(?) AND id < ?))",
+                " AND COALESCE(julianday(timestamp), julianday(created_at)) <= ? AND (COALESCE(julianday(timestamp), julianday(created_at)) < ? OR (COALESCE(julianday(timestamp), julianday(created_at)) = ? AND id < ?))",
             );
-            values.push(timestamp.clone());
-            values.push(timestamp.clone());
-            values.push(id.to_string());
-        }
-        Some(MessageCursor::LegacyId(id)) => {
-            sql.push_str(
-                " AND (julianday(timestamp) < (SELECT julianday(timestamp) FROM messages WHERE id = ?) OR (julianday(timestamp) = (SELECT julianday(timestamp) FROM messages WHERE id = ?) AND id < ?))",
-            );
-            values.push(id.to_string());
-            values.push(id.to_string());
-            values.push(id.to_string());
+            values.push(Value::Real(*sort_key));
+            values.push(Value::Real(*sort_key));
+            values.push(Value::Real(*sort_key));
+            values.push(Value::Integer(*id));
         }
         None => {}
     }
     if let Some(phone) = &filter.phone_number {
         sql.push_str(" AND phone_number = ?");
-        values.push(phone.clone());
+        values.push(Value::Text(phone.clone()));
     }
     if let Some(from) = &filter.from {
         sql.push_str(" AND timestamp >= ?");
-        values.push(from.clone());
+        values.push(Value::Text(from.clone()));
     }
     if let Some(to) = &filter.to {
         sql.push_str(" AND timestamp <= ?");
-        values.push(to.clone());
+        values.push(Value::Text(to.clone()));
     }
     if let Some(q) = &filter.q {
         sql.push_str(" AND (phone_number LIKE ? OR body LIKE ?)");
-        values.push(format!("%{}%", q));
-        values.push(format!("%{}%", q));
+        values.push(Value::Text(format!("%{}%", q)));
+        values.push(Value::Text(format!("%{}%", q)));
     }
     if let Some(direction) = filter.direction {
         sql.push_str(" AND direction = ?");
-        values.push(direction_to_str(direction).to_string());
+        values.push(Value::Text(direction_to_str(direction).to_string()));
     }
     if let Some(status) = filter.status {
         sql.push_str(" AND status = ?");
-        values.push(status_to_str(status).to_string());
+        values.push(Value::Text(status_to_str(status).to_string()));
     }
     if let Some(unread) = filter.unread {
         sql.push_str(if unread {
@@ -967,7 +1004,7 @@ fn build_message_query(filter: &MessageFilter, apply_limit: bool) -> (String, Ve
             " AND read_at IS NOT NULL"
         });
     }
-    sql.push_str(" ORDER BY julianday(timestamp) DESC, id DESC");
+    sql.push_str(" ORDER BY COALESCE(julianday(timestamp), julianday(created_at)) DESC, id DESC");
     if apply_limit {
         sql.push_str(" LIMIT ");
         sql.push_str(&limit.to_string());
@@ -979,7 +1016,8 @@ fn for_each_export_on<F>(conn: &Connection, filter: &MessageFilter, visit: &mut 
 where
     F: FnMut(Message) -> Result<bool>,
 {
-    let (sql, values) = build_message_query(filter, false);
+    let cursor = resolve_message_cursor(conn, filter.before.as_ref())?;
+    let (sql, values) = build_message_query(filter, cursor.as_ref(), false);
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(values.iter()), row_to_message)?;
     for row in rows {
@@ -1259,6 +1297,144 @@ mod tests {
             })
             .unwrap();
         assert_eq!(legacy_second_page, second_page);
+    }
+
+    #[test]
+    fn timeline_cursor_uses_the_phone_timeline_index_range() {
+        let store = memory_store();
+        let cursor_message = store
+            .insert_message(NewMessage {
+                direction: MessageDirection::Inbound,
+                phone_number: "+1".to_string(),
+                body: "cursor".to_string(),
+                timestamp: "2026-02-01T00:00:00Z".to_string(),
+                status: MessageStatus::Received,
+                source: MessageSource::Modem,
+                modem_sms_path: None,
+                read_at: None,
+                error: None,
+                inbound_dedupe_key: None,
+            })
+            .unwrap();
+        let filter = MessageFilter {
+            before: Some(MessageCursor::Timeline {
+                timestamp: cursor_message.timestamp,
+                id: cursor_message.id,
+            }),
+            phone_number: Some("+1".to_string()),
+            ..MessageFilter::default()
+        };
+        let conn = store.conn.lock().unwrap();
+        let cursor = resolve_message_cursor(&conn, filter.before.as_ref()).unwrap();
+        let (sql, values) = build_message_query(&filter, cursor.as_ref(), true);
+        let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let details = statement
+            .query_map(params_from_iter(values.iter()), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert!(
+            details.iter().any(|detail| {
+                detail.contains("idx_messages_phone_timeline_v2") && detail.contains("<expr><?")
+            }),
+            "query plan did not use a timeline range: {details:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_sms_timestamps_fall_back_to_ingestion_time_across_pages() {
+        let store = memory_store();
+        let newest_valid = store
+            .insert_message(NewMessage {
+                direction: MessageDirection::Inbound,
+                phone_number: "+1".to_string(),
+                body: "newest valid".to_string(),
+                timestamp: "2026-03-01T00:00:00Z".to_string(),
+                status: MessageStatus::Received,
+                source: MessageSource::Modem,
+                modem_sms_path: None,
+                read_at: None,
+                error: None,
+                inbound_dedupe_key: None,
+            })
+            .unwrap();
+        let malformed = store
+            .insert_message(NewMessage {
+                direction: MessageDirection::Inbound,
+                phone_number: "+1".to_string(),
+                body: "malformed timestamp".to_string(),
+                timestamp: "not-a-timestamp".to_string(),
+                status: MessageStatus::Received,
+                source: MessageSource::Modem,
+                modem_sms_path: None,
+                read_at: None,
+                error: None,
+                inbound_dedupe_key: None,
+            })
+            .unwrap();
+        let oldest = store
+            .insert_message(NewMessage {
+                direction: MessageDirection::Inbound,
+                phone_number: "+1".to_string(),
+                body: "oldest".to_string(),
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                status: MessageStatus::Received,
+                source: MessageSource::Modem,
+                modem_sms_path: None,
+                read_at: None,
+                error: None,
+                inbound_dedupe_key: None,
+            })
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE messages SET created_at = '2026-04-01T00:00:00Z' WHERE id = ?1",
+                params![malformed.id],
+            )
+            .unwrap();
+
+        let first_page = store
+            .list_messages(&MessageFilter {
+                limit: Some(1),
+                phone_number: Some("+1".to_string()),
+                ..MessageFilter::default()
+            })
+            .unwrap();
+        assert_eq!(
+            first_page
+                .iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            vec![malformed.id]
+        );
+
+        let conversations = store.list_conversations().unwrap();
+        assert_eq!(conversations[0].last_message.id, malformed.id);
+
+        let second_page = store
+            .list_messages(&MessageFilter {
+                limit: Some(2),
+                before: Some(MessageCursor::Timeline {
+                    timestamp: malformed.timestamp,
+                    id: malformed.id,
+                }),
+                phone_number: Some("+1".to_string()),
+                ..MessageFilter::default()
+            })
+            .unwrap();
+        assert_eq!(
+            second_page
+                .iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            vec![newest_valid.id, oldest.id]
+        );
     }
 
     #[test]
