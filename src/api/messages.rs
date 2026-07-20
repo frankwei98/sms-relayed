@@ -11,7 +11,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
 use crate::events::AppEvent;
-use crate::message::{Message, MessageDirection, MessageFilter, MessageSource, MessageStatus};
+use crate::message::{
+    Message, MessageCursor, MessageDirection, MessageFilter, MessageSource, MessageStatus,
+};
 use crate::storage::NewMessage;
 
 use super::{ApiError, ApiResult, ApiState};
@@ -27,7 +29,7 @@ pub struct DeleteManyRequest {
     ids: Vec<i64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 pub struct MessageQuery {
     limit: Option<u32>,
     before_timestamp: Option<String>,
@@ -42,11 +44,23 @@ pub struct MessageQuery {
     format: Option<String>,
 }
 
-fn to_filter(q: &MessageQuery) -> MessageFilter {
-    MessageFilter {
+fn to_filter(q: &MessageQuery) -> ApiResult<MessageFilter> {
+    let before = match (&q.before_timestamp, q.before_id) {
+        (Some(timestamp), Some(id)) => Some(MessageCursor::Timeline {
+            timestamp: timestamp.clone(),
+            id,
+        }),
+        (None, None) => None,
+        (None, Some(id)) => Some(MessageCursor::LegacyId(id)),
+        (Some(_), None) => {
+            return Err(ApiError::bad_request(
+                "before_id is required when before_timestamp is provided",
+            ));
+        }
+    };
+    Ok(MessageFilter {
         limit: q.limit,
-        before_timestamp: q.before_timestamp.clone(),
-        before_id: q.before_id,
+        before,
         phone_number: q.phone_number.clone(),
         q: q.q.clone(),
         direction: q.direction,
@@ -54,7 +68,7 @@ fn to_filter(q: &MessageQuery) -> MessageFilter {
         unread: q.unread,
         from: q.from.clone(),
         to: q.to.clone(),
-    }
+    })
 }
 
 pub fn routes() -> Router<ApiState> {
@@ -79,7 +93,7 @@ async fn list_messages(
     Query(query): Query<MessageQuery>,
 ) -> ApiResult<Json<Vec<Message>>> {
     let store = state.store.clone();
-    let filter = to_filter(&query);
+    let filter = to_filter(&query)?;
     let rows = tokio::task::spawn_blocking(move || store.list_messages(&filter))
         .await
         .map_err(|e| ApiError::internal(e.to_string()))??;
@@ -208,7 +222,7 @@ async fn export_messages(
     } else {
         ExportFormat::Csv
     };
-    let filter = to_filter(&query);
+    let filter = to_filter(&query)?;
     let store = state.store.clone();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
 
@@ -347,6 +361,20 @@ mod tests {
     #[test]
     fn routes_build_without_panicking() {
         let _ = super::routes();
+    }
+
+    #[test]
+    fn timeline_cursor_requires_timestamp_and_id_together() {
+        assert!(to_filter(&MessageQuery {
+            before_id: Some(42),
+            ..MessageQuery::default()
+        })
+        .is_ok());
+        assert!(to_filter(&MessageQuery {
+            before_timestamp: Some("2026-07-19T12:00:00Z".to_string()),
+            ..MessageQuery::default()
+        })
+        .is_err());
     }
 
     #[tokio::test]

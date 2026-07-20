@@ -145,8 +145,13 @@ describe("MessageConsole timeline pagination", () => {
 			if (input.startsWith("/api/messages?")) {
 				messageRequests.push(input);
 				const params = new URL(input, "http://localhost").searchParams;
+				if (params.has("before_timestamp")) {
+					return Promise.resolve([olderMessage]);
+				}
 				return Promise.resolve(
-					params.has("before_timestamp") ? [olderMessage] : latestPage,
+					params.get("limit") === "11"
+						? [...latestPage, olderMessage]
+						: latestPage,
 				);
 			}
 			return Promise.resolve({});
@@ -173,5 +178,19 @@ describe("MessageConsole timeline pagination", () => {
 			.searchParams;
 		expect(cursorParams.get("before_timestamp")).toBe("2026-07-11T00:00:00Z");
 		expect(cursorParams.get("before_id")).toBe("91");
+
+		const requestCountBeforeSend = messageRequests.length;
+		fireEvent.change(screen.getByPlaceholderText("Message"), {
+			target: { value: "reply" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+		await waitFor(() =>
+			expect(messageRequests.length).toBeGreaterThan(requestCountBeforeSend),
+		);
+		const refreshParams = new URL(
+			messageRequests.at(-1) ?? "",
+			"http://localhost",
+		).searchParams;
+		expect(refreshParams.get("limit")).toBe("11");
 	});
 });
