@@ -291,6 +291,14 @@ describe("MessageConsole timeline pagination", () => {
 		const firstTimeline = await screen.findByRole("log", {
 			name: "Message timeline",
 		});
+		let firstScrollTop = 0;
+		Object.defineProperty(firstTimeline, "scrollTop", {
+			configurable: true,
+			get: () => firstScrollTop,
+			set: (value) => {
+				firstScrollTop = value;
+			},
+		});
 		await waitFor(() => expect(firstTimeline.scrollTop).toBe(1000));
 
 		fireEvent.click(
@@ -299,6 +307,14 @@ describe("MessageConsole timeline pagination", () => {
 		fireEvent.click(screen.getByRole("button", { name: /\+15550000001/ }));
 		const reopenedTimeline = await screen.findByRole("log", {
 			name: "Message timeline",
+		});
+		let reopenedScrollTop = 0;
+		Object.defineProperty(reopenedTimeline, "scrollTop", {
+			configurable: true,
+			get: () => reopenedScrollTop,
+			set: (value) => {
+				reopenedScrollTop = value;
+			},
 		});
 		await waitFor(() => expect(reopenedTimeline.scrollTop).toBe(1000));
 	});
