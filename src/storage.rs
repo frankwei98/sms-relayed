@@ -593,7 +593,8 @@ impl MessageStore {
             "SELECT id, message_id, profile_key, state, attempt_count, next_attempt_at, lease_at, lease_token, last_error, created_at, updated_at
              FROM forward_deliveries
              WHERE state IN ('pending', 'retry_wait')
-               AND julianday(COALESCE(next_attempt_at, created_at)) <= julianday(?1)
+               AND (next_attempt_at IS NULL
+                    OR julianday(next_attempt_at) <= julianday(?1))
              ORDER BY julianday(COALESCE(next_attempt_at, created_at)) ASC, id ASC
              LIMIT ?2",
         )?;
@@ -1668,6 +1669,33 @@ mod tests {
                 "UPDATE forward_deliveries
                  SET state = 'retry_wait', next_attempt_at = ?1",
                 params![due_at],
+            )
+            .unwrap();
+        }
+
+        let claimed = store
+            .claim_due_deliveries(1, "2099-01-01T00:00:00Z")
+            .unwrap();
+
+        assert_eq!(claimed.len(), 1);
+    }
+
+    #[test]
+    fn pending_delivery_is_due_even_when_created_at_is_in_the_future() {
+        let store = memory_store();
+        store
+            .insert_message_with_deliveries(
+                NewMessage::inbound("+1", "clock moved backwards"),
+                &["bark.primary".to_string()],
+            )
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE forward_deliveries
+                 SET created_at = '2099-01-01T00:00:00Z'
+                 WHERE next_attempt_at IS NULL",
+                [],
             )
             .unwrap();
         }
