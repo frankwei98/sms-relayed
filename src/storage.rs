@@ -8,7 +8,8 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 use crate::message::{
-    ConversationSummary, Message, MessageDirection, MessageFilter, MessageSource, MessageStatus,
+    ConversationSummary, Message, MessageCursor, MessageDirection, MessageFilter, MessageSource,
+    MessageStatus,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -915,8 +916,8 @@ fn build_message_query(filter: &MessageFilter, apply_limit: bool) -> (String, Ve
     let limit = filter.limit.unwrap_or(10).min(500);
     let mut sql = "SELECT * FROM messages WHERE 1=1".to_string();
     let mut values = Vec::new();
-    match (&filter.before_timestamp, filter.before_id) {
-        (Some(timestamp), Some(id)) => {
+    match &filter.before {
+        Some(MessageCursor::Timeline { timestamp, id }) => {
             sql.push_str(
                 " AND (julianday(timestamp) < julianday(?) OR (julianday(timestamp) = julianday(?) AND id < ?))",
             );
@@ -924,12 +925,15 @@ fn build_message_query(filter: &MessageFilter, apply_limit: bool) -> (String, Ve
             values.push(timestamp.clone());
             values.push(id.to_string());
         }
-        (None, Some(id)) => {
-            // Keep the legacy ID-only cursor working for existing API clients.
-            sql.push_str(" AND id < ?");
+        Some(MessageCursor::LegacyId(id)) => {
+            sql.push_str(
+                " AND (julianday(timestamp) < (SELECT julianday(timestamp) FROM messages WHERE id = ?) OR (julianday(timestamp) = (SELECT julianday(timestamp) FROM messages WHERE id = ?) AND id < ?))",
+            );
+            values.push(id.to_string());
+            values.push(id.to_string());
             values.push(id.to_string());
         }
-        _ => {}
+        None => {}
     }
     if let Some(phone) = &filter.phone_number {
         sql.push_str(" AND phone_number = ?");
@@ -1223,8 +1227,10 @@ mod tests {
         let second_page = store
             .list_messages(&MessageFilter {
                 limit: Some(2),
-                before_timestamp: Some(cursor.timestamp.clone()),
-                before_id: Some(cursor.id),
+                before: Some(MessageCursor::Timeline {
+                    timestamp: cursor.timestamp.clone(),
+                    id: cursor.id,
+                }),
                 phone_number: Some("+1".to_string()),
                 ..MessageFilter::default()
             })
@@ -1243,6 +1249,16 @@ mod tests {
                 "oldest-imported-last",
             ]
         );
+
+        let legacy_second_page = store
+            .list_messages(&MessageFilter {
+                limit: Some(2),
+                before: Some(MessageCursor::LegacyId(cursor.id)),
+                phone_number: Some("+1".to_string()),
+                ..MessageFilter::default()
+            })
+            .unwrap();
+        assert_eq!(legacy_second_page, second_page);
     }
 
     #[test]

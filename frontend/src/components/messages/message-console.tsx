@@ -93,6 +93,15 @@ export function MessageConsole() {
 	const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
 	const markingReadPhonesRef = useRef<Set<string>>(new Set());
 	const loadedMessageCountRef = useRef(0);
+	const messageRequestVersionRef = useRef(0);
+
+	const resetMessageWindow = useCallback(() => {
+		messageRequestVersionRef.current += 1;
+		loadedMessageCountRef.current = 0;
+		setMessages([]);
+		setHasOlderMessages(false);
+		setLoadingOlderMessages(false);
+	}, []);
 
 	const buildParams = useCallback(
 		(phone?: string | null) => {
@@ -126,7 +135,9 @@ export function MessageConsole() {
 
 	const loadMessagesForPhone = useCallback(
 		async (phone: string, limit = MESSAGE_PAGE_SIZE) => {
+			const requestVersion = ++messageRequestVersionRef.current;
 			const data = await fetchMessagePage(phone, undefined, limit);
+			if (requestVersion !== messageRequestVersionRef.current) return;
 			const ordered = sortMessagesChronologically(data);
 			loadedMessageCountRef.current = ordered.length;
 			setMessages(ordered);
@@ -137,13 +148,11 @@ export function MessageConsole() {
 
 	const loadMessages = useCallback(async () => {
 		if (!selectedPhone) {
-			loadedMessageCountRef.current = 0;
-			setMessages([]);
-			setHasOlderMessages(false);
+			resetMessageWindow();
 			return;
 		}
 		await loadMessagesForPhone(selectedPhone);
-	}, [loadMessagesForPhone, selectedPhone]);
+	}, [loadMessagesForPhone, resetMessageWindow, selectedPhone]);
 
 	const loadOlderMessages = useCallback(async () => {
 		if (
@@ -156,8 +165,10 @@ export function MessageConsole() {
 		}
 
 		setLoadingOlderMessages(true);
+		const requestVersion = ++messageRequestVersionRef.current;
 		try {
 			const data = await fetchMessagePage(selectedPhone, messages[0]);
+			if (requestVersion !== messageRequestVersionRef.current) return;
 			setMessages((current) => {
 				const merged = mergeMessagesChronologically(current, data);
 				loadedMessageCountRef.current = merged.length;
@@ -293,6 +304,7 @@ export function MessageConsole() {
 	const hasThreadOpen = Boolean(selectedPhone || isComposingNew);
 
 	function selectConversation(phone: string) {
+		resetMessageWindow();
 		setSelectedPhone(phone);
 		setPhoneNumber(phone);
 		setIsComposingNew(false);
@@ -303,15 +315,14 @@ export function MessageConsole() {
 	function startNewMessage() {
 		setSelectedPhone(null);
 		setPhoneNumber("");
-		loadedMessageCountRef.current = 0;
-		setMessages([]);
-		setHasOlderMessages(false);
+		resetMessageWindow();
 		setIsComposingNew(true);
 		setSelectionMode(false);
 		setSelectedIds(new Set());
 	}
 
 	function closeMobileThread() {
+		resetMessageWindow();
 		setIsComposingNew(false);
 		setSelectedPhone(null);
 		setSelectionMode(false);
@@ -340,7 +351,14 @@ export function MessageConsole() {
 			setSelectedPhone(recipient);
 			setPhoneNumber(recipient);
 			setIsComposingNew(false);
-			await Promise.all([loadMessagesForPhone(recipient), loadConversations()]);
+			const windowSize =
+				recipient === selectedPhone
+					? Math.max(MESSAGE_PAGE_SIZE, loadedMessageCountRef.current)
+					: MESSAGE_PAGE_SIZE;
+			await Promise.all([
+				loadMessagesForPhone(recipient, windowSize),
+				loadConversations(),
+			]);
 		} catch (err) {
 			console.error(err);
 		} finally {

@@ -43,8 +43,7 @@ pub struct Message {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct MessageFilter {
     pub limit: Option<u32>,
-    pub before_timestamp: Option<String>,
-    pub before_id: Option<i64>,
+    pub before: Option<MessageCursor>,
     pub phone_number: Option<String>,
     pub q: Option<String>,
     pub direction: Option<MessageDirection>,
@@ -52,6 +51,12 @@ pub struct MessageFilter {
     pub unread: Option<bool>,
     pub from: Option<String>,
     pub to: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub enum MessageCursor {
+    Timeline { timestamp: String, id: i64 },
+    LegacyId(i64),
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
