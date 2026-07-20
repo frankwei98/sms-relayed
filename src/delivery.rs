@@ -126,20 +126,16 @@ async fn process_delivery_batch(
 
     let mut claimed_count = rows.len();
     let mut tasks = tokio::task::JoinSet::new();
-    while tasks.len() < concurrency {
-        let Some(row) = rows.pop_front() else {
-            break;
-        };
-        spawn_delivery_task(
-            &mut tasks,
-            store,
-            config,
-            client,
-            shell_runner,
-            shell_timeout,
-            row,
-        );
-    }
+    fill_delivery_slots(
+        &mut tasks,
+        &mut rows,
+        concurrency,
+        store,
+        config,
+        client,
+        shell_runner,
+        shell_timeout,
+    );
 
     let mut first_error = None;
     while let Some(result) = tasks.join_next().await {
@@ -163,17 +159,16 @@ async fn process_delivery_batch(
             }
         }
 
-        if let Some(row) = rows.pop_front() {
-            spawn_delivery_task(
-                &mut tasks,
-                store,
-                config,
-                client,
-                shell_runner,
-                shell_timeout,
-                row,
-            );
-        }
+        fill_delivery_slots(
+            &mut tasks,
+            &mut rows,
+            concurrency,
+            store,
+            config,
+            client,
+            shell_runner,
+            shell_timeout,
+        );
     }
     if let Some(error) = first_error {
         return Err(error);
@@ -201,6 +196,32 @@ fn claim_delivery_batch(store: &MessageStore, config: &AppConfig) -> Result<Vec<
         log::debug!("delivery worker claimed batch; count={count}");
     }
     Ok(rows)
+}
+
+fn fill_delivery_slots(
+    tasks: &mut tokio::task::JoinSet<Result<()>>,
+    rows: &mut VecDeque<DeliveryRow>,
+    concurrency: usize,
+    store: &MessageStore,
+    config: &AppConfig,
+    client: &reqwest::Client,
+    shell_runner: &Arc<dyn ProcessRunner>,
+    shell_timeout: Duration,
+) {
+    while tasks.len() < concurrency {
+        let Some(row) = rows.pop_front() else {
+            break;
+        };
+        spawn_delivery_task(
+            tasks,
+            store,
+            config,
+            client,
+            shell_runner,
+            shell_timeout,
+            row,
+        );
+    }
 }
 
 fn spawn_delivery_task(
@@ -838,6 +859,48 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(200), runner.wait_for_calls(10))
             .await
             .expect("a free slot should claim beyond the buffered batch");
+        assert_eq!(runner.max_active.load(Ordering::SeqCst), 2);
+        worker.abort();
+    }
+
+    #[tokio::test]
+    async fn worker_refills_concurrency_after_an_initial_single_delivery() {
+        let store = MessageStore::open_in_memory().unwrap();
+        let config = shell_config(1, 2);
+        store
+            .insert_message_with_deliveries(
+                NewMessage::inbound("+1", "initial delivery"),
+                &config.forward.enabled,
+            )
+            .unwrap();
+        let runner = Arc::new(RecordingRunner::with_delays(vec![
+            Duration::from_millis(100);
+            6
+        ]));
+        let worker = tokio::spawn(run_delivery_worker(
+            store.clone(),
+            config.clone(),
+            Arc::new(reqwest::Client::new()),
+            runner.clone(),
+            Duration::from_secs(1),
+            DeliveryWakeup::new(),
+        ));
+        tokio::time::timeout(Duration::from_secs(1), runner.wait_for_calls(1))
+            .await
+            .unwrap();
+
+        for index in 0..5 {
+            store
+                .insert_message_with_deliveries(
+                    NewMessage::inbound("+1", &format!("burst {index}")),
+                    &config.forward.enabled,
+                )
+                .unwrap();
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), runner.wait_for_calls(3))
+            .await
+            .expect("burst deliveries should start promptly");
         assert_eq!(runner.max_active.load(Ordering::SeqCst), 2);
         worker.abort();
     }
