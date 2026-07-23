@@ -11,7 +11,9 @@ use tokio::sync::Notify;
 use crate::config::AppConfig;
 use crate::forward::ForwardOutcome;
 use crate::runner::ProcessRunner;
-use crate::storage::{DeliveryRow, ForwardAttemptOutcome, MessageStore, NewForwardAttemptSample};
+use crate::storage::{
+    DeliveryCompletion, DeliveryRow, ForwardAttemptOutcome, MessageStore, NewForwardAttemptSample,
+};
 
 const LEASE_SECS: u64 = 90;
 const RETRY_INITIAL_DELAY: u64 = 30;
@@ -21,6 +23,14 @@ const SAFETY_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 const WORKER_ERROR_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const WORKER_ERROR_MAX_DELAY: Duration = Duration::from_secs(30);
 const CLAIMED_WAVES_PER_BATCH: usize = 4;
+
+struct DeliveryTaskContext<'a> {
+    store: &'a MessageStore,
+    config: &'a AppConfig,
+    client: &'a reqwest::Client,
+    shell_runner: &'a Arc<dyn ProcessRunner>,
+    shell_timeout: Duration,
+}
 
 #[derive(Clone, Default)]
 pub struct DeliveryWakeup {
@@ -126,16 +136,14 @@ async fn process_delivery_batch(
 
     let mut claimed_count = rows.len();
     let mut tasks = tokio::task::JoinSet::new();
-    fill_delivery_slots(
-        &mut tasks,
-        &mut rows,
-        concurrency,
+    let task_context = DeliveryTaskContext {
         store,
         config,
         client,
         shell_runner,
         shell_timeout,
-    );
+    };
+    fill_delivery_slots(&mut tasks, &mut rows, concurrency, &task_context);
 
     let mut first_error = None;
     while let Some(result) = tasks.join_next().await {
@@ -159,16 +167,7 @@ async fn process_delivery_batch(
             }
         }
 
-        fill_delivery_slots(
-            &mut tasks,
-            &mut rows,
-            concurrency,
-            store,
-            config,
-            client,
-            shell_runner,
-            shell_timeout,
-        );
+        fill_delivery_slots(&mut tasks, &mut rows, concurrency, &task_context);
     }
     if let Some(error) = first_error {
         return Err(error);
@@ -202,41 +201,26 @@ fn fill_delivery_slots(
     tasks: &mut tokio::task::JoinSet<Result<()>>,
     rows: &mut VecDeque<DeliveryRow>,
     concurrency: usize,
-    store: &MessageStore,
-    config: &AppConfig,
-    client: &reqwest::Client,
-    shell_runner: &Arc<dyn ProcessRunner>,
-    shell_timeout: Duration,
+    context: &DeliveryTaskContext<'_>,
 ) {
     while tasks.len() < concurrency {
         let Some(row) = rows.pop_front() else {
             break;
         };
-        spawn_delivery_task(
-            tasks,
-            store,
-            config,
-            client,
-            shell_runner,
-            shell_timeout,
-            row,
-        );
+        spawn_delivery_task(tasks, context, row);
     }
 }
 
 fn spawn_delivery_task(
     tasks: &mut tokio::task::JoinSet<Result<()>>,
-    store: &MessageStore,
-    config: &AppConfig,
-    client: &reqwest::Client,
-    shell_runner: &Arc<dyn ProcessRunner>,
-    shell_timeout: Duration,
+    context: &DeliveryTaskContext<'_>,
     row: DeliveryRow,
 ) {
-    let store = store.clone();
-    let config = config.clone();
-    let client = client.clone();
-    let runner = shell_runner.clone();
+    let store = context.store.clone();
+    let config = context.config.clone();
+    let client = context.client.clone();
+    let runner = context.shell_runner.clone();
+    let shell_timeout = context.shell_timeout;
     tasks.spawn(async move {
         process_delivery_inner(&store, &config, &client, &*runner, shell_timeout, row).await
     });
@@ -313,10 +297,12 @@ async fn process_delivery_inner(
                 client,
                 shell_runner,
                 shell_timeout,
-                p,
-                &message.phone_number,
-                &message.body,
-                &message.timestamp,
+                ForwardRequest {
+                    profile: p,
+                    phone_number: &message.phone_number,
+                    body: &message.body,
+                    timestamp: &message.timestamp,
+                },
                 config,
             )
             .await;
@@ -358,55 +344,55 @@ async fn process_delivery_inner(
     match outcome {
         ForwardOutcome::Success => {
             info!("delivery {}: success", row.id);
-            store.complete_delivery_with_attempt(
-                row.id,
-                "succeeded",
-                None,
-                row.attempt_count + 1,
-                None,
+            store.complete_delivery_with_attempt(DeliveryCompletion {
+                id: row.id,
+                state: "succeeded",
+                error: None,
+                attempt_count: row.attempt_count + 1,
+                next_attempt_at: None,
                 lease_token,
                 sample,
-            )?;
+            })?;
         }
         ForwardOutcome::PermanentFailure(_) => {
             error!("delivery {}: permanent failure", row.id);
-            store.complete_delivery_with_attempt(
-                row.id,
-                "permanent_failed",
-                error_code.as_deref(),
-                row.attempt_count + 1,
-                None,
+            store.complete_delivery_with_attempt(DeliveryCompletion {
+                id: row.id,
+                state: "permanent_failed",
+                error: error_code.as_deref(),
+                attempt_count: row.attempt_count + 1,
+                next_attempt_at: None,
                 lease_token,
                 sample,
-            )?;
+            })?;
         }
         ForwardOutcome::TransientFailure(_) => {
             let age = delivery_age(&row.created_at);
             if age > RETRY_MAX_AGE {
                 error!("delivery {}: max age exceeded, permanent failure", row.id);
-                store.complete_delivery_with_attempt(
-                    row.id,
-                    "permanent_failed",
-                    Some("max_age_exceeded"),
-                    row.attempt_count + 1,
-                    None,
+                store.complete_delivery_with_attempt(DeliveryCompletion {
+                    id: row.id,
+                    state: "permanent_failed",
+                    error: Some("max_age_exceeded"),
+                    attempt_count: row.attempt_count + 1,
+                    next_attempt_at: None,
                     lease_token,
                     sample,
-                )?;
+                })?;
             } else {
                 info!(
                     "delivery {}: transient failure, retry at {}",
                     row.id, next_attempt_at
                 );
-                store.complete_delivery_with_attempt(
-                    row.id,
-                    "retry_wait",
-                    error_code.as_deref(),
-                    row.attempt_count + 1,
-                    Some(&next_attempt_at),
+                store.complete_delivery_with_attempt(DeliveryCompletion {
+                    id: row.id,
+                    state: "retry_wait",
+                    error: error_code.as_deref(),
+                    attempt_count: row.attempt_count + 1,
+                    next_attempt_at: Some(&next_attempt_at),
                     lease_token,
                     sample,
-                )?;
+                })?;
             }
         }
     }
@@ -491,15 +477,16 @@ fn map_outcome_to_delivery_state(outcome: &ForwardOutcome) -> (&'static str, Opt
 }
 
 fn standardize_failure(msg: &str) -> String {
-    if msg == "http_timeout" || msg == "shell_timeout" {
-        msg.to_string()
-    } else if msg.starts_with("http_status_")
+    if msg == "http_timeout"
+        || msg == "shell_timeout"
+        || msg.starts_with("http_status_")
         || msg.starts_with("http_")
         || msg.starts_with("provider_")
         || msg.starts_with("shell_")
+        || msg == "message_not_found"
+        || msg == "profile_missing"
+        || msg == "max_age_exceeded"
     {
-        msg.to_string()
-    } else if msg == "message_not_found" || msg == "profile_missing" || msg == "max_age_exceeded" {
         msg.to_string()
     } else if msg.contains("shell timeout") {
         "shell_timeout".to_string()
@@ -516,16 +503,26 @@ fn ensure_completed(completed: bool) -> Result<()> {
     }
 }
 
+struct ForwardRequest<'a> {
+    profile: &'a crate::config::ChannelProfile,
+    phone_number: &'a str,
+    body: &'a str,
+    timestamp: &'a str,
+}
+
 async fn forward_to_profile(
     client: &reqwest::Client,
     shell_runner: &dyn ProcessRunner,
     shell_timeout: Duration,
-    profile: &crate::config::ChannelProfile,
-    tel_number: &str,
-    body: &str,
-    timestamp: &str,
+    request: ForwardRequest<'_>,
     config: &AppConfig,
 ) -> ForwardOutcome {
+    let ForwardRequest {
+        profile,
+        phone_number: tel_number,
+        body,
+        timestamp,
+    } = request;
     let device_name =
         if config.app.device_name == "*Host*Name*" || config.app.device_name.is_empty() {
             crate::util::hostname()
@@ -598,10 +595,12 @@ async fn forward_to_profile(
             crate::forward::shell::send(
                 shell_runner,
                 shell_timeout,
-                tel_number,
-                body,
-                timestamp,
-                &device_name,
+                crate::forward::shell::ShellMessage {
+                    tel_number,
+                    sms_text: body,
+                    sms_date: timestamp,
+                    device_name: &device_name,
+                },
                 pc,
                 config,
             )

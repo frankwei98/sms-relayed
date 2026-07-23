@@ -7,27 +7,31 @@ use crate::forward::ForwardOutcome;
 use crate::runner::ProcessRunner;
 use crate::smscode;
 
+pub struct ShellMessage<'a> {
+    pub tel_number: &'a str,
+    pub sms_text: &'a str,
+    pub sms_date: &'a str,
+    pub device_name: &'a str,
+}
+
 pub async fn send(
     runner: &dyn ProcessRunner,
     shell_timeout: Duration,
-    tel_number: &str,
-    sms_text: &str,
-    sms_date: &str,
-    device_name: &str,
+    message: ShellMessage<'_>,
     profile: &ShellConfig,
     app_config: &AppConfig,
 ) -> ForwardOutcome {
     let shell_path = profile.path.as_str();
 
-    let (_, code, code_from) = smscode::get_sms_code_str(sms_text, app_config);
+    let (_, code, code_from) = smscode::get_sms_code_str(message.sms_text, app_config);
 
     let arguments = [
-        tel_number,
-        sms_date,
-        sms_text,
+        message.tel_number,
+        message.sms_date,
+        message.sms_text,
         code.as_str(),
         code_from.as_str(),
-        device_name,
+        message.device_name,
     ];
     let status = match runner
         .run_command(shell_path, &arguments, shell_timeout)
@@ -97,10 +101,12 @@ mod tests {
         let outcome = send(
             &RealProcessRunner,
             Duration::from_secs(5),
-            output.to_str().unwrap(),
-            &body,
-            "2026-07-23T00:00:00Z",
-            "device",
+            ShellMessage {
+                tel_number: output.to_str().unwrap(),
+                sms_text: &body,
+                sms_date: "2026-07-23T00:00:00Z",
+                device_name: "device",
+            },
             &ShellConfig {
                 path: script.display().to_string(),
             },
