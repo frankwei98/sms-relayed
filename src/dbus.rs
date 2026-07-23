@@ -167,11 +167,11 @@ async fn resolve_monitor_path(
 async fn run_subscription<F, Fut>(
     actual_path: &str,
     config: &AppConfig,
-    on_received: &mut F,
+    on_received: F,
 ) -> Result<()>
 where
-    F: FnMut(crate::dbus::ReceivedSms) -> Fut + Send,
-    Fut: std::future::Future<Output = Result<()>> + Send,
+    F: Fn(ReceivedSms) -> Fut + Send + Clone + 'static,
+    Fut: std::future::Future<Output = Result<()>> + Send + 'static,
 {
     let connection = Connection::system().await?;
 
@@ -210,8 +210,10 @@ where
         .collect();
 
     let mut stream = zbus::MessageStream::from(connection.clone());
+    let mut inbound_tasks = tokio::task::JoinSet::new();
 
     while let Some(msg) = stream.next().await {
+        while inbound_tasks.try_join_next().is_some() {}
         let msg = msg?;
         let header = msg.header();
 
@@ -251,8 +253,18 @@ where
                 let is_received = body.1;
                 if is_received {
                     info!("SmsPath:\n{}", sms_path);
-                    handle_incoming_sms(&connection, &sms_path, &ignored_storage, on_received)
-                        .await?;
+                    let task_connection = connection.clone();
+                    let task_storage_filters = ignored_storage.clone();
+                    let task_handler = on_received.clone();
+                    spawn_inbound_task(&mut inbound_tasks, async move {
+                        handle_incoming_sms(
+                            &task_connection,
+                            &sms_path,
+                            &task_storage_filters,
+                            task_handler,
+                        )
+                        .await
+                    });
                 }
             }
         }
@@ -264,10 +276,10 @@ async fn handle_incoming_sms<F, Fut>(
     connection: &Connection,
     sms_path: &str,
     storage_filters: &[StorageType],
-    on_received: &mut F,
+    on_received: F,
 ) -> Result<()>
 where
-    F: FnMut(crate::dbus::ReceivedSms) -> Fut + Send,
+    F: Fn(ReceivedSms) -> Fut + Send,
     Fut: std::future::Future<Output = Result<()>> + Send,
 {
     let mut retries = 0;
@@ -330,6 +342,18 @@ where
     }
 }
 
+fn spawn_inbound_task(
+    tasks: &mut tokio::task::JoinSet<()>,
+    task: impl std::future::Future<Output = Result<()>> + Send + 'static,
+) {
+    tasks.spawn(async move {
+        if task.await.is_err() {
+            error!("incoming SMS processing task failed");
+            crate::monitoring::capture_failure("dbus", "dbus.inbound_processing_failed");
+        }
+    });
+}
+
 async fn add_match_rule(connection: &Connection, rule: &str) -> Result<()> {
     let args = (rule,);
     let call = connection.call_method(
@@ -355,7 +379,7 @@ pub async fn monitor_dbus_with_handler<F, Fut>(
     store: &MessageStore,
 ) -> Result<()>
 where
-    F: FnMut(ReceivedSms) -> Fut + Send + Clone + 'static,
+    F: Fn(ReceivedSms) -> Fut + Send + Clone + 'static,
     Fut: std::future::Future<Output = Result<()>> + Send + 'static,
 {
     println!("短信转发模式正在启动，正在连接系统 D-Bus。");
@@ -374,9 +398,7 @@ where
         let path = current_path
             .clone()
             .unwrap_or_else(|| configured_modem_path.to_string());
-        let mut cb = on_received.clone();
-
-        match run_subscription(&path, config, &mut cb).await {
+        match run_subscription(&path, config, on_received.clone()).await {
             Ok(()) => {
                 delay = Duration::from_secs(5);
             }
@@ -497,6 +519,10 @@ pub async fn send_sms_via_system(
 mod tests {
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::Arc;
+    use std::time::Duration as StdDuration;
+
+    use tokio::sync::Notify;
 
     use super::*;
     use crate::modem::{MmcliOutput, MmcliRunner, ModemError};
@@ -535,6 +561,31 @@ mod tests {
         assert!(modem_owner_changed(MM_DESTINATION, ":1.1", ":1.2"));
         assert!(!modem_owner_changed(MM_DESTINATION, ":1.1", ":1.1"));
         assert!(!modem_owner_changed("org.example.Other", ":1.1", ":1.2"));
+    }
+
+    #[tokio::test]
+    async fn slow_inbound_work_does_not_block_later_inbound_work() {
+        let first_started = Arc::new(Notify::new());
+        let second_completed = Arc::new(Notify::new());
+        let mut tasks = tokio::task::JoinSet::new();
+
+        let first_started_task = first_started.clone();
+        spawn_inbound_task(&mut tasks, async move {
+            first_started_task.notify_one();
+            std::future::pending::<Result<()>>().await
+        });
+        first_started.notified().await;
+
+        let second_completed_task = second_completed.clone();
+        spawn_inbound_task(&mut tasks, async move {
+            second_completed_task.notify_one();
+            Ok(())
+        });
+        tokio::time::timeout(StdDuration::from_millis(100), second_completed.notified())
+            .await
+            .expect("a later inbound SMS must not wait for an earlier slow task");
+        assert!(tasks.join_next().await.unwrap().is_ok());
+        tasks.abort_all();
     }
 
     #[tokio::test]
