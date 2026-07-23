@@ -11,7 +11,7 @@ use super::{ApiError, ApiResult, ApiState};
 #[derive(Deserialize)]
 #[serde(untagged)]
 pub enum CheckConfigPayload {
-    Json(AppConfig),
+    Json(Box<AppConfig>),
     Toml { toml: String },
 }
 

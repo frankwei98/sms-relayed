@@ -134,6 +134,7 @@ impl SessionStore {
         cookie
     }
 
+    #[cfg(test)]
     pub fn expire_for_test(&self, token: &str) {
         if let Some(expires) = self.inner.lock().unwrap().get_mut(token) {
             *expires = OffsetDateTime::UNIX_EPOCH;

@@ -108,9 +108,7 @@ fn version_output_matches_release(output: &str, release: &Release) -> bool {
 }
 
 fn build_commit_from_version_output(output: &str) -> Option<&str> {
-    let Some(build_version) = output.trim().strip_prefix("sms-relayed ") else {
-        return None;
-    };
+    let build_version = output.trim().strip_prefix("sms-relayed ")?;
     build_version
         .rsplit_once('+')
         .and_then(|(version, commit)| (!version.is_empty() && !commit.is_empty()).then_some(commit))

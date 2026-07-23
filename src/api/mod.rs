@@ -98,10 +98,6 @@ impl ApiError {
         Self::new(StatusCode::BAD_REQUEST, "bad_request", message)
     }
 
-    pub fn not_found(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::NOT_FOUND, "not_found", message)
-    }
-
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
     }
@@ -218,13 +214,13 @@ mod tests {
         cfg.api.enabled = true;
         cfg.api.password = "secret".to_string();
 
-        assert!(check_config_payload(CheckConfigPayload::Json(cfg.clone())).is_ok());
+        assert!(check_config_payload(CheckConfigPayload::Json(Box::new(cfg.clone()))).is_ok());
 
         let toml = toml::to_string_pretty(&cfg).unwrap();
         assert!(check_config_payload(CheckConfigPayload::Toml { toml }).is_ok());
 
         cfg.api.password.clear();
-        let err = check_config_payload(CheckConfigPayload::Json(cfg))
+        let err = check_config_payload(CheckConfigPayload::Json(Box::new(cfg)))
             .unwrap_err()
             .to_string();
         assert!(err.contains("api.password"));
@@ -261,7 +257,7 @@ mod route_tests {
             >,
         > {
             Box::pin(async move {
-                if args == &["--version"] {
+                if args == ["--version"] {
                     return Ok(crate::modem::MmcliOutput {
                         stdout: "mmcli 1.22.0\n".to_string(),
                         stderr: String::new(),

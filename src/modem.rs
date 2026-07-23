@@ -394,7 +394,7 @@ pub fn map_list_path_to_id(configured_path: &str, list_output: &str) -> Result<S
 pub fn path_drift_candidate(configured_path: &str, list_output: &str) -> Option<String> {
     let paths: Vec<String> = list_output
         .lines()
-        .filter_map(|line| line.trim().split_whitespace().next())
+        .filter_map(|line| line.split_whitespace().next())
         .filter(|path| path.starts_with("/org/freedesktop/ModemManager1/Modem/"))
         .filter(|path| *path != configured_path)
         .map(ToString::to_string)
@@ -1524,7 +1524,7 @@ mod service_tests {
             .status("/org/freedesktop/ModemManager1/Modem/0")
             .await;
 
-        assert_eq!(status.tool.available, false);
+        assert!(!status.tool.available);
         assert_eq!(status.health.status, HealthLevel::Unknown);
         assert!(status
             .health

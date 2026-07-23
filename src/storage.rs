@@ -83,6 +83,16 @@ pub struct NewForwardAttemptSample {
     pub error_code: Option<String>,
 }
 
+pub struct DeliveryCompletion<'a> {
+    pub id: i64,
+    pub state: &'a str,
+    pub error: Option<&'a str>,
+    pub attempt_count: i64,
+    pub next_attempt_at: Option<&'a str>,
+    pub lease_token: &'a str,
+    pub sample: NewForwardAttemptSample,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InboundInsertResult {
     Inserted(Message),
@@ -109,6 +119,7 @@ pub struct NewMessage {
 }
 
 impl NewMessage {
+    #[cfg(test)]
     pub fn inbound(phone_number: &str, body: &str) -> Self {
         Self {
             direction: MessageDirection::Inbound,
@@ -198,6 +209,7 @@ impl MessageStore {
         Ok(store)
     }
 
+    #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -498,6 +510,7 @@ impl MessageStore {
         insert_message_on(&conn, input)
     }
 
+    #[cfg(test)]
     pub fn insert_message_with_deliveries(
         &self,
         input: NewMessage,
@@ -536,11 +549,13 @@ impl MessageStore {
         }
     }
 
+    #[cfg(test)]
     pub fn count_messages(&self) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         Ok(conn.query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))?)
     }
 
+    #[cfg(test)]
     pub fn count_deliveries(&self) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         Ok(
@@ -550,6 +565,7 @@ impl MessageStore {
         )
     }
 
+    #[cfg(test)]
     pub fn get_delivery(&self, id: i64) -> Result<DeliveryRow> {
         let conn = self.conn.lock().unwrap();
         Ok(conn.query_row(
@@ -560,6 +576,7 @@ impl MessageStore {
         )?)
     }
 
+    #[cfg(test)]
     pub fn get_message(&self, id: i64) -> Result<Message> {
         let conn = self.conn.lock().unwrap();
         map_get(&conn, id)
@@ -686,6 +703,7 @@ impl MessageStore {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn insert_deliveries(&self, message_id: i64, profile_keys: &[String]) -> Result<()> {
         let now = now_string();
         let conn = self.conn.lock().unwrap();
@@ -869,6 +887,7 @@ impl MessageStore {
         Ok(InboundInsertResult::Inserted(msg))
     }
 
+    #[cfg(test)]
     pub fn record_forward_attempt(
         &self,
         sample: NewForwardAttemptSample,
@@ -963,14 +982,17 @@ impl MessageStore {
 
     pub fn complete_delivery_with_attempt(
         &self,
-        id: i64,
-        state: &str,
-        error: Option<&str>,
-        attempt_count: i64,
-        next_attempt_at: Option<&str>,
-        lease_token: &str,
-        sample: NewForwardAttemptSample,
+        completion: DeliveryCompletion<'_>,
     ) -> Result<bool> {
+        let DeliveryCompletion {
+            id,
+            state,
+            error,
+            attempt_count,
+            next_attempt_at,
+            lease_token,
+            sample,
+        } = completion;
         let now = now_string();
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
@@ -2273,14 +2295,14 @@ mod tests {
             .unwrap();
 
         let completed = store
-            .complete_delivery_with_attempt(
-                delivery.id,
-                "succeeded",
-                None,
-                1,
-                None,
-                "wrong-lease-token",
-                NewForwardAttemptSample {
+            .complete_delivery_with_attempt(DeliveryCompletion {
+                id: delivery.id,
+                state: "succeeded",
+                error: None,
+                attempt_count: 1,
+                next_attempt_at: None,
+                lease_token: "wrong-lease-token",
+                sample: NewForwardAttemptSample {
                     profile_key: delivery.profile_key,
                     delivery_id: Some(delivery.id),
                     attempt_number: 1,
@@ -2291,7 +2313,7 @@ mod tests {
                     outcome: ForwardAttemptOutcome::Success,
                     error_code: None,
                 },
-            )
+            })
             .unwrap();
 
         assert!(!completed);
@@ -2658,14 +2680,14 @@ mod tests {
 
         // Success: last_error stays NULL
         store
-            .complete_delivery_with_attempt(
-                d1.id,
-                "succeeded",
-                None,
-                1,
-                None,
-                &d1.lease_token.as_ref().unwrap(),
-                NewForwardAttemptSample {
+            .complete_delivery_with_attempt(DeliveryCompletion {
+                id: d1.id,
+                state: "succeeded",
+                error: None,
+                attempt_count: 1,
+                next_attempt_at: None,
+                lease_token: d1.lease_token.as_ref().unwrap(),
+                sample: NewForwardAttemptSample {
                     profile_key: d1.profile_key.clone(),
                     delivery_id: Some(d1.id),
                     attempt_number: 1,
@@ -2676,19 +2698,19 @@ mod tests {
                     outcome: ForwardAttemptOutcome::Success,
                     error_code: None,
                 },
-            )
+            })
             .unwrap();
 
         // Permanent failure: last_error gets the error_code
         store
-            .complete_delivery_with_attempt(
-                d2.id,
-                "permanent_failed",
-                Some("shell_exit_nonzero"),
-                1,
-                None,
-                &d2.lease_token.as_ref().unwrap(),
-                NewForwardAttemptSample {
+            .complete_delivery_with_attempt(DeliveryCompletion {
+                id: d2.id,
+                state: "permanent_failed",
+                error: Some("shell_exit_nonzero"),
+                attempt_count: 1,
+                next_attempt_at: None,
+                lease_token: d2.lease_token.as_ref().unwrap(),
+                sample: NewForwardAttemptSample {
                     profile_key: d2.profile_key.clone(),
                     delivery_id: Some(d2.id),
                     attempt_number: 1,
@@ -2699,7 +2721,7 @@ mod tests {
                     outcome: ForwardAttemptOutcome::PermanentFailure,
                     error_code: Some("shell_exit_nonzero".to_string()),
                 },
-            )
+            })
             .unwrap();
         assert_eq!(
             store.get_delivery(d2.id).unwrap().last_error.as_deref(),
@@ -2709,14 +2731,14 @@ mod tests {
 
         // Transient failure: last_error gets the error_code
         store
-            .complete_delivery_with_attempt(
-                d3.id,
-                "retry_wait",
-                Some("http_timeout"),
-                1,
-                Some("2099-01-02T00:00:00Z"),
-                &d3.lease_token.as_ref().unwrap(),
-                NewForwardAttemptSample {
+            .complete_delivery_with_attempt(DeliveryCompletion {
+                id: d3.id,
+                state: "retry_wait",
+                error: Some("http_timeout"),
+                attempt_count: 1,
+                next_attempt_at: Some("2099-01-02T00:00:00Z"),
+                lease_token: d3.lease_token.as_ref().unwrap(),
+                sample: NewForwardAttemptSample {
                     profile_key: d3.profile_key.clone(),
                     delivery_id: Some(d3.id),
                     attempt_number: 1,
@@ -2727,7 +2749,7 @@ mod tests {
                     outcome: ForwardAttemptOutcome::TransientFailure,
                     error_code: Some("http_timeout".to_string()),
                 },
-            )
+            })
             .unwrap();
         assert_eq!(
             store.get_delivery(d3.id).unwrap().last_error.as_deref(),

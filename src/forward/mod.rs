@@ -104,10 +104,12 @@ mod tests {
         let outcome = crate::forward::shell::send(
             &TimeoutRunner,
             Duration::from_secs(1),
-            "+1",
-            "body",
-            "2026-01-01T00:00:00Z",
-            "device",
+            crate::forward::shell::ShellMessage {
+                tel_number: "+1",
+                sms_text: "body",
+                sms_date: "2026-01-01T00:00:00Z",
+                device_name: "device",
+            },
             &crate::config::ShellConfig {
                 path: "/bin/sleep".to_string(),
             },
@@ -125,10 +127,12 @@ mod tests {
         let outcome = crate::forward::shell::send(
             &ShellFailedRunner,
             Duration::from_secs(1),
-            "+1",
-            "body",
-            "2026-01-01T00:00:00Z",
-            "device",
+            crate::forward::shell::ShellMessage {
+                tel_number: "+1",
+                sms_text: "body",
+                sms_date: "2026-01-01T00:00:00Z",
+                device_name: "device",
+            },
             &crate::config::ShellConfig {
                 path: "/bin/does-not-exist".to_string(),
             },
