@@ -71,7 +71,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
     let retention_worker = run_retention_worker(store.clone(), config.clone());
 
     if config.api.enabled {
-        let sms_sender = Arc::new(dbus::SystemSmsSender::connect().await?);
+        let sms_sender = Arc::new(dbus::SystemSmsSender::new());
         let api_state = ApiState {
             config: Arc::new(config.clone()),
             config_path: config_path.to_path_buf(),
