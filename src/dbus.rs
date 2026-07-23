@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::io::{self, Write};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -37,16 +38,24 @@ pub trait SmsSender: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<SendSmsOutcome>> + Send + 'a>>;
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct SystemSmsSender {
-    connection: Connection,
+    connection: Arc<tokio::sync::Mutex<Option<Connection>>>,
 }
 
 impl SystemSmsSender {
-    pub async fn connect() -> Result<Self> {
-        Ok(Self {
-            connection: Connection::system().await?,
-        })
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    async fn get_or_connect(&self) -> Result<Connection> {
+        let mut connection = self.connection.lock().await;
+        if let Some(connection) = connection.as_ref() {
+            return Ok(connection.clone());
+        }
+        let new_connection = Connection::system().await?;
+        *connection = Some(new_connection.clone());
+        Ok(new_connection)
     }
 }
 
@@ -57,13 +66,17 @@ impl SmsSender for SystemSmsSender {
         tel_number: &'a str,
         sms_text: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<SendSmsOutcome>> + Send + 'a>> {
-        Box::pin(send_sms(
-            &self.connection,
-            modem_path,
-            tel_number,
-            sms_text,
-            SendTarget::Api,
-        ))
+        Box::pin(async move {
+            let connection = self.get_or_connect().await?;
+            send_sms(
+                &connection,
+                modem_path,
+                tel_number,
+                sms_text,
+                SendTarget::Api,
+            )
+            .await
+        })
     }
 }
 
@@ -549,6 +562,12 @@ mod tests {
 
     use super::*;
     use crate::modem::{MmcliOutput, MmcliRunner, ModemError};
+
+    #[test]
+    fn system_sms_sender_defers_connecting_until_a_send_is_requested() {
+        let sender = SystemSmsSender::new();
+        assert!(sender.connection.try_lock().unwrap().is_none());
+    }
 
     #[derive(Clone)]
     struct IdentityRunner;
