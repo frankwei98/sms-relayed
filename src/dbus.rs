@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::io::{self, Write};
+use std::pin::Pin;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -24,6 +26,45 @@ pub enum SendTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendSmsOutcome {
     pub modem_sms_path: String,
+}
+
+pub trait SmsSender: Send + Sync {
+    fn send<'a>(
+        &'a self,
+        modem_path: &'a str,
+        tel_number: &'a str,
+        sms_text: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<SendSmsOutcome>> + Send + 'a>>;
+}
+
+#[derive(Clone)]
+pub struct SystemSmsSender {
+    connection: Connection,
+}
+
+impl SystemSmsSender {
+    pub async fn connect() -> Result<Self> {
+        Ok(Self {
+            connection: Connection::system().await?,
+        })
+    }
+}
+
+impl SmsSender for SystemSmsSender {
+    fn send<'a>(
+        &'a self,
+        modem_path: &'a str,
+        tel_number: &'a str,
+        sms_text: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<SendSmsOutcome>> + Send + 'a>> {
+        Box::pin(send_sms(
+            &self.connection,
+            modem_path,
+            tel_number,
+            sms_text,
+            SendTarget::Api,
+        ))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -495,22 +536,6 @@ pub async fn send_sms(
     Ok(SendSmsOutcome {
         modem_sms_path: sms_path_str.to_string(),
     })
-}
-
-pub async fn send_sms_via_system(
-    modem_path: &str,
-    tel_number: &str,
-    sms_text: &str,
-) -> Result<SendSmsOutcome> {
-    let connection = Connection::system().await?;
-    send_sms(
-        &connection,
-        modem_path,
-        tel_number,
-        sms_text,
-        SendTarget::Api,
-    )
-    .await
 }
 
 #[cfg(test)]

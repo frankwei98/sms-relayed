@@ -30,6 +30,37 @@ pub struct ApiState {
     pub started_at: Instant,
     pub sessions: auth::SessionStore,
     pub modem: crate::modem::ModemService,
+    pub sms_sender: Arc<dyn crate::dbus::SmsSender>,
+}
+
+#[cfg(test)]
+pub(crate) fn test_sms_sender() -> Arc<dyn crate::dbus::SmsSender> {
+    Arc::new(TestSmsSender)
+}
+
+#[cfg(test)]
+struct TestSmsSender;
+
+#[cfg(test)]
+impl crate::dbus::SmsSender for TestSmsSender {
+    fn send<'a>(
+        &'a self,
+        _modem_path: &'a str,
+        _tel_number: &'a str,
+        _sms_text: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = anyhow::Result<crate::dbus::SendSmsOutcome>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async {
+            Ok(crate::dbus::SendSmsOutcome {
+                modem_sms_path: "/org/freedesktop/ModemManager1/SMS/test".to_string(),
+            })
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -258,6 +289,7 @@ mod route_tests {
             started_at: std::time::Instant::now(),
             sessions: SessionStore::default(),
             modem: crate::modem::ModemService::new_with_runner(ApiTestRunner),
+            sms_sender: test_sms_sender(),
         }
     }
 
@@ -396,6 +428,7 @@ mod route_tests {
             started_at: std::time::Instant::now(),
             sessions: SessionStore::default(),
             modem: crate::modem::ModemService::new_with_runner(ApiTestRunner),
+            sms_sender: test_sms_sender(),
         };
         let token = state.sessions.create_session();
         (state, token)

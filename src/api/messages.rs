@@ -130,11 +130,13 @@ async fn send_message(
     if req.body.trim().is_empty() {
         return Err(ApiError::bad_request("body is required"));
     }
+    let phone_number = req.phone_number.trim().to_string();
+    let body = req.body;
     let now = now_string();
     let new = NewMessage {
         direction: MessageDirection::Outbound,
-        phone_number: req.phone_number.trim().to_string(),
-        body: req.body.clone(),
+        phone_number: phone_number.clone(),
+        body: body.clone(),
         timestamp: now.clone(),
         status: MessageStatus::Sending,
         source: MessageSource::Web,
@@ -143,32 +145,27 @@ async fn send_message(
         error: None,
         inbound_dedupe_key: None,
     };
-    let msg = state.store.insert_message(new)?;
+    let store = state.store.clone();
+    let msg = tokio::task::spawn_blocking(move || store.insert_message(new))
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))??;
     state.events.send(AppEvent::MessageCreated(msg.clone()));
 
-    match crate::dbus::send_sms_via_system(
-        &state.config.app.modem_path,
-        &req.phone_number,
-        &req.body,
-    )
-    .await
+    let modem_path = state.config.app.modem_path.clone();
+    let (status, error) = match state
+        .sms_sender
+        .send(&modem_path, &phone_number, &body)
+        .await
     {
-        Ok(_outcome) => {
-            let updated = state
-                .store
-                .update_status(msg.id, MessageStatus::Sent, None)?;
-            state.events.send(AppEvent::MessageUpdated(updated.clone()));
-            Ok(Json(updated))
-        }
-        Err(err) => {
-            let updated =
-                state
-                    .store
-                    .update_status(msg.id, MessageStatus::Failed, Some(err.to_string()))?;
-            state.events.send(AppEvent::MessageUpdated(updated.clone()));
-            Ok(Json(updated))
-        }
-    }
+        Ok(_) => (MessageStatus::Sent, None),
+        Err(err) => (MessageStatus::Failed, Some(err.to_string())),
+    };
+    let store = state.store.clone();
+    let updated = tokio::task::spawn_blocking(move || store.update_status(msg.id, status, error))
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))??;
+    state.events.send(AppEvent::MessageUpdated(updated.clone()));
+    Ok(Json(updated))
 }
 
 async fn mark_read(State(state): State<ApiState>, Path(id): Path<i64>) -> ApiResult<Json<Message>> {
@@ -366,7 +363,40 @@ fn now_string() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct RecordingSmsSender {
+        calls: Arc<Mutex<Vec<(String, String, String)>>>,
+    }
+
+    impl crate::dbus::SmsSender for RecordingSmsSender {
+        fn send<'a>(
+            &'a self,
+            modem_path: &'a str,
+            tel_number: &'a str,
+            sms_text: &'a str,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<crate::dbus::SendSmsOutcome>> + Send + 'a>>
+        {
+            let calls = self.calls.clone();
+            let modem_path = modem_path.to_string();
+            let tel_number = tel_number.to_string();
+            let sms_text = sms_text.to_string();
+            Box::pin(async move {
+                calls
+                    .lock()
+                    .unwrap()
+                    .push((modem_path, tel_number, sms_text));
+                Ok(crate::dbus::SendSmsOutcome {
+                    modem_sms_path: "/org/freedesktop/ModemManager1/SMS/test".to_string(),
+                })
+            })
+        }
+    }
 
     #[test]
     fn routes_build_without_panicking() {
@@ -385,6 +415,47 @@ mod tests {
             ..MessageQuery::default()
         })
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn send_message_uses_the_state_sms_sender() {
+        let sender = RecordingSmsSender::default();
+        let store = crate::storage::MessageStore::open_in_memory().unwrap();
+        let state = super::super::ApiState {
+            config: std::sync::Arc::new(crate::config::AppConfig::default()),
+            config_path: std::path::PathBuf::from("/tmp/not-used.toml"),
+            store: store.clone(),
+            events: crate::events::EventBus::new(),
+            started_at: std::time::Instant::now(),
+            sessions: super::super::auth::SessionStore::default(),
+            modem: crate::modem::ModemService::new(),
+            sms_sender: Arc::new(sender.clone()),
+        };
+
+        let message = send_message(
+            State(state),
+            Json(SendRequest {
+                phone_number: "+15551234567".to_string(),
+                body: "test body".to_string(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(message.status, MessageStatus::Sent);
+        assert_eq!(
+            sender.calls.lock().unwrap().as_slice(),
+            [(
+                "/org/freedesktop/ModemManager1/Modem/0".to_string(),
+                "+15551234567".to_string(),
+                "test body".to_string(),
+            )]
+        );
+        assert_eq!(
+            store.get_message(message.id).unwrap().status,
+            MessageStatus::Sent
+        );
     }
 
     #[tokio::test]
@@ -407,6 +478,7 @@ mod tests {
             started_at: std::time::Instant::now(),
             sessions: super::super::auth::SessionStore::default(),
             modem: crate::modem::ModemService::new(),
+            sms_sender: super::super::test_sms_sender(),
         };
         let app = routes().with_state(state);
 
@@ -498,6 +570,7 @@ mod tests {
             started_at: std::time::Instant::now(),
             sessions: super::super::auth::SessionStore::default(),
             modem: crate::modem::ModemService::new(),
+            sms_sender: super::super::test_sms_sender(),
         };
 
         let response = mark_conversation_read(State(state), Path("+1".to_string()))
