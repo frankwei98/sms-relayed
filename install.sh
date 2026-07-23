@@ -61,6 +61,48 @@ download_file() {
   fi
 }
 
+verify_download_checksum() {
+  binary="$1"
+  checksum_file="$2"
+  expected_name="$3"
+
+  if ! have sha256sum; then
+    printf '%s\n' "error: sha256sum is required to verify the release binary" >&2
+    return 1
+  fi
+  if [ ! -s "$checksum_file" ]; then
+    printf '%s\n' "error: release checksum file is empty" >&2
+    return 1
+  fi
+
+  IFS=' ' read -r expected_checksum checksum_name extra < "$checksum_file" || true
+  if [ -z "${expected_checksum:-}" ] || [ -z "${checksum_name:-}" ] || [ -n "${extra:-}" ]; then
+    printf '%s\n' "error: release checksum file has an invalid format" >&2
+    return 1
+  fi
+  case "$expected_checksum" in
+    *[!0123456789abcdefABCDEF]*)
+      printf '%s\n' "error: release checksum is not hexadecimal" >&2
+      return 1
+      ;;
+  esac
+  if [ "$(printf '%s' "$expected_checksum" | wc -c | tr -d ' ')" != "64" ]; then
+    printf '%s\n' "error: release checksum has an invalid length" >&2
+    return 1
+  fi
+  if [ "$checksum_name" != "$expected_name" ]; then
+    printf '%s\n' "error: release checksum does not match $expected_name" >&2
+    return 1
+  fi
+
+  expected_checksum="$(printf '%s' "$expected_checksum" | tr '[:upper:]' '[:lower:]')"
+  actual_checksum="$(sha256sum "$binary" | awk '{print $1}')"
+  if [ "$actual_checksum" != "$expected_checksum" ]; then
+    printf '%s\n' "error: downloaded binary failed SHA-256 verification" >&2
+    return 1
+  fi
+}
+
 binary_version() {
   bin="$1"
   if [ ! -x "$bin" ]; then
@@ -120,7 +162,7 @@ resolve_tag_from_json() {
     sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"//; s/"$//'
 }
 
-resolve_asset_url() {
+resolve_asset_urls() {
   suffix="$1"
   if [ "$VERSION" = "latest" ]; then
     api="https://api.github.com/repos/$REPO/releases/latest"
@@ -130,18 +172,21 @@ resolve_asset_url() {
   release_json="$(fetch_url "$api")"
   release_tag="$(printf '%s\n' "$release_json" | resolve_tag_from_json)"
   asset_url="$(printf '%s\n' "$release_json" | resolve_asset_url_from_json "$suffix")"
-  printf '%s\n%s\n' "$release_tag" "$asset_url"
+  checksum_url="$(printf '%s\n' "$release_json" | resolve_asset_url_from_json "$suffix.sha256")"
+  printf '%s\n%s\n%s\n' "$release_tag" "$asset_url" "$checksum_url"
 }
 
 install_binary() {
   system="$(detect_os)"
   arch="$(uname -m)"
   suffix="$(detect_suffix)"
-  release="$(resolve_asset_url "$suffix")"
+  release="$(resolve_asset_urls "$suffix")"
   release_tag="$(printf '%s\n' "$release" | sed -n '1p')"
   url="$(printf '%s\n' "$release" | sed -n '2p')"
+  checksum_url="$(printf '%s\n' "$release" | sed -n '3p')"
   [ -n "$release_tag" ] || die "no release tag found for version $VERSION"
   [ -n "$url" ] || die "no release asset found for $suffix in version $VERSION"
+  [ -n "$checksum_url" ] || die "no release checksum found for $suffix in version $VERSION"
 
   log "detected system: $system"
   log "detected architecture: $arch ($suffix)"
@@ -152,7 +197,14 @@ install_binary() {
   mkdir -p "$real_bin_dir"
   real_bin="$real_bin_dir/sms-relayed"
   download_tmp="${TMPDIR:-/tmp}/sms-relayed.$$"
+  checksum_tmp="${download_tmp}.sha256"
   download_file "$url" "$download_tmp"
+  download_file "$checksum_url" "$checksum_tmp"
+  if ! verify_download_checksum "$download_tmp" "$checksum_tmp" "sms-relayed-${release_tag}-${suffix}"; then
+    rm -f "$download_tmp" "$checksum_tmp"
+    die "release binary verification failed"
+  fi
+  rm -f "$checksum_tmp"
   chmod +x "$download_tmp"
 
   if [ -e "$real_bin" ]; then
