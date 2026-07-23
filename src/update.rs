@@ -727,7 +727,7 @@ mod tests {
         let path = directory.join(name);
         fs::write(
             &path,
-            format!("#!/bin/sh\nprintf '%s\\n' 'sms-relayed 1.0.7+{commit}'\n"),
+            format!("#!/bin/sh\nprintf '%s\\n' 'sms-relayed 2.0.0+{commit}'\n"),
         )
         .unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -917,15 +917,15 @@ start_service() {
         let release = release_with_assets(&[]);
 
         assert!(version_output_matches_release(
-            "sms-relayed 1.0.7+09373820cd4ab63023359acf300d708d47c9f509\n",
+            "sms-relayed 2.0.0+09373820cd4ab63023359acf300d708d47c9f509\n",
             &release
         ));
         assert!(!version_output_matches_release(
-            "sms-relayed 1.0.7+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+            "sms-relayed 2.0.0+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
             &release
         ));
         assert!(!version_output_matches_release(
-            "not-sms-relayed 1.0.7+09373820cd4ab63023359acf300d708d47c9f509\n",
+            "not-sms-relayed 2.0.0+09373820cd4ab63023359acf300d708d47c9f509\n",
             &release
         ));
         assert!(!version_output_matches_release(
@@ -1217,7 +1217,7 @@ start_service() {
 
     #[tokio::test]
     async fn valid_download_atomically_replaces_the_installed_binary() {
-        const BINARY: &str = "#!/bin/sh\nprintf '%s\\n' 'sms-relayed 1.0.7+09373820cd4ab63023359acf300d708d47c9f509'\n";
+        const BINARY: &str = "#!/bin/sh\nprintf '%s\\n' 'sms-relayed 2.0.0+09373820cd4ab63023359acf300d708d47c9f509'\n";
         let asset_url = serve_binary(BINARY).await;
         let (release, asset) = update_fixture(asset_url);
         let checksum = checksum_asset_for(&asset, BINARY.as_bytes()).await;
@@ -1241,7 +1241,7 @@ start_service() {
 
     #[tokio::test]
     async fn invalid_download_preserves_the_installed_binary_and_cleans_up() {
-        const WRONG_BINARY: &str = "#!/bin/sh\nprintf '%s\\n' 'sms-relayed 1.0.7+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n";
+        const WRONG_BINARY: &str = "#!/bin/sh\nprintf '%s\\n' 'sms-relayed 2.0.0+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n";
         let asset_url = serve_binary(WRONG_BINARY).await;
         let (release, asset) = update_fixture(asset_url);
         let checksum = checksum_asset_for(&asset, WRONG_BINARY.as_bytes()).await;
@@ -1295,7 +1295,7 @@ start_service() {
         let directory = TestDirectory::new();
         let marker = directory.path().join("executed");
         let binary_contents = format!(
-            "#!/bin/sh\ntouch '{}'\nprintf '%s\\n' 'sms-relayed 1.0.7+09373820cd4ab63023359acf300d708d47c9f509'\n",
+            "#!/bin/sh\ntouch '{}'\nprintf '%s\\n' 'sms-relayed 2.0.0+09373820cd4ab63023359acf300d708d47c9f509'\n",
             marker.display()
         );
         let binary_url = serve_contents(binary_contents).await;
