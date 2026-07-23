@@ -46,6 +46,7 @@ sentry = { version = "0.42", default-features = false, features = [
     "reqwest",
     "rustls",
 ] }
+subtle = "2"
 
 [dev-dependencies]
 tower = "0.5"
