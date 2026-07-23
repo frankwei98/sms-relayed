@@ -196,16 +196,29 @@ install_binary() {
   real_bin_dir="$(target_path "$BIN_DIR")"
   mkdir -p "$real_bin_dir"
   real_bin="$real_bin_dir/sms-relayed"
-  download_tmp="${TMPDIR:-/tmp}/sms-relayed.$$"
-  checksum_tmp="${download_tmp}.sha256"
-  download_file "$url" "$download_tmp"
-  download_file "$checksum_url" "$checksum_tmp"
+  have mktemp || die "mktemp is required to stage the release binary safely"
+  download_tmp="$(mktemp "$real_bin_dir/.sms-relayed.XXXXXX")" || die "failed to create binary staging file"
+  checksum_tmp="$(mktemp "$real_bin_dir/.sms-relayed-checksum.XXXXXX")" || {
+    rm -f "$download_tmp"
+    die "failed to create checksum staging file"
+  }
+  if ! download_file "$url" "$download_tmp"; then
+    rm -f "$download_tmp" "$checksum_tmp"
+    die "failed to download release binary"
+  fi
+  if ! download_file "$checksum_url" "$checksum_tmp"; then
+    rm -f "$download_tmp" "$checksum_tmp"
+    die "failed to download release checksum"
+  fi
   if ! verify_download_checksum "$download_tmp" "$checksum_tmp" "sms-relayed-${release_tag}-${suffix}"; then
     rm -f "$download_tmp" "$checksum_tmp"
     die "release binary verification failed"
   fi
   rm -f "$checksum_tmp"
-  chmod +x "$download_tmp"
+  if ! chmod +x "$download_tmp"; then
+    rm -f "$download_tmp"
+    die "failed to mark downloaded binary executable"
+  fi
 
   if [ -e "$real_bin" ]; then
     installed_version="$(binary_version "$real_bin")"
@@ -218,7 +231,10 @@ install_binary() {
     BINARY_UPDATED=1
   fi
 
-  mv "$download_tmp" "$real_bin"
+  if ! mv "$download_tmp" "$real_bin"; then
+    rm -f "$download_tmp"
+    die "failed to replace $real_bin"
+  fi
   BINARY_INSTALLED=1
   log "installed $real_bin"
 }
