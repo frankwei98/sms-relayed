@@ -59,6 +59,7 @@ const ALL_DIRECTIONS = "all-directions";
 const ALL_STATUSES = "all-statuses";
 const MESSAGE_PAGE_SIZE = 10;
 const SERVER_MESSAGE_PAGE_LIMIT = 500;
+const FALLBACK_REFRESH_INTERVAL_MS = 30_000;
 const SQLITE_TIMESTAMP_PATTERN =
 	/^(?:\d{4}-\d{2}-\d{2}|\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))$/;
 
@@ -310,7 +311,9 @@ export function MessageConsole() {
 			refreshTimeoutRef.current = setTimeout(() => {
 				const additionalMessages = pendingCreatedMessagesRef.current;
 				pendingCreatedMessagesRef.current = 0;
-				reloadActiveViews(additionalMessages);
+				void reloadActiveViews(additionalMessages).catch((err) => {
+					console.error(err);
+				});
 				refreshTimeoutRef.current = null;
 			}, 100);
 		},
@@ -326,8 +329,13 @@ export function MessageConsole() {
 			"message.read_state_changed": () => scheduleRefresh(),
 			"conversation.read": () => scheduleRefresh(),
 		});
+		const refreshInterval = window.setInterval(
+			() => scheduleRefresh(),
+			FALLBACK_REFRESH_INTERVAL_MS,
+		);
 		return () => {
 			unsub();
+			window.clearInterval(refreshInterval);
 			if (refreshTimeoutRef.current) clearTimeout(refreshTimeoutRef.current);
 			pendingCreatedMessagesRef.current = 0;
 		};
