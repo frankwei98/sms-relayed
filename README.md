@@ -234,7 +234,7 @@ journalctl -u sms-relayed
 
 ### Shell 转发参数
 
-Shell profile 使用 `sh -c` 调用配置的脚本，并依次传入：
+Shell profile 会直接执行配置的可执行脚本，并依次传入：
 
 ```text
 1. 发信号码
@@ -245,7 +245,7 @@ Shell profile 使用 `sh -c` 调用配置的脚本，并依次传入：
 6. 设备名称
 ```
 
-脚本必须自行安全处理参数和凭据，并在 `http.shell_timeout_secs` 内结束。
+脚本必须安全处理参数和凭据，并在 `http.shell_timeout_secs` 内结束。每个值均作为独立的命令行参数传入，不会由 shell 再次解析。
 
 ### 构建与开发
 
@@ -508,7 +508,7 @@ journalctl -u sms-relayed
 
 ### Shell forwarding arguments
 
-A shell profile invokes the configured script through `sh -c` with these positional arguments:
+A shell profile directly executes the configured executable script with these positional arguments:
 
 ```text
 1. Sender phone number
@@ -519,7 +519,7 @@ A shell profile invokes the configured script through `sh -c` with these positio
 6. Device name
 ```
 
-The script is responsible for safely handling arguments and credentials, and must finish within `http.shell_timeout_secs`.
+The script is responsible for safely handling arguments and credentials, and must finish within `http.shell_timeout_secs`. Each value is passed as a separate command-line argument and is never reparsed by a shell.
 
 ### Build and development
 

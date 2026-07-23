@@ -220,9 +220,10 @@ mod tests {
     struct TimeoutRunner;
 
     impl ProcessRunner for TimeoutRunner {
-        fn run_shell<'a>(
+        fn run_command<'a>(
             &'a self,
-            _cmd: &'a str,
+            _program: &'a str,
+            _arguments: &'a [&'a str],
             _timeout: Duration,
         ) -> Pin<Box<dyn Future<Output = anyhow::Result<std::process::ExitStatus>> + Send + 'a>>
         {
@@ -233,9 +234,10 @@ mod tests {
     struct ShellFailedRunner;
 
     impl ProcessRunner for ShellFailedRunner {
-        fn run_shell<'a>(
+        fn run_command<'a>(
             &'a self,
-            _cmd: &'a str,
+            _program: &'a str,
+            _arguments: &'a [&'a str],
             _timeout: Duration,
         ) -> Pin<Box<dyn Future<Output = anyhow::Result<std::process::ExitStatus>> + Send + 'a>>
         {

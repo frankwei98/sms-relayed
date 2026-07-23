@@ -34,31 +34,36 @@ impl Clock for RealClock {
     }
 }
 
-/// Process execution abstraction for testable shell commands.
+/// Process execution abstraction for testable external commands.
 pub trait ProcessRunner: Send + Sync {
-    fn run_shell<'a>(
+    fn run_command<'a>(
         &'a self,
-        cmd: &'a str,
+        program: &'a str,
+        arguments: &'a [&'a str],
         timeout: Duration,
     ) -> Pin<Box<dyn Future<Output = Result<ExitStatus>> + Send + 'a>>;
 }
 
-/// Real process runner that shells out to `sh -c`, with timeout and reap.
+/// Real process runner with timeout and process-group cleanup.
 #[derive(Clone, Copy, Debug)]
 pub struct RealProcessRunner;
 
 impl ProcessRunner for RealProcessRunner {
-    fn run_shell<'a>(
+    fn run_command<'a>(
         &'a self,
-        cmd: &'a str,
+        program: &'a str,
+        arguments: &'a [&'a str],
         timeout: Duration,
     ) -> Pin<Box<dyn Future<Output = Result<ExitStatus>> + Send + 'a>> {
-        let cmd = cmd.to_string();
+        let program = program.to_string();
+        let arguments = arguments
+            .iter()
+            .map(|argument| (*argument).to_string())
+            .collect::<Vec<_>>();
         Box::pin(async move {
-            let mut command = tokio::process::Command::new("sh");
+            let mut command = tokio::process::Command::new(program);
             command
-                .arg("-c")
-                .arg(&cmd)
+                .args(arguments)
                 .kill_on_drop(true)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
@@ -99,30 +104,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_process_runner_executes_shell_true() {
+    async fn real_process_runner_executes_command_true() {
         let runner = RealProcessRunner;
         let status = runner
-            .run_shell("exit 0", Duration::from_secs(5))
+            .run_command("sh", &["-c", "exit 0"], Duration::from_secs(5))
             .await
             .unwrap();
         assert!(status.success());
     }
 
     #[tokio::test]
-    async fn real_process_runner_executes_shell_false() {
+    async fn real_process_runner_executes_command_false() {
         let runner = RealProcessRunner;
         let status = runner
-            .run_shell("exit 42", Duration::from_secs(5))
+            .run_command("sh", &["-c", "exit 42"], Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(status.code(), Some(42));
     }
 
     #[tokio::test]
-    async fn real_process_runner_timeout_kills_child() {
+    async fn real_process_runner_timeout_kills_command_process_group() {
         let runner = RealProcessRunner;
         let err = runner
-            .run_shell("sleep 10", Duration::from_millis(50))
+            .run_command("sh", &["-c", "sleep 10"], Duration::from_millis(50))
             .await
             .unwrap_err();
         let msg = err.to_string();
