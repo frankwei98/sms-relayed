@@ -14,6 +14,8 @@ use crate::message::{
     MessageStatus,
 };
 
+const CONVERSATION_SUMMARIES_BACKFILL_META_KEY: &str = "conversation_summaries_backfilled";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryRow {
     pub id: i64,
@@ -235,6 +237,85 @@ impl MessageStore {
             CREATE INDEX IF NOT EXISTS idx_messages_direction ON messages(direction);
             CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
             CREATE INDEX IF NOT EXISTS idx_messages_read_at ON messages(read_at);
+            CREATE TABLE IF NOT EXISTS conversation_summaries (
+                phone_number TEXT PRIMARY KEY,
+                total_count INTEGER NOT NULL,
+                unread_count INTEGER NOT NULL,
+                last_message_id INTEGER
+            );
+            CREATE TRIGGER IF NOT EXISTS messages_insert_conversation_summary
+            AFTER INSERT ON messages
+            BEGIN
+                INSERT INTO conversation_summaries (
+                    phone_number, total_count, unread_count, last_message_id
+                ) VALUES (
+                    NEW.phone_number,
+                    1,
+                    CASE WHEN NEW.direction = 'inbound' AND NEW.read_at IS NULL THEN 1 ELSE 0 END,
+                    NEW.id
+                )
+                ON CONFLICT(phone_number) DO UPDATE SET
+                    total_count = total_count + 1,
+                    unread_count = unread_count +
+                        CASE WHEN NEW.direction = 'inbound' AND NEW.read_at IS NULL THEN 1 ELSE 0 END,
+                    last_message_id = CASE
+                        WHEN COALESCE(julianday(NEW.timestamp), julianday(NEW.created_at)) >
+                            (SELECT COALESCE(julianday(timestamp), julianday(created_at))
+                             FROM messages
+                             WHERE id = conversation_summaries.last_message_id)
+                          OR (
+                            COALESCE(julianday(NEW.timestamp), julianday(NEW.created_at)) =
+                                (SELECT COALESCE(julianday(timestamp), julianday(created_at))
+                                 FROM messages
+                                 WHERE id = conversation_summaries.last_message_id)
+                            AND NEW.id > conversation_summaries.last_message_id
+                          )
+                        THEN NEW.id
+                        ELSE conversation_summaries.last_message_id
+                    END;
+            END;
+            CREATE TRIGGER IF NOT EXISTS messages_update_read_conversation_summary
+            AFTER UPDATE OF read_at ON messages
+            WHEN OLD.read_at IS NOT NEW.read_at
+            BEGIN
+                UPDATE conversation_summaries
+                SET unread_count = unread_count
+                    - CASE WHEN OLD.direction = 'inbound' AND OLD.read_at IS NULL THEN 1 ELSE 0 END
+                    + CASE WHEN NEW.direction = 'inbound' AND NEW.read_at IS NULL THEN 1 ELSE 0 END
+                WHERE phone_number = NEW.phone_number;
+            END;
+            CREATE TRIGGER IF NOT EXISTS messages_delete_conversation_summary
+            AFTER DELETE ON messages
+            BEGIN
+                UPDATE conversation_summaries
+                SET total_count = total_count - 1,
+                    unread_count = unread_count
+                        - CASE WHEN OLD.direction = 'inbound' AND OLD.read_at IS NULL THEN 1 ELSE 0 END,
+                    last_message_id = CASE
+                        WHEN last_message_id = OLD.id THEN (
+                            SELECT id FROM messages
+                            WHERE phone_number = OLD.phone_number
+                            ORDER BY COALESCE(julianday(timestamp), julianday(created_at)) DESC, id DESC
+                            LIMIT 1
+                        )
+                        ELSE last_message_id
+                    END
+                WHERE phone_number = OLD.phone_number;
+                DELETE FROM conversation_summaries
+                WHERE phone_number = OLD.phone_number AND total_count = 0;
+            END;
+            CREATE TRIGGER IF NOT EXISTS messages_update_timeline_conversation_summary
+            AFTER UPDATE OF timestamp, created_at ON messages
+            BEGIN
+                UPDATE conversation_summaries
+                SET last_message_id = (
+                    SELECT id FROM messages
+                    WHERE phone_number = NEW.phone_number
+                    ORDER BY COALESCE(julianday(timestamp), julianday(created_at)) DESC, id DESC
+                    LIMIT 1
+                )
+                WHERE phone_number = NEW.phone_number;
+            END;
             CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -309,6 +390,40 @@ impl MessageStore {
 
         // Backfill: compute dedup keys for legacy modem-inbound messages
         Self::backfill_dedupe_keys_on(&tx)?;
+
+        // Build the summaries once for databases created before this table existed.
+        let summaries_backfilled = tx
+            .query_row(
+                "SELECT 1 FROM meta WHERE key = ?1",
+                params![CONVERSATION_SUMMARIES_BACKFILL_META_KEY],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !summaries_backfilled {
+            tx.execute(
+                "INSERT OR IGNORE INTO conversation_summaries (
+                    phone_number, total_count, unread_count, last_message_id
+                 )
+                 SELECT phone_number,
+                        COUNT(*),
+                        SUM(CASE WHEN direction = 'inbound' AND read_at IS NULL THEN 1 ELSE 0 END),
+                        (
+                            SELECT latest.id FROM messages AS latest
+                            WHERE latest.phone_number = messages.phone_number
+                            ORDER BY COALESCE(julianday(latest.timestamp), julianday(latest.created_at)) DESC,
+                                     latest.id DESC
+                            LIMIT 1
+                        )
+                 FROM messages
+                 GROUP BY phone_number",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, '1')",
+                params![CONVERSATION_SUMMARIES_BACKFILL_META_KEY],
+            )?;
+        }
 
         tx.commit()?;
         Ok(())
@@ -527,24 +642,14 @@ impl MessageStore {
     pub fn list_conversations(&self) -> Result<Vec<ConversationSummary>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "WITH ranked AS (
-                SELECT messages.*,
-                       COUNT(*) OVER (PARTITION BY phone_number) AS total_count,
-                       SUM(CASE WHEN direction = 'inbound' AND read_at IS NULL THEN 1 ELSE 0 END)
-                           OVER (PARTITION BY phone_number) AS unread_count,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY phone_number
-                           ORDER BY COALESCE(julianday(timestamp), julianday(created_at)) DESC, id DESC
-                       ) AS timeline_rank
-                FROM messages
-            )
-            SELECT phone_number, total_count, unread_count,
-                   id, direction, phone_number, body, timestamp,
-                   status, source, modem_sms_path, read_at, error,
-                   created_at, updated_at
-            FROM ranked
-            WHERE timeline_rank = 1
-            ORDER BY COALESCE(julianday(timestamp), julianday(created_at)) DESC, id DESC",
+            "SELECT summaries.phone_number, summaries.total_count, summaries.unread_count,
+                    messages.id, messages.direction, messages.phone_number, messages.body,
+                    messages.timestamp, messages.status, messages.source, messages.modem_sms_path,
+                    messages.read_at, messages.error, messages.created_at, messages.updated_at
+             FROM conversation_summaries AS summaries
+             INNER JOIN messages ON messages.id = summaries.last_message_id
+             ORDER BY COALESCE(julianday(messages.timestamp), julianday(messages.created_at)) DESC,
+                      messages.id DESC",
         )?;
         let rows = stmt.query_map([], |row| {
             let phone_number: String = row.get(0)?;
@@ -1609,6 +1714,37 @@ mod tests {
 
         assert_eq!(conversations[0].last_message.body, "current");
         assert_eq!(conversations[0].total_count, 2);
+    }
+
+    #[test]
+    fn conversation_summary_tracks_read_state_and_last_message_after_delete() {
+        let store = memory_store();
+        let earlier = store
+            .insert_message(NewMessage::inbound("+15550000001", "earlier"))
+            .unwrap();
+        let latest = store
+            .insert_message(NewMessage::inbound("+15550000001", "latest"))
+            .unwrap();
+
+        store.mark_read(earlier.id).unwrap();
+        store.delete_messages(&[latest.id]).unwrap();
+
+        let conversations = store.list_conversations().unwrap();
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].last_message.id, earlier.id);
+        assert_eq!(conversations[0].total_count, 1);
+        assert_eq!(conversations[0].unread_count, 0);
+
+        let conn = store.conn.lock().unwrap();
+        let summary: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT total_count, unread_count, last_message_id
+                 FROM conversation_summaries WHERE phone_number = ?1",
+                params!["+15550000001"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(summary, (1, 0, earlier.id));
     }
 
     #[test]
