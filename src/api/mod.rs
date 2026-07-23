@@ -125,7 +125,11 @@ pub async fn serve(state: ApiState) -> anyhow::Result<()> {
     let addr = format!("{}:{}", state.config.api.bind, state.config.api.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     log::info!("web api listening on {}", addr);
-    axum::serve(listener, router(state)).await?;
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -203,6 +207,7 @@ mod route_tests {
     use std::time::Duration;
 
     use axum::body::Body;
+    use axum::extract::ConnectInfo;
     use axum::http::{Method, Request, StatusCode};
     use tower::ServiceExt;
 
@@ -254,6 +259,46 @@ mod route_tests {
             sessions: SessionStore::default(),
             modem: crate::modem::ModemService::new_with_runner(ApiTestRunner),
         }
+    }
+
+    fn login_request(password: &str, peer: std::net::SocketAddr) -> Request<Body> {
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/auth/login")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(r#"{{"password":"{password}"}}"#)))
+            .unwrap();
+        request.extensions_mut().insert(ConnectInfo(peer));
+        request
+    }
+
+    #[tokio::test]
+    async fn login_rate_limits_repeated_failures_per_client() {
+        let app = router(test_state());
+        let first_client = "192.0.2.10:1234".parse().unwrap();
+        let other_client = "192.0.2.11:1234".parse().unwrap();
+
+        for _ in 0..5 {
+            let response = app
+                .clone()
+                .oneshot(login_request("wrong", first_client))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let response = app
+            .clone()
+            .oneshot(login_request("wrong", first_client))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let response = app
+            .oneshot(login_request("secret", other_client))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
