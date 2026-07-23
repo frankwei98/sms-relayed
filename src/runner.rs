@@ -3,10 +3,8 @@ use std::pin::Pin;
 use std::process::ExitStatus;
 use std::time::Duration;
 
-use anyhow::Result;
-use time::OffsetDateTime;
-
 use crate::config::HttpSection;
+use anyhow::Result;
 
 /// Build a shared `reqwest::Client` configured from the `[http]` config section.
 pub fn build_http_client(config: &HttpSection) -> reqwest::Client {
@@ -15,23 +13,6 @@ pub fn build_http_client(config: &HttpSection) -> reqwest::Client {
         .timeout(Duration::from_secs(config.request_timeout_secs))
         .build()
         .expect("valid reqwest client config")
-}
-
-/// Clock abstraction for deterministic time in tests.
-#[allow(dead_code)]
-pub trait Clock: Send + Sync {
-    fn now(&self) -> OffsetDateTime;
-}
-
-/// Real clock using system time.
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug)]
-pub struct RealClock;
-
-impl Clock for RealClock {
-    fn now(&self) -> OffsetDateTime {
-        OffsetDateTime::now_utc()
-    }
 }
 
 /// Process execution abstraction for testable external commands.
@@ -93,15 +74,6 @@ impl ProcessRunner for RealProcessRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn real_clock_returns_recent_time() {
-        let clock = RealClock;
-        let now = clock.now();
-        let system_now = OffsetDateTime::now_utc();
-        let diff = system_now - now;
-        assert!(diff.abs().whole_seconds() < 2);
-    }
 
     #[tokio::test]
     async fn real_process_runner_executes_command_true() {

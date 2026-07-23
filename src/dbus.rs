@@ -31,7 +31,6 @@ pub struct ReceivedSms {
     pub phone_number: String,
     pub body: String,
     pub timestamp: String,
-    pub storage: u32,
     pub modem_sms_path: String,
 }
 
@@ -311,7 +310,6 @@ where
                 phone_number: telnum,
                 body: smscontent,
                 timestamp: smsdate,
-                storage,
                 modem_sms_path: sms_path.to_string(),
             };
             let mut delay = Duration::from_millis(100);

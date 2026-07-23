@@ -254,7 +254,6 @@ mod tests {
             phone_number: "+15550000000".to_string(),
             body: "duplicate test".to_string(),
             timestamp: "2026-07-12T17:00:00Z".to_string(),
-            storage: 0,
             modem_sms_path: "/org/freedesktop/ModemManager1/SMS/42".to_string(),
         };
 
@@ -313,7 +312,6 @@ mod tests {
             phone_number: "+15550000000".to_string(),
             body: "store only".to_string(),
             timestamp: "2026-07-12T17:01:00Z".to_string(),
-            storage: 0,
             modem_sms_path: "/org/freedesktop/ModemManager1/SMS/43".to_string(),
         };
 
