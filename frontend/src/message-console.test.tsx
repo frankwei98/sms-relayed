@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import {
+	act,
 	cleanup,
 	fireEvent,
 	render,
@@ -40,9 +41,35 @@ const unreadMessage = {
 
 afterEach(() => {
 	cleanup();
+	vi.useRealTimers();
 	vi.restoreAllMocks();
 	vi.clearAllMocks();
 	mocks.handlers = {};
+});
+
+describe("MessageConsole refresh fallback", () => {
+	test("periodically reloads conversations when SSE events are missed", async () => {
+		vi.useFakeTimers();
+		let conversationLoads = 0;
+		mocks.apiFetch.mockImplementation((input: string) => {
+			if (input === "/api/conversations") {
+				conversationLoads += 1;
+				return Promise.resolve([]);
+			}
+			return Promise.resolve([]);
+		});
+
+		render(<MessageConsole />);
+		await act(async () => {
+			await Promise.resolve();
+		});
+		expect(conversationLoads).toBe(1);
+
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(30_100);
+		});
+		expect(conversationLoads).toBe(2);
+	});
 });
 
 describe("MessageConsole bulk read", () => {
