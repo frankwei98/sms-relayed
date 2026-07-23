@@ -21,11 +21,18 @@ pub async fn send(
 
     let (_, code, code_from) = smscode::get_sms_code_str(sms_text, app_config);
 
-    let cmd = format!(
-        "{} \"{}\" \"{}\" \"{}\" \"{}\" \"{}\" \"{}\"",
-        shell_path, tel_number, sms_date, sms_text, code, code_from, device_name
-    );
-    let status = match runner.run_shell(&cmd, shell_timeout).await {
+    let arguments = [
+        tel_number,
+        sms_date,
+        sms_text,
+        code.as_str(),
+        code_from.as_str(),
+        device_name,
+    ];
+    let status = match runner
+        .run_command(shell_path, &arguments, shell_timeout)
+        .await
+    {
         Ok(s) => s,
         Err(e) => {
             let msg = e.to_string();
@@ -42,5 +49,70 @@ pub async fn send(
     } else {
         error!("Shell调用失败");
         ForwardOutcome::PermanentFailure("shell_exit_nonzero".to_string())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::runner::RealProcessRunner;
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("sms-relayed-shell-test-{}", Uuid::new_v4()));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn sms_body_is_passed_to_the_script_as_one_literal_argument() {
+        let directory = TestDirectory::new();
+        let script = directory.path().join("capture-body.sh");
+        let output = directory.path().join("body.txt");
+        let marker = directory.path().join("must-not-exist");
+        fs::write(&script, "#!/bin/sh\nprintf '%s' \"$3\" > \"$1\"\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let body = format!("message\"; touch {}; echo \"", marker.display());
+        let outcome = send(
+            &RealProcessRunner,
+            Duration::from_secs(5),
+            output.to_str().unwrap(),
+            &body,
+            "2026-07-23T00:00:00Z",
+            "device",
+            &ShellConfig {
+                path: script.display().to_string(),
+            },
+            &AppConfig::default(),
+        )
+        .await;
+
+        assert_eq!(outcome, ForwardOutcome::Success);
+        assert_eq!(fs::read_to_string(output).unwrap(), body);
+        assert!(
+            !marker.exists(),
+            "an SMS body must not be interpreted as a shell command"
+        );
     }
 }
