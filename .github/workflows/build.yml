@@ -52,6 +52,9 @@ jobs:
       - name: Test Rust
         run: cargo test --locked
 
+      - name: Test installer
+        run: sh tests/install.sh
+
       - name: Install frontend dependencies
         working-directory: frontend
         run: pnpm install --frozen-lockfile
