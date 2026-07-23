@@ -149,6 +149,7 @@ batch_size = 500
 
 - `forward.enabled` 使用 `渠道类型.profile名称`，例如 `telegram.main`。同一渠道可定义多个 profile。
 - 支持的渠道类型为 `bark`、`telegram`、`pushplus`、`wecom`、`dingtalk` 和 `shell`。
+- Bark 使用 [API v2](https://github.com/Finb/bark-server/blob/master/docs/API_V2.md)：将 `server_url` 设为服务根地址，程序会向 `<server_url>/push` 发送 JSON 请求。
 - `delivery.concurrency` 控制同时执行的转发任务数，默认值为 `2`，有效范围为 `1` 到 `16`。
 - 新 delivery 在数据库事务提交后会立即唤醒 worker；worker 启动时扫描一次，并保留固定 30 秒安全扫描。重试按最近的 `next_attempt_at` 精确唤醒。
 - `api.enabled = true` 时必须设置非空 `api.password`。
@@ -430,6 +431,7 @@ Important rules:
 
 - `forward.enabled` contains `channel.profile` references such as `telegram.main`; multiple profiles of the same channel are supported.
 - Channel types are `bark`, `telegram`, `pushplus`, `wecom`, `dingtalk`, and `shell`.
+- Bark uses [API v2](https://github.com/Finb/bark-server/blob/master/docs/API_V2.md): set `server_url` to the server root and sms-relayed sends JSON to `<server_url>/push`.
 - `delivery.concurrency` controls concurrent forwarding jobs. It defaults to `2` and accepts values from `1` through `16`.
 - A committed delivery wakes the worker immediately. The worker also scans on startup, keeps a fixed 30-second safety scan, and wakes precisely for the earliest `next_attempt_at` retry deadline.
 - A non-empty `api.password` is required when `api.enabled = true`.
