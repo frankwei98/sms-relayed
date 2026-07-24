@@ -10,10 +10,13 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
+#[cfg(test)]
 use crate::events::AppEvent;
 use crate::message::{
     Message, MessageCursor, MessageDirection, MessageFilter, MessageSource, MessageStatus,
 };
+use crate::messaging::SendMessage;
+#[cfg(test)]
 use crate::storage::NewMessage;
 
 use super::{ApiError, ApiResult, ApiState};
@@ -92,31 +95,28 @@ async fn list_messages(
     State(state): State<ApiState>,
     Query(query): Query<MessageQuery>,
 ) -> ApiResult<Json<Vec<Message>>> {
-    let store = state.store.clone();
     let filter = to_filter(&query)?;
-    let rows = tokio::task::spawn_blocking(move || store.list_messages(&filter))
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?
-        .map_err(|error| {
-            if error
-                .downcast_ref::<crate::storage::InvalidMessageCursor>()
-                .is_some()
-            {
-                ApiError::bad_request(error.to_string())
-            } else {
-                ApiError::internal(error.to_string())
-            }
-        })?;
+    let rows = state.messaging().list(filter).await.map_err(|error| {
+        if error
+            .downcast_ref::<crate::storage::InvalidMessageCursor>()
+            .is_some()
+        {
+            ApiError::bad_request(error.to_string())
+        } else {
+            ApiError::internal(error.to_string())
+        }
+    })?;
     Ok(Json(rows))
 }
 
 async fn list_conversations(
     State(state): State<ApiState>,
 ) -> ApiResult<Json<Vec<crate::message::ConversationSummary>>> {
-    let store = state.store.clone();
-    let rows = tokio::task::spawn_blocking(move || store.list_conversations())
+    let rows = state
+        .messaging()
+        .conversations()
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))??;
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(rows))
 }
 
@@ -132,50 +132,25 @@ async fn send_message(
     }
     let phone_number = req.phone_number.trim().to_string();
     let body = req.body;
-    let now = now_string();
-    let new = NewMessage {
-        direction: MessageDirection::Outbound,
-        phone_number: phone_number.clone(),
-        body: body.clone(),
-        timestamp: now.clone(),
-        status: MessageStatus::Sending,
-        source: MessageSource::Web,
-        modem_sms_path: None,
-        read_at: Some(now),
-        error: None,
-        inbound_dedupe_key: None,
-    };
-    let store = state.store.clone();
-    let msg = tokio::task::spawn_blocking(move || store.insert_message(new))
+    let updated = state
+        .messaging()
+        .send(SendMessage {
+            modem_path: state.config.app.modem_path.clone(),
+            phone_number: phone_number.clone(),
+            body: body.clone(),
+            source: MessageSource::Web,
+        })
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))??;
-    state.events.send(AppEvent::MessageCreated(msg.clone()));
-
-    let modem_path = state.config.app.modem_path.clone();
-    let (status, error) = match state
-        .sms_sender
-        .send(&modem_path, &phone_number, &body)
-        .await
-    {
-        Ok(_) => (MessageStatus::Sent, None),
-        Err(err) => (MessageStatus::Failed, Some(err.to_string())),
-    };
-    let store = state.store.clone();
-    let updated = tokio::task::spawn_blocking(move || store.update_status(msg.id, status, error))
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))??;
-    state.events.send(AppEvent::MessageUpdated(updated.clone()));
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(updated))
 }
 
 async fn mark_read(State(state): State<ApiState>, Path(id): Path<i64>) -> ApiResult<Json<Message>> {
-    let store = state.store.clone();
-    let msg = tokio::task::spawn_blocking(move || store.mark_read(id))
+    let msg = state
+        .messaging()
+        .set_read(id, true)
         .await
-        .map_err(|error| ApiError::internal(error.to_string()))??;
-    state
-        .events
-        .send(AppEvent::MessageReadStateChanged(msg.clone()));
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(msg))
 }
 
@@ -183,13 +158,11 @@ async fn mark_unread(
     State(state): State<ApiState>,
     Path(id): Path<i64>,
 ) -> ApiResult<Json<Message>> {
-    let store = state.store.clone();
-    let msg = tokio::task::spawn_blocking(move || store.mark_unread(id))
+    let msg = state
+        .messaging()
+        .set_read(id, false)
         .await
-        .map_err(|error| ApiError::internal(error.to_string()))??;
-    state
-        .events
-        .send(AppEvent::MessageReadStateChanged(msg.clone()));
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(msg))
 }
 
@@ -197,11 +170,11 @@ async fn mark_conversation_read(
     State(state): State<ApiState>,
     Path(phone_number): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let store = state.store.clone();
-    let changed = tokio::task::spawn_blocking(move || store.mark_conversation_read(&phone_number))
+    let changed = state
+        .messaging()
+        .mark_conversation_read(phone_number)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))??;
-    state.events.send(AppEvent::ConversationRead);
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(serde_json::json!({ "changed": changed })))
 }
 
@@ -209,13 +182,11 @@ async fn delete_message(
     State(state): State<ApiState>,
     Path(id): Path<i64>,
 ) -> ApiResult<StatusCode> {
-    let store = state.store.clone();
-    tokio::task::spawn_blocking(move || store.delete_messages(&[id]))
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))??;
     state
-        .events
-        .send(AppEvent::MessageDeleted { ids: vec![id] });
+        .messaging()
+        .delete(vec![id])
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -224,12 +195,11 @@ async fn delete_many(
     Json(req): Json<DeleteManyRequest>,
 ) -> ApiResult<StatusCode> {
     let ids = req.ids.clone();
-    let store = state.store.clone();
-    let ids_to_delete = ids.clone();
-    tokio::task::spawn_blocking(move || store.delete_messages(&ids_to_delete))
+    state
+        .messaging()
+        .delete(ids)
         .await
-        .map_err(|error| ApiError::internal(error.to_string()))??;
-    state.events.send(AppEvent::MessageDeleted { ids });
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -243,13 +213,12 @@ async fn export_messages(
         ExportFormat::Csv
     };
     let filter = to_filter(&query)?;
-    let store = state.store.clone();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
 
-    tokio::task::spawn_blocking(move || {
-        let result = stream_export(&store, &filter, format, &tx);
+    tokio::spawn(async move {
+        let result = stream_export(&state.store, filter, format, &tx).await;
         if let Err(err) = result {
-            let _ = tx.blocking_send(Err(std::io::Error::other(err.to_string())));
+            let _ = tx.send(Err(std::io::Error::other(err.to_string()))).await;
         }
     });
 
@@ -282,25 +251,29 @@ enum ExportFormat {
     Csv,
 }
 
-fn stream_export(
-    store: &crate::storage::MessageStore,
-    filter: &MessageFilter,
+async fn stream_export(
+    store: &crate::persistence::Store,
+    filter: MessageFilter,
     format: ExportFormat,
     tx: &tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
 ) -> anyhow::Result<()> {
+    let mut messages = store.stream_messages(filter);
     match format {
         ExportFormat::Json => {
-            if tx.blocking_send(Ok(Bytes::from_static(b"["))).is_err() {
+            if tx.send(Ok(Bytes::from_static(b"["))).await.is_err() {
                 return Ok(());
             }
             let mut first = true;
-            store.for_each_export_message(filter, |message| {
+            while let Some(message) = messages.recv().await {
+                let message = message?;
                 let mut chunk = if first { Vec::new() } else { vec![b','] };
                 first = false;
                 serde_json::to_writer(&mut chunk, &message)?;
-                Ok(tx.blocking_send(Ok(Bytes::from(chunk))).is_ok())
-            })?;
-            let _ = tx.blocking_send(Ok(Bytes::from_static(b"]")));
+                if tx.send(Ok(Bytes::from(chunk))).await.is_err() {
+                    return Ok(());
+                }
+            }
+            let _ = tx.send(Ok(Bytes::from_static(b"]"))).await;
         }
         ExportFormat::Csv => {
             let header = csv_record_bytes(&[
@@ -316,10 +289,11 @@ fn stream_export(
                 "created_at",
                 "updated_at",
             ])?;
-            if tx.blocking_send(Ok(Bytes::from(header))).is_err() {
+            if tx.send(Ok(Bytes::from(header))).await.is_err() {
                 return Ok(());
             }
-            store.for_each_export_message(filter, |message| {
+            while let Some(message) = messages.recv().await {
+                let message = message?;
                 let fields = vec![
                     message.id.to_string(),
                     enum_json(&message.direction)?,
@@ -334,8 +308,10 @@ fn stream_export(
                     message.updated_at,
                 ];
                 let chunk = csv_record_bytes(&fields)?;
-                Ok(tx.blocking_send(Ok(Bytes::from(chunk))).is_ok())
-            })?;
+                if tx.send(Ok(Bytes::from(chunk))).await.is_err() {
+                    return Ok(());
+                }
+            }
         }
     }
     Ok(())
@@ -366,12 +342,6 @@ async fn events(State(state): State<ApiState>) -> impl IntoResponse {
         Err(_) => None,
     });
     Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
-}
-
-fn now_string() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -437,8 +407,9 @@ mod tests {
         let state = super::super::ApiState {
             config: std::sync::Arc::new(crate::config::AppConfig::default()),
             config_path: std::path::PathBuf::from("/tmp/not-used.toml"),
-            store: store.clone(),
+            store: store.clone().into(),
             events: crate::events::EventBus::new(),
+            delivery_wakeup: crate::delivery::DeliveryWakeup::new(),
             started_at: std::time::Instant::now(),
             sessions: super::super::auth::SessionStore::default(),
             modem: crate::modem::ModemService::new(),
@@ -486,8 +457,9 @@ mod tests {
         let state = super::super::ApiState {
             config: std::sync::Arc::new(crate::config::AppConfig::default()),
             config_path: std::path::PathBuf::from("/tmp/not-used.toml"),
-            store,
+            store: store.into(),
             events: crate::events::EventBus::new(),
+            delivery_wakeup: crate::delivery::DeliveryWakeup::new(),
             started_at: std::time::Instant::now(),
             sessions: super::super::auth::SessionStore::default(),
             modem: crate::modem::ModemService::new(),
@@ -520,9 +492,9 @@ mod tests {
 
         for format in [ExportFormat::Json, ExportFormat::Csv] {
             let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-            let worker_store = store.clone();
-            let worker = tokio::task::spawn_blocking(move || {
-                stream_export(&worker_store, &MessageFilter::default(), format, &tx)
+            let worker_store = crate::persistence::Store::from(store.clone());
+            let worker = tokio::spawn(async move {
+                stream_export(&worker_store, MessageFilter::default(), format, &tx).await
             });
             let mut bytes = Vec::new();
             while let Some(chunk) = rx.recv().await {
@@ -555,8 +527,9 @@ mod tests {
         }
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         drop(rx);
-        let worker = tokio::task::spawn_blocking(move || {
-            stream_export(&store, &MessageFilter::default(), ExportFormat::Json, &tx)
+        let store = crate::persistence::Store::from(store);
+        let worker = tokio::spawn(async move {
+            stream_export(&store, MessageFilter::default(), ExportFormat::Json, &tx).await
         });
         tokio::time::timeout(std::time::Duration::from_secs(1), worker)
             .await
@@ -578,8 +551,9 @@ mod tests {
         let state = super::super::ApiState {
             config: std::sync::Arc::new(crate::config::AppConfig::default()),
             config_path: std::path::PathBuf::from("/tmp/not-used.toml"),
-            store,
+            store: store.into(),
             events,
+            delivery_wakeup: crate::delivery::DeliveryWakeup::new(),
             started_at: std::time::Instant::now(),
             sessions: super::super::auth::SessionStore::default(),
             modem: crate::modem::ModemService::new(),
