@@ -57,23 +57,39 @@ struct TestSmsSender;
 
 #[cfg(test)]
 impl crate::dbus::SmsSender for TestSmsSender {
-    fn send<'a>(
+    fn prepare<'a>(
         &'a self,
         _modem_path: &'a str,
         _tel_number: &'a str,
         _sms_text: &'a str,
     ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<crate::dbus::PreparedSms>> + Send + 'a>,
+    > {
+        Box::pin(async {
+            Ok(crate::dbus::PreparedSms {
+                modem_sms_path: "/org/freedesktop/ModemManager1/SMS/test".to_string(),
+            })
+        })
+    }
+
+    fn send_prepared<'a>(
+        &'a self,
+        _modem_sms_path: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn sms_state<'a>(
+        &'a self,
+        _modem_sms_path: &'a str,
+    ) -> std::pin::Pin<
         Box<
-            dyn std::future::Future<Output = anyhow::Result<crate::dbus::SendSmsOutcome>>
+            dyn std::future::Future<Output = anyhow::Result<crate::dbus::ModemSmsState>>
                 + Send
                 + 'a,
         >,
     > {
-        Box::pin(async {
-            Ok(crate::dbus::SendSmsOutcome {
-                modem_sms_path: "/org/freedesktop/ModemManager1/SMS/test".to_string(),
-            })
-        })
+        Box::pin(async { Ok(crate::dbus::ModemSmsState::Sent) })
     }
 }
 
