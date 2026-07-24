@@ -12,7 +12,8 @@ use crate::config::AppConfig;
 use crate::forward::ForwardOutcome;
 use crate::runner::ProcessRunner;
 use crate::storage::{
-    DeliveryCompletion, DeliveryRow, ForwardAttemptOutcome, MessageStore, NewForwardAttemptSample,
+    DeliveryCompletion, DeliveryRow, DeliveryState, ForwardAttemptOutcome, MessageStore,
+    NewForwardAttemptSample,
 };
 
 const LEASE_SECS: u64 = 90;
@@ -30,6 +31,16 @@ struct DeliveryTaskContext<'a> {
     client: &'a reqwest::Client,
     shell_runner: &'a Arc<dyn ProcessRunner>,
     shell_timeout: Duration,
+}
+
+struct OwnedDeliveryCompletion {
+    id: i64,
+    state: DeliveryState,
+    error: Option<String>,
+    attempt_count: i64,
+    next_attempt_at: Option<String>,
+    lease_token: String,
+    sample: NewForwardAttemptSample,
 }
 
 #[derive(Clone, Default)]
@@ -73,7 +84,7 @@ pub async fn run_delivery_worker(
             }
         }
 
-        let retry_delay = match next_delivery_delay(&store) {
+        let retry_delay = match next_delivery_delay(&store).await {
             Ok(delay) => delay,
             Err(e) => {
                 backoff_after_worker_error("deadline scheduling", &e, &mut error_delay).await;
@@ -129,7 +140,7 @@ async fn process_delivery_batch(
     shell_timeout: Duration,
 ) -> Result<usize> {
     let concurrency = config.delivery.concurrency;
-    let mut rows: VecDeque<_> = claim_delivery_batch(store, config)?.into();
+    let mut rows: VecDeque<_> = claim_delivery_batch(store, config).await?.into();
     if rows.is_empty() {
         return Ok(0);
     }
@@ -156,7 +167,7 @@ async fn process_delivery_batch(
         }
 
         if rows.is_empty() && first_error.is_none() {
-            match claim_delivery_batch(store, config) {
+            match claim_delivery_batch(store, config).await {
                 Ok(claimed) => {
                     claimed_count += claimed.len();
                     rows.extend(claimed);
@@ -176,7 +187,10 @@ async fn process_delivery_batch(
     Ok(claimed_count)
 }
 
-fn claim_delivery_batch(store: &MessageStore, config: &AppConfig) -> Result<Vec<DeliveryRow>> {
+async fn claim_delivery_batch(
+    store: &MessageStore,
+    config: &AppConfig,
+) -> Result<Vec<DeliveryRow>> {
     let concurrency = config.delivery.concurrency;
     let batch_size = concurrency.saturating_mul(CLAIMED_WAVES_PER_BATCH) as u32;
     let channel_timeout = config
@@ -189,7 +203,10 @@ fn claim_delivery_batch(store: &MessageStore, config: &AppConfig) -> Result<Vec<
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
 
-    let rows = store.claim_due_deliveries(batch_size, &lease_until)?;
+    let store = store.clone();
+    let rows =
+        tokio::task::spawn_blocking(move || store.claim_due_deliveries(batch_size, &lease_until))
+            .await??;
     let count = rows.len();
     if count > 0 {
         log::debug!("delivery worker claimed batch; count={count}");
@@ -226,8 +243,10 @@ fn spawn_delivery_task(
     });
 }
 
-fn next_delivery_delay(store: &MessageStore) -> Result<Option<Duration>> {
-    let Some(value) = store.next_delivery_due_at()? else {
+async fn next_delivery_delay(store: &MessageStore) -> Result<Option<Duration>> {
+    let store = store.clone();
+    let Some(value) = tokio::task::spawn_blocking(move || store.next_delivery_due_at()).await??
+    else {
         return Ok(None);
     };
     Ok(Some(time_until(&value, OffsetDateTime::now_utc())?))
@@ -238,6 +257,45 @@ async fn wait_for_retry_deadline(delay: Option<Duration>) {
         Some(delay) => tokio::time::sleep(delay).await,
         None => std::future::pending::<()>().await,
     }
+}
+
+async fn get_message_for_delivery(
+    store: &MessageStore,
+    message_id: i64,
+) -> Result<Option<crate::message::Message>> {
+    let store = store.clone();
+    Ok(tokio::task::spawn_blocking(move || store.get_message_optional(message_id)).await??)
+}
+
+async fn complete_delivery_with_attempt(
+    store: &MessageStore,
+    completion: OwnedDeliveryCompletion,
+) -> Result<()> {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || {
+        let OwnedDeliveryCompletion {
+            id,
+            state,
+            error,
+            attempt_count,
+            next_attempt_at,
+            lease_token,
+            sample,
+        } = completion;
+        // A lost lease intentionally leaves the delivery unchanged while still
+        // retaining the real provider attempt sample.
+        store.complete_delivery_with_attempt(DeliveryCompletion {
+            id,
+            state,
+            error: error.as_deref(),
+            attempt_count,
+            next_attempt_at: next_attempt_at.as_deref(),
+            lease_token: &lease_token,
+            sample,
+        })
+    })
+    .await??;
+    Ok(())
 }
 
 async fn process_delivery_inner(
@@ -251,7 +309,7 @@ async fn process_delivery_inner(
     let profile_key = &row.profile_key;
     let lease_token = row
         .lease_token
-        .as_deref()
+        .clone()
         .ok_or_else(|| anyhow::anyhow!("claimed delivery missing lease token"))?;
     let next_attempt_at = compute_retry_delay(row.id, row.attempt_count + 1);
     let attempt_number = (row.attempt_count + 1) as i32;
@@ -261,26 +319,28 @@ async fn process_delivery_inner(
         process_no_sample_path(
             store,
             row.id,
-            "permanent_failed",
+            DeliveryState::PermanentFailed,
             "max_age_exceeded",
-            lease_token,
+            &lease_token,
             row.attempt_count + 1,
-        )?;
+        )
+        .await?;
         return Ok(());
     }
 
-    let message = match store.get_message_optional(row.message_id)? {
+    let message = match get_message_for_delivery(store, row.message_id).await? {
         Some(message) => message,
         None => {
             error!("delivery {}: message not found", row.id);
-            ensure_completed(store.complete_delivery(
+            process_no_sample_path(
+                store,
                 row.id,
-                "permanent_failed",
-                Some("message_not_found"),
+                DeliveryState::PermanentFailed,
+                "message_not_found",
+                &lease_token,
                 row.attempt_count + 1,
-                None,
-                lease_token,
-            )?)?;
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -313,11 +373,12 @@ async fn process_delivery_inner(
             process_no_sample_path(
                 store,
                 row.id,
-                "permanent_failed",
+                DeliveryState::PermanentFailed,
                 "profile_missing",
-                lease_token,
+                &lease_token,
                 row.attempt_count + 1,
-            )?;
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -344,55 +405,71 @@ async fn process_delivery_inner(
     match outcome {
         ForwardOutcome::Success => {
             info!("delivery {}: success", row.id);
-            store.complete_delivery_with_attempt(DeliveryCompletion {
-                id: row.id,
-                state: "succeeded",
-                error: None,
-                attempt_count: row.attempt_count + 1,
-                next_attempt_at: None,
-                lease_token,
-                sample,
-            })?;
+            complete_delivery_with_attempt(
+                store,
+                OwnedDeliveryCompletion {
+                    id: row.id,
+                    state: DeliveryState::Succeeded,
+                    error: None,
+                    attempt_count: row.attempt_count + 1,
+                    next_attempt_at: None,
+                    lease_token: lease_token.clone(),
+                    sample,
+                },
+            )
+            .await?;
         }
         ForwardOutcome::PermanentFailure(_) => {
             error!("delivery {}: permanent failure", row.id);
-            store.complete_delivery_with_attempt(DeliveryCompletion {
-                id: row.id,
-                state: "permanent_failed",
-                error: error_code.as_deref(),
-                attempt_count: row.attempt_count + 1,
-                next_attempt_at: None,
-                lease_token,
-                sample,
-            })?;
+            complete_delivery_with_attempt(
+                store,
+                OwnedDeliveryCompletion {
+                    id: row.id,
+                    state: DeliveryState::PermanentFailed,
+                    error: error_code.clone(),
+                    attempt_count: row.attempt_count + 1,
+                    next_attempt_at: None,
+                    lease_token: lease_token.clone(),
+                    sample,
+                },
+            )
+            .await?;
         }
         ForwardOutcome::TransientFailure(_) => {
             let age = delivery_age(&row.created_at);
             if age > RETRY_MAX_AGE {
                 error!("delivery {}: max age exceeded, permanent failure", row.id);
-                store.complete_delivery_with_attempt(DeliveryCompletion {
-                    id: row.id,
-                    state: "permanent_failed",
-                    error: Some("max_age_exceeded"),
-                    attempt_count: row.attempt_count + 1,
-                    next_attempt_at: None,
-                    lease_token,
-                    sample,
-                })?;
+                complete_delivery_with_attempt(
+                    store,
+                    OwnedDeliveryCompletion {
+                        id: row.id,
+                        state: DeliveryState::PermanentFailed,
+                        error: Some("max_age_exceeded".to_string()),
+                        attempt_count: row.attempt_count + 1,
+                        next_attempt_at: None,
+                        lease_token: lease_token.clone(),
+                        sample,
+                    },
+                )
+                .await?;
             } else {
                 info!(
                     "delivery {}: transient failure, retry at {}",
                     row.id, next_attempt_at
                 );
-                store.complete_delivery_with_attempt(DeliveryCompletion {
-                    id: row.id,
-                    state: "retry_wait",
-                    error: error_code.as_deref(),
-                    attempt_count: row.attempt_count + 1,
-                    next_attempt_at: Some(&next_attempt_at),
-                    lease_token,
-                    sample,
-                })?;
+                complete_delivery_with_attempt(
+                    store,
+                    OwnedDeliveryCompletion {
+                        id: row.id,
+                        state: DeliveryState::RetryWait,
+                        error: error_code.clone(),
+                        attempt_count: row.attempt_count + 1,
+                        next_attempt_at: Some(next_attempt_at.clone()),
+                        lease_token: lease_token.clone(),
+                        sample,
+                    },
+                )
+                .await?;
             }
         }
     }
@@ -435,22 +512,28 @@ fn duration_millis(duration: Duration) -> i64 {
 }
 
 /// For message_not_found / profile_missing: no attempt sample recorded
-fn process_no_sample_path(
+async fn process_no_sample_path(
     store: &MessageStore,
     id: i64,
-    state: &str,
-    error_code: &str,
+    state: DeliveryState,
+    error_code: &'static str,
     lease_token: &str,
     attempt_count: i64,
 ) -> Result<()> {
-    ensure_completed(store.complete_delivery(
-        id,
-        state,
-        Some(error_code),
-        attempt_count,
-        None,
-        lease_token,
-    )?)?;
+    let store = store.clone();
+    let lease_token = lease_token.to_string();
+    let completed = tokio::task::spawn_blocking(move || {
+        store.complete_delivery(
+            id,
+            state,
+            Some(error_code),
+            attempt_count,
+            None,
+            &lease_token,
+        )
+    })
+    .await??;
+    ensure_completed(completed)?;
     Ok(())
 }
 
@@ -462,16 +545,16 @@ fn map_outcome_to_attempt(outcome: &ForwardOutcome) -> ForwardAttemptOutcome {
     }
 }
 
-fn map_outcome_to_delivery_state(outcome: &ForwardOutcome) -> (&'static str, Option<String>) {
+fn map_outcome_to_delivery_state(outcome: &ForwardOutcome) -> (DeliveryState, Option<String>) {
     match outcome {
-        ForwardOutcome::Success => ("succeeded", None),
+        ForwardOutcome::Success => (DeliveryState::Succeeded, None),
         ForwardOutcome::TransientFailure(ref msg) => {
             let ec = standardize_failure(msg);
-            ("retry_wait", Some(ec))
+            (DeliveryState::RetryWait, Some(ec))
         }
         ForwardOutcome::PermanentFailure(ref msg) => {
             let ec = standardize_failure(msg);
-            ("permanent_failed", Some(ec))
+            (DeliveryState::PermanentFailed, Some(ec))
         }
     }
 }
@@ -927,7 +1010,7 @@ mod tests {
         store
             .complete_delivery(
                 claimed.id,
-                "retry_wait",
+                DeliveryState::RetryWait,
                 Some("http_timeout"),
                 1,
                 Some(&retry_at),
@@ -975,7 +1058,7 @@ mod tests {
             store
                 .complete_delivery(
                     first.id,
-                    "retry_wait",
+                    DeliveryState::RetryWait,
                     Some("http_timeout"),
                     prior_attempts,
                     Some("2000-01-01T00:00:00Z"),
@@ -1020,7 +1103,7 @@ mod tests {
         .unwrap();
 
         let d = store.get_delivery(delivery_id).unwrap();
-        assert_eq!(d.state, "permanent_failed");
+        assert_eq!(d.state, DeliveryState::PermanentFailed);
         assert_eq!(d.attempt_count, 3, "attempt_count must NOT regress");
         assert_eq!(d.last_error.as_deref(), Some("profile_missing"));
 
@@ -1069,7 +1152,8 @@ mod tests {
 
         let d = store.get_delivery(delivery_id).unwrap();
         assert_eq!(
-            d.state, "retry_wait",
+            d.state,
+            DeliveryState::RetryWait,
             "shell timeout must produce retry_wait"
         );
         assert_eq!(d.last_error.as_deref(), Some("shell_timeout"));
@@ -1140,7 +1224,7 @@ mod tests {
 
         assert_eq!(runner.calls.load(Ordering::SeqCst), 0);
         let delivery = store.get_delivery(delivery_id).unwrap();
-        assert_eq!(delivery.state, "permanent_failed");
+        assert_eq!(delivery.state, DeliveryState::PermanentFailed);
         assert_eq!(delivery.last_error.as_deref(), Some("max_age_exceeded"));
     }
 }

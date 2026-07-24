@@ -4,7 +4,20 @@ use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
 #[folder = "frontend/dist"]
+#[allow_missing = true]
 struct FrontendAssets;
+
+const FALLBACK_INDEX: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>sms-relayed</title>
+</head>
+<body>
+  <p>The web frontend has not been built. Run <code>pnpm --dir frontend build</code> before packaging a release.</p>
+</body>
+</html>
+"#;
 
 pub async fn serve(req: Request<Body>) -> Response<Body> {
     let requested_path = req.uri().path().trim_start_matches('/');
@@ -29,6 +42,11 @@ pub async fn serve(req: Request<Body>) -> Response<Body> {
                 .body(Body::from(content.data.into_owned()))
                 .unwrap()
         }
+        None if asset_path == "index.html" => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(Body::from(FALLBACK_INDEX))
+            .unwrap(),
         None => Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(Body::empty())

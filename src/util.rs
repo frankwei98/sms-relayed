@@ -5,7 +5,3 @@ pub fn hostname() -> String {
 pub fn url_encode_path(s: &str) -> String {
     urlencoding::encode(s).into_owned()
 }
-
-pub fn url_encode_form(s: &str) -> String {
-    urlencoding::encode(s).replace("%20", "+")
-}

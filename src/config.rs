@@ -424,25 +424,56 @@ impl AppConfig {
     }
 
     pub fn save_secure(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-            }
-        }
-        let content = toml::to_string_pretty(self)?;
-        let mut file = fs::File::create(path)
-            .with_context(|| format!("failed to write config {}", path.display()))?;
-        file.write_all(content.as_bytes())?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+            use std::os::unix::fs::DirBuilderExt;
+
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true).mode(0o700);
+            builder
+                .create(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        Ok(())
+        #[cfg(not(unix))]
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+
+        let content = toml::to_string_pretty(self)?;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("config.toml");
+        let temporary = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
+
+        let result = (|| -> Result<()> {
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options
+                .open(&temporary)
+                .with_context(|| format!("failed to write config {}", path.display()))?;
+            file.write_all(content.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temporary, path)
+                .with_context(|| format!("failed to replace config {}", path.display()))?;
+            #[cfg(unix)]
+            fs::File::open(parent)?.sync_all()?;
+            Ok(())
+        })();
+
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -611,6 +642,33 @@ fn require(section: &str, name: &str, field: &str, value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn save_secure_atomically_writes_a_private_config() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory =
+            std::env::temp_dir().join(format!("sms-relayed-config-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("config.toml");
+        let mut cfg = AppConfig::default();
+        cfg.api.password = "private".to_string();
+
+        cfg.save_secure(&path).unwrap();
+
+        assert_eq!(AppConfig::load(&path).unwrap(), cfg);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let names = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec![std::ffi::OsString::from("config.toml")]);
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn default_app_config_has_expected_modem_and_sms_defaults() {

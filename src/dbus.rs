@@ -8,6 +8,7 @@ use std::time::Duration;
 use anyhow::Result;
 use futures_util::StreamExt;
 use log::{error, info, warn};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use zbus::zvariant::{OwnedValue, Value};
 use zbus::Connection;
 
@@ -139,6 +140,7 @@ const OBJECT_MANAGER_INTERFACE: &str = "org.freedesktop.DBus.ObjectManager";
 const MM_DESTINATION: &str = "org.freedesktop.ModemManager1";
 
 const DBUS_METHOD_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_INBOUND_TASKS: usize = 16;
 
 pub const FINGERPRINT_META_KEY: &str = "modem_fingerprint";
 
@@ -173,54 +175,65 @@ fn extract_u32(props: &HashMap<String, OwnedValue>, key: &str) -> u32 {
 /// Resolve the actual modem path for monitoring.
 /// First tries the configured path directly. If it fails and a fingerprint is
 /// stored, scans all modems and matches by fingerprint exactly once.
+async fn get_stored_fingerprint(store: &MessageStore) -> Result<Option<String>> {
+    let store = store.clone();
+    Ok(tokio::task::spawn_blocking(move || store.get_meta(FINGERPRINT_META_KEY)).await??)
+}
+
+async fn set_stored_fingerprint(store: &MessageStore, fingerprint: String) -> Result<()> {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || store.set_meta(FINGERPRINT_META_KEY, &fingerprint))
+        .await??;
+    Ok(())
+}
+
+async fn backfill_dedupe_keys(store: &MessageStore) -> Result<()> {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || store.backfill_dedupe_keys()).await??;
+    Ok(())
+}
+
 async fn resolve_monitor_path(
     configured_path: &str,
     modem_service: &ModemService,
     store: &MessageStore,
-) -> Option<String> {
+) -> Result<Option<String>> {
     // Try configured path first
-    let stored_fp = store.get_meta(FINGERPRINT_META_KEY);
+    let stored_fp = get_stored_fingerprint(store).await?;
     let identity = modem_service.extract_identity(configured_path).await;
     if let Some(identity) = identity {
         let current_fp = ModemService::compute_fingerprint(&identity);
         match stored_fp.as_deref() {
             Some(enrolled_fp) if enrolled_fp == current_fp => {
-                if let Err(e) = store.backfill_dedupe_keys() {
-                    error!("failed to backfill dedupe keys: {}", e);
-                    return None;
-                }
-                return Some(configured_path.to_string());
+                backfill_dedupe_keys(store).await?;
+                return Ok(Some(configured_path.to_string()));
             }
             Some(enrolled_fp) => {
                 warn!("configured modem identity changed; refusing path reuse");
-                return modem_service.scan_and_match_fingerprint(enrolled_fp).await;
+                return Ok(modem_service.scan_and_match_fingerprint(enrolled_fp).await);
             }
             None => {
-                if let Err(e) = store.set_meta(FINGERPRINT_META_KEY, &current_fp) {
-                    error!("failed to enroll modem identity: {}", e);
-                    return None;
-                }
+                set_stored_fingerprint(store, current_fp).await?;
                 // Backfill dedupe keys for legacy modem-inbound messages now
                 // that the fingerprint is available for stable hashing.
-                if let Err(e) = store.backfill_dedupe_keys() {
-                    error!("failed to backfill dedupe keys: {}", e);
-                    return None;
-                }
-                return Some(configured_path.to_string());
+                backfill_dedupe_keys(store).await?;
+                return Ok(Some(configured_path.to_string()));
             }
         }
     }
 
     // Configured path failed; try fingerprint match
-    modem_service
-        .scan_and_match_fingerprint(stored_fp.as_deref()?)
-        .await
+    let Some(stored_fp) = stored_fp.as_deref() else {
+        return Ok(None);
+    };
+    Ok(modem_service.scan_and_match_fingerprint(stored_fp).await)
 }
 
 async fn run_subscription<F, Fut>(
     actual_path: &str,
     config: &AppConfig,
     on_received: F,
+    inbound_limit: Arc<Semaphore>,
 ) -> Result<()>
 where
     F: Fn(ReceivedSms) -> Fut + Send + Clone + 'static,
@@ -263,10 +276,7 @@ where
         .collect();
 
     let mut stream = zbus::MessageStream::from(connection.clone());
-    let mut inbound_tasks = tokio::task::JoinSet::new();
-
     while let Some(msg) = stream.next().await {
-        while inbound_tasks.try_join_next().is_some() {}
         let msg = msg?;
         let header = msg.header();
 
@@ -306,10 +316,15 @@ where
                 let is_received = body.1;
                 if is_received {
                     info!("SmsPath:\n{}", sms_path);
+                    let permit = inbound_limit
+                        .clone()
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| anyhow::anyhow!("inbound task limiter closed"))?;
                     let task_connection = connection.clone();
                     let task_storage_filters = ignored_storage.clone();
                     let task_handler = on_received.clone();
-                    spawn_inbound_task(&mut inbound_tasks, async move {
+                    spawn_inbound_task(permit, async move {
                         handle_incoming_sms(
                             &task_connection,
                             &sms_path,
@@ -395,15 +410,16 @@ where
 }
 
 fn spawn_inbound_task(
-    tasks: &mut tokio::task::JoinSet<()>,
+    permit: OwnedSemaphorePermit,
     task: impl std::future::Future<Output = Result<()>> + Send + 'static,
-) {
-    tasks.spawn(async move {
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let _permit = permit;
         if task.await.is_err() {
             error!("incoming SMS processing task failed");
             crate::monitoring::capture_failure("dbus", "dbus.inbound_processing_failed");
         }
-    });
+    })
 }
 
 async fn add_match_rule(connection: &Connection, rule: &str) -> Result<()> {
@@ -437,20 +453,29 @@ where
     println!("短信转发模式正在启动，正在连接系统 D-Bus。");
     info!("正在运行. 按下 Ctrl-C 停止.");
 
-    let mut current_path = resolve_monitor_path(configured_modem_path, modem_service, store).await;
-    if current_path.is_none() {
-        warn!("initial modem resolution failed; will retry with backoff");
-        current_path = Some(configured_modem_path.to_string());
-    }
-
+    let inbound_limit = Arc::new(Semaphore::new(MAX_INBOUND_TASKS));
+    let mut current_path = None;
     let mut delay = Duration::from_secs(5);
     let max_delay = Duration::from_secs(60);
 
     loop {
-        let path = current_path
-            .clone()
-            .unwrap_or_else(|| configured_modem_path.to_string());
-        match run_subscription(&path, config, on_received.clone()).await {
+        if current_path.is_none() {
+            current_path =
+                match resolve_monitor_path(configured_modem_path, modem_service, store).await {
+                    Ok(path) => path,
+                    Err(error) => {
+                        error!("modem resolution failed: {}", error);
+                        None
+                    }
+                };
+        }
+        let Some(path) = current_path.clone() else {
+            warn!("no verified modem identity available; retrying resolution");
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(max_delay);
+            continue;
+        };
+        match run_subscription(&path, config, on_received.clone(), inbound_limit.clone()).await {
             Ok(()) => {
                 delay = Duration::from_secs(5);
             }
@@ -458,7 +483,13 @@ where
                 error!("D-Bus monitor lost: {}", e);
                 crate::monitoring::capture_failure("dbus", "dbus.monitor_lost");
                 let resolved =
-                    resolve_monitor_path(configured_modem_path, modem_service, store).await;
+                    match resolve_monitor_path(configured_modem_path, modem_service, store).await {
+                        Ok(resolved) => resolved,
+                        Err(error) => {
+                            error!("modem resolution failed: {}", error);
+                            None
+                        }
+                    };
                 if let Some(new_path) = resolved {
                     if new_path != path {
                         info!("modem path changed from {} to {}", path, new_path);
@@ -466,6 +497,7 @@ where
                     current_path = Some(new_path);
                 } else {
                     warn!("modem re-resolution failed; will retry");
+                    current_path = None;
                 }
             }
         }
@@ -609,25 +641,66 @@ mod tests {
     async fn slow_inbound_work_does_not_block_later_inbound_work() {
         let first_started = Arc::new(Notify::new());
         let second_completed = Arc::new(Notify::new());
-        let mut tasks = tokio::task::JoinSet::new();
+        let limiter = Arc::new(Semaphore::new(2));
 
         let first_started_task = first_started.clone();
-        spawn_inbound_task(&mut tasks, async move {
-            first_started_task.notify_one();
-            std::future::pending::<Result<()>>().await
-        });
+        let first =
+            spawn_inbound_task(limiter.clone().acquire_owned().await.unwrap(), async move {
+                first_started_task.notify_one();
+                std::future::pending::<Result<()>>().await
+            });
         first_started.notified().await;
 
         let second_completed_task = second_completed.clone();
-        spawn_inbound_task(&mut tasks, async move {
-            second_completed_task.notify_one();
-            Ok(())
-        });
+        let second =
+            spawn_inbound_task(limiter.clone().acquire_owned().await.unwrap(), async move {
+                second_completed_task.notify_one();
+                Ok(())
+            });
         tokio::time::timeout(StdDuration::from_millis(100), second_completed.notified())
             .await
             .expect("a later inbound SMS must not wait for an earlier slow task");
-        assert!(tasks.join_next().await.unwrap().is_ok());
-        tasks.abort_all();
+        second.await.unwrap();
+        first.abort();
+    }
+
+    #[tokio::test]
+    async fn inbound_limit_backpressures_and_detached_tasks_release_permits() {
+        let limiter = Arc::new(Semaphore::new(MAX_INBOUND_TASKS));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let started_task = started.clone();
+        let release_task = release.clone();
+        let detached =
+            spawn_inbound_task(limiter.clone().acquire_owned().await.unwrap(), async move {
+                started_task.notify_one();
+                release_task.notified().await;
+                Ok(())
+            });
+        started.notified().await;
+        drop(detached);
+
+        let mut held = Vec::new();
+        for _ in 1..MAX_INBOUND_TASKS {
+            held.push(limiter.clone().acquire_owned().await.unwrap());
+        }
+        assert!(
+            tokio::time::timeout(
+                StdDuration::from_millis(20),
+                limiter.clone().acquire_owned()
+            )
+            .await
+            .is_err(),
+            "the seventeenth inbound task must wait"
+        );
+
+        release.notify_one();
+        let released = tokio::time::timeout(StdDuration::from_millis(100), limiter.acquire_owned())
+            .await
+            .expect("a finished detached task must release its permit")
+            .unwrap();
+        drop(released);
+        drop(held);
     }
 
     #[tokio::test]
@@ -638,14 +711,16 @@ mod tests {
         let service = ModemService::new_with_runner(IdentityRunner);
 
         let resolved =
-            resolve_monitor_path("/org/freedesktop/ModemManager1/Modem/0", &service, &store).await;
+            resolve_monitor_path("/org/freedesktop/ModemManager1/Modem/0", &service, &store)
+                .await
+                .unwrap();
 
         assert_eq!(
             resolved.as_deref(),
             Some("/org/freedesktop/ModemManager1/Modem/1")
         );
         assert_eq!(
-            store.get_meta(FINGERPRINT_META_KEY).as_deref(),
+            store.get_meta(FINGERPRINT_META_KEY).unwrap().as_deref(),
             Some(target.as_str())
         );
     }
@@ -672,7 +747,9 @@ mod tests {
         let service = ModemService::new_with_runner(IdentityRunner);
 
         let resolved =
-            resolve_monitor_path("/org/freedesktop/ModemManager1/Modem/0", &service, &store).await;
+            resolve_monitor_path("/org/freedesktop/ModemManager1/Modem/0", &service, &store)
+                .await
+                .unwrap();
 
         assert_eq!(
             resolved.as_deref(),
