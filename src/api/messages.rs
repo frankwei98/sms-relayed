@@ -133,21 +133,23 @@ async fn send_message(
     }
     let phone_number = req.phone_number.trim().to_string();
     let body = req.body;
-    let idempotency_key = match headers.get("idempotency-key") {
-        Some(value) => {
-            let value = value
-                .to_str()
-                .map_err(|_| ApiError::bad_request("invalid Idempotency-Key header"))?
-                .trim();
-            if value.is_empty() || value.len() > 200 {
-                return Err(ApiError::bad_request(
-                    "Idempotency-Key must contain 1 to 200 characters",
-                ));
-            }
-            Some(value.to_string())
-        }
-        None => None,
-    };
+    let value = headers.get("idempotency-key").ok_or_else(|| {
+        ApiError::new(
+            StatusCode::PRECONDITION_REQUIRED,
+            "idempotency_key_required",
+            "Idempotency-Key header is required",
+        )
+    })?;
+    let value = value
+        .to_str()
+        .map_err(|_| ApiError::bad_request("invalid Idempotency-Key header"))?
+        .trim();
+    if value.is_empty() || value.len() > 200 {
+        return Err(ApiError::bad_request(
+            "Idempotency-Key must contain 1 to 200 characters",
+        ));
+    }
+    let idempotency_key = Some(value.to_string());
     let updated = state
         .messaging()
         .send(SendMessage {
@@ -367,6 +369,8 @@ mod tests {
     async fn send_message_uses_the_state_sms_sender() {
         let sender = RecordingSmsSender::default();
         let store = crate::storage::MessageStore::open_in_memory().unwrap();
+        let modem = crate::modem::ModemService::new();
+        modem.set_verified_path(Some("/org/freedesktop/ModemManager1/Modem/0".to_string()));
         let state = super::super::ApiState {
             config: std::sync::Arc::new(crate::config::AppConfig::default()),
             config_path: std::path::PathBuf::from("/tmp/not-used.toml"),
@@ -375,9 +379,21 @@ mod tests {
             delivery_wakeup: crate::delivery::DeliveryWakeup::new(),
             started_at: std::time::Instant::now(),
             sessions: super::super::auth::SessionStore::default(),
-            modem: crate::modem::ModemService::new(),
+            modem,
             sms_sender: Arc::new(sender.clone()),
         };
+
+        let missing_key = send_message(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SendRequest {
+                phone_number: "+15551234567".to_string(),
+                body: "test body".to_string(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing_key.status, StatusCode::PRECONDITION_REQUIRED);
 
         let mut headers = HeaderMap::new();
         headers.insert("idempotency-key", "api-request-1".parse().unwrap());

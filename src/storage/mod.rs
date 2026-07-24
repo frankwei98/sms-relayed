@@ -123,7 +123,7 @@ pub struct DeliveryCompletion<'a> {
     pub state: DeliveryState,
     pub error: Option<&'a str>,
     pub attempt_count: i64,
-    pub retry_after: Option<Duration>,
+    pub next_attempt_at: Option<&'a str>,
     pub lease_token: &'a str,
     pub sample: NewForwardAttemptSample,
 }
@@ -1178,7 +1178,7 @@ mod tests {
     }
 
     #[test]
-    fn retention_preserves_outbound_idempotency_tombstones() {
+    fn retention_expires_outbound_idempotency_tombstones_with_the_message_window() {
         let store = memory_store();
         let request = || NewMessage {
             direction: MessageDirection::Outbound,
@@ -1209,18 +1209,71 @@ mod tests {
         );
 
         assert_eq!(store.run_retention(1, 100).unwrap(), 1);
-        let replay = store
+        let (replayed, created) = store
             .create_or_get_outbound(
                 request(),
                 Some("retained-key"),
                 "another-owner",
                 std::time::Duration::from_secs(90),
             )
-            .unwrap_err();
-        assert!(replay
-            .downcast_ref::<crate::message::IdempotencyReplayUnavailable>()
-            .is_some());
-        assert_eq!(store.count_messages().unwrap(), 0);
+            .unwrap();
+        assert!(created);
+        assert_ne!(replayed.id, message.id);
+        assert_eq!(store.count_messages().unwrap(), 1);
+    }
+
+    #[test]
+    fn independent_connections_cannot_claim_the_same_outbound_operation() {
+        let path = std::env::temp_dir().join(format!(
+            "sms-relayed-outbound-claim-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let first = MessageStore::open(&path).unwrap();
+        let second = MessageStore::open(&path).unwrap();
+        let now = "2026-01-01T00:00:00Z".to_string();
+        first
+            .create_or_get_outbound(
+                NewMessage {
+                    direction: MessageDirection::Outbound,
+                    phone_number: "+15550000000".to_string(),
+                    body: "claim once".to_string(),
+                    timestamp: now.clone(),
+                    status: MessageStatus::Sending,
+                    source: MessageSource::Web,
+                    modem_sms_path: None,
+                    read_at: Some(now),
+                    error: None,
+                    inbound_dedupe_key: None,
+                },
+                None,
+                "expired-owner",
+                Duration::ZERO,
+            )
+            .unwrap();
+
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let claim = |store: MessageStore, owner: &'static str, barrier: Arc<std::sync::Barrier>| {
+            std::thread::spawn(move || {
+                barrier.wait();
+                store
+                    .claim_due_outbound(owner, Duration::from_secs(90))
+                    .unwrap()
+            })
+        };
+        let first_claim = claim(first.clone(), "first-owner", barrier.clone());
+        let second_claim = claim(second.clone(), "second-owner", barrier.clone());
+        barrier.wait();
+        let claims = [first_claim.join().unwrap(), second_claim.join().unwrap()]
+            .into_iter()
+            .filter(Option::is_some)
+            .count();
+
+        assert_eq!(claims, 1);
+        drop(first);
+        drop(second);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
     }
 
     #[test]
@@ -1568,13 +1621,16 @@ mod tests {
             .unwrap()
             .pop()
             .unwrap();
+        let next_attempt_at = (OffsetDateTime::now_utc() + time::Duration::days(1))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
         store
             .complete_delivery(
                 delivery.id,
                 DeliveryState::RetryWait,
                 Some("http_timeout"),
                 1,
-                Some(Duration::from_secs(24 * 60 * 60)),
+                Some(&next_attempt_at),
                 delivery.lease_token.as_deref().unwrap(),
             )
             .unwrap();
@@ -1609,7 +1665,7 @@ mod tests {
                 state: DeliveryState::Succeeded,
                 error: None,
                 attempt_count: 1,
-                retry_after: None,
+                next_attempt_at: None,
                 lease_token: "wrong-lease-token",
                 sample: NewForwardAttemptSample {
                     profile_key: delivery.profile_key,
@@ -2103,7 +2159,7 @@ mod tests {
                 state: DeliveryState::Succeeded,
                 error: None,
                 attempt_count: 1,
-                retry_after: None,
+                next_attempt_at: None,
                 lease_token: d1.lease_token.as_ref().unwrap(),
                 sample: NewForwardAttemptSample {
                     profile_key: d1.profile_key.clone(),
@@ -2126,7 +2182,7 @@ mod tests {
                 state: DeliveryState::PermanentFailed,
                 error: Some("shell_exit_nonzero"),
                 attempt_count: 1,
-                retry_after: None,
+                next_attempt_at: None,
                 lease_token: d2.lease_token.as_ref().unwrap(),
                 sample: NewForwardAttemptSample {
                     profile_key: d2.profile_key.clone(),
@@ -2157,7 +2213,7 @@ mod tests {
                 state: DeliveryState::RetryWait,
                 error: Some("http_timeout"),
                 attempt_count: 1,
-                retry_after: Some(Duration::from_secs(24 * 60 * 60)),
+                next_attempt_at: Some("2099-01-02T00:00:00Z"),
                 lease_token: d3.lease_token.as_ref().unwrap(),
                 sample: NewForwardAttemptSample {
                     profile_key: d3.profile_key.clone(),

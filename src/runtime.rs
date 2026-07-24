@@ -25,17 +25,18 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
     let events = EventBus::new();
     let delivery_wakeup = DeliveryWakeup::new();
     let sms_sender = Arc::new(dbus::SystemSmsSender::new());
+    let modem_service = ModemService::new();
     let messaging = Messaging::new(
         store.clone(),
         events.clone(),
         delivery_wakeup.clone(),
         sms_sender.clone(),
-    );
+    )
+    .with_verified_modem(modem_service.clone());
 
     let client = Arc::new(build_http_client(&config.http));
     let shell_timeout = Duration::from_secs(config.http.shell_timeout_secs);
     let shell_runner = RealProcessRunner;
-    let modem_service = ModemService::new();
 
     // Recover expired delivery leases
     let recovered = store.recover_expired_delivery_leases().await?;
@@ -136,22 +137,37 @@ async fn process_inbound_sms(
 
 async fn run_retention_worker(store: Store, config: AppConfig) {
     const RETENTION_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
-    if !config.retention.enabled {
-        std::future::pending::<()>().await;
-        return;
-    }
+    const IDEMPOTENCY_RETENTION_DAYS: u64 = 30;
 
     loop {
-        let max_age_days = config.retention.max_age_days;
-        let batch_size = config.retention.batch_size;
-        match store.run_retention(max_age_days, batch_size).await {
+        match store
+            .prune_outbound_idempotency(IDEMPOTENCY_RETENTION_DAYS)
+            .await
+        {
             Ok(deleted) if deleted > 0 => {
-                log::info!("retention deleted {} messages", deleted);
+                log::info!("retention deleted {} outbound idempotency records", deleted);
             }
             Ok(_) => {}
             Err(e) => {
-                log::error!("retention failed: {}", e);
-                crate::monitoring::capture_failure("retention", "retention.cleanup_failed");
+                log::error!("outbound idempotency retention failed: {}", e);
+                crate::monitoring::capture_failure(
+                    "retention",
+                    "retention.idempotency_cleanup_failed",
+                );
+            }
+        }
+        if config.retention.enabled {
+            let max_age_days = config.retention.max_age_days;
+            let batch_size = config.retention.batch_size;
+            match store.run_retention(max_age_days, batch_size).await {
+                Ok(deleted) if deleted > 0 => {
+                    log::info!("retention deleted {} messages", deleted);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    log::error!("retention failed: {}", e);
+                    crate::monitoring::capture_failure("retention", "retention.cleanup_failed");
+                }
             }
         }
         tokio::time::sleep(RETENTION_INTERVAL).await;
@@ -169,9 +185,22 @@ pub async fn send_interactive(config_path: &Path) -> Result<()> {
     }
     let sms_sender = Arc::new(dbus::SystemSmsSender::connect().await?);
     let store = Store::open(Path::new(&config.api.database_path)).await?;
-    let messaging = Messaging::new(store, EventBus::new(), DeliveryWakeup::new(), sms_sender);
-    if messaging.has_pending_outbound().await? {
-        anyhow::bail!("an outbound SMS is still unresolved; refusing a blind CLI retry");
+    let modem_service = ModemService::new();
+    let verified_path = dbus::resolve_monitor_path(&config.app.modem_path, &modem_service, &store)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no verified modem identity available"))?;
+    modem_service.set_verified_path(Some(verified_path));
+    let messaging = Messaging::new(store, EventBus::new(), DeliveryWakeup::new(), sms_sender)
+        .with_verified_modem(modem_service);
+    if messaging.has_pending_outbound().await?
+        && !Confirm::new(
+            "An outbound SMS is unresolved. Sending another may duplicate it. Continue anyway?",
+        )
+        .with_default(false)
+        .prompt()?
+    {
+        println!("send cancelled while an outbound SMS remains unresolved");
+        return Ok(());
     }
     let outcome = messaging
         .send(SendMessage {

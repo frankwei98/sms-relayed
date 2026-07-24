@@ -256,6 +256,7 @@ async fn process_delivery_inner(
 ) -> Result<()> {
     let profile_key = &row.profile_key;
     let retry_after = compute_retry_delay(row.id, row.attempt_count + 1);
+    let retry_at = OffsetDateTime::now_utc() + time::Duration::try_from(retry_after)?;
 
     if delivery_age(row.created_at) > RETRY_MAX_AGE {
         error!("delivery {}: max age exceeded, permanent failure", row.id);
@@ -366,11 +367,11 @@ async fn process_delivery_inner(
                     store,
                     CompleteDelivery {
                         claim: row.claim.clone(),
-                        disposition: DeliveryDisposition::RetryAfter {
+                        disposition: DeliveryDisposition::RetryAt {
                             error_code: error_code
                                 .clone()
                                 .unwrap_or_else(|| "unknown_error".to_string()),
-                            delay: retry_after,
+                            at: retry_at,
                         },
                         attempt: Some(sample),
                     },
@@ -890,9 +891,9 @@ mod tests {
         store
             .complete_delivery(CompleteDelivery {
                 claim: claimed.claim,
-                disposition: DeliveryDisposition::RetryAfter {
+                disposition: DeliveryDisposition::RetryAt {
                     error_code: "http_timeout".to_string(),
-                    delay: Duration::from_millis(100),
+                    at: OffsetDateTime::now_utc() + time::Duration::milliseconds(100),
                 },
                 attempt: None,
             })
@@ -934,9 +935,9 @@ mod tests {
             store
                 .complete_delivery(CompleteDelivery {
                     claim: claim.claim,
-                    disposition: DeliveryDisposition::RetryAfter {
+                    disposition: DeliveryDisposition::RetryAt {
                         error_code: "http_timeout".to_string(),
-                        delay: Duration::ZERO,
+                        at: OffsetDateTime::now_utc(),
                     },
                     attempt: None,
                 })

@@ -134,18 +134,11 @@ impl MessageStore {
         state: DeliveryState,
         error: Option<&str>,
         attempt_count: i64,
-        retry_after: Option<Duration>,
+        next_attempt_at: Option<&str>,
         lease_token: &str,
     ) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
-        let now_time = OffsetDateTime::now_utc();
-        let format = &time::format_description::well_known::Rfc3339;
-        let now = now_time.format(format)?;
-        let next_attempt_at = retry_after
-            .map(|delay| -> Result<String> {
-                Ok((now_time + time::Duration::try_from(delay)?).format(format)?)
-            })
-            .transpose()?;
+        let now = now_string();
         let changed = conn.execute(
             "UPDATE forward_deliveries
              SET state = ?1, last_error = ?2, attempt_count = ?3, next_attempt_at = ?4,

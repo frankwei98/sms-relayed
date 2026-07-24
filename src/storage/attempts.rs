@@ -71,20 +71,14 @@ impl MessageStore {
             state,
             error,
             attempt_count,
-            retry_after,
+            next_attempt_at,
             lease_token,
             sample,
         } = completion;
         let mut conn = self.conn.lock().unwrap();
         let transaction = conn.transaction()?;
-        let now_time = OffsetDateTime::now_utc();
-        let format = &time::format_description::well_known::Rfc3339;
-        let now = now_time.format(format)?;
-        let next_attempt_at = retry_after
-            .map(|delay| -> Result<String> {
-                Ok((now_time + time::Duration::try_from(delay)?).format(format)?)
-            })
-            .transpose()?;
+        let now =
+            OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?;
         insert_forward_attempt_on(&transaction, &sample, &now)?;
         prune_forward_attempts_on(&transaction, &sample.profile_key)?;
         let changed = transaction.execute(

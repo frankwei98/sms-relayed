@@ -2,7 +2,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::dbus::{ReceivedSms, SendAttemptOutcome, SmsSender};
+use crate::dbus::{ModemSmsState, ReceivedSms, SendAttemptOutcome, SmsSender, SmsSnapshot};
 use crate::delivery::DeliveryWakeup;
 use crate::events::{AppEvent, EventBus};
 use crate::message::{ConversationSummary, Message, MessageFilter, MessageSource, MessageStatus};
@@ -61,6 +61,7 @@ pub struct Messaging {
     events: EventBus,
     delivery_wakeup: DeliveryWakeup,
     sms_sender: Arc<dyn SmsSender>,
+    verified_modem: Option<crate::modem::ModemService>,
 }
 
 impl Messaging {
@@ -80,7 +81,13 @@ impl Messaging {
             events,
             delivery_wakeup,
             sms_sender,
+            verified_modem: None,
         }
+    }
+
+    pub fn with_verified_modem(mut self, modem: crate::modem::ModemService) -> Self {
+        self.verified_modem = Some(modem);
+        self
     }
 
     /// The detached finalizer owns the complete send, including creation of
@@ -104,9 +111,14 @@ impl Messaging {
 
     async fn create_and_run_outbound(
         &self,
-        request: SendMessage,
+        mut request: SendMessage,
         owner: String,
     ) -> anyhow::Result<SendOutcome> {
+        if let Some(modem) = self.verified_modem.as_ref() {
+            request.modem_path = modem
+                .verified_path()
+                .ok_or_else(|| anyhow::anyhow!("verified modem identity is not ready"))?;
+        }
         let SendMessage {
             ref phone_number,
             ref body,
@@ -293,10 +305,13 @@ impl Messaging {
                 .await
             {
                 Ok(OutboundTransition::Applied(updated)) => {
-                    self.events.send(AppEvent::MessageUpdated(updated.clone()));
+                    self.publish_outbound_update(&updated, &owner).await;
                     return Ok(send_outcome(updated));
                 }
                 Ok(OutboundTransition::OwnershipLost(message)) => {
+                    if matches!(message.status, MessageStatus::Sent | MessageStatus::Failed) {
+                        self.publish_outbound_update(&message, &owner).await;
+                    }
                     return Ok(send_outcome(message));
                 }
                 Err(update_error) => {
@@ -312,6 +327,29 @@ impl Messaging {
             }
         }
         unreachable!()
+    }
+
+    async fn publish_outbound_update(&self, message: &Message, owner: &str) {
+        self.events.send(AppEvent::MessageUpdated(message.clone()));
+        match self
+            .store
+            .acknowledge_outbound_event(message.id, owner.to_string())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                log::warn!(
+                    "outbound update event acknowledgement lost ownership; message_id={}",
+                    message.id
+                );
+            }
+            Err(error) => {
+                log::error!(
+                    "acknowledging outbound update event failed; message_id={}: {error}",
+                    message.id
+                );
+            }
+        }
     }
 
     async fn defer_outbound(
@@ -338,6 +376,18 @@ impl Messaging {
     pub async fn run_outbound_worker(&self) {
         let owner = uuid::Uuid::new_v4().to_string();
         loop {
+            match self.store.claim_pending_outbound_event(owner.clone()).await {
+                Ok(Some(message)) => {
+                    self.publish_outbound_update(&message, &owner).await;
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    log::error!("claiming outbound update event failed: {error}");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            }
             match self.store.claim_due_outbound(owner.clone()).await {
                 Ok(Some(claim)) => {
                     if let Err(error) = self.recover_claim(claim, owner.clone()).await {
@@ -389,7 +439,72 @@ impl Messaging {
                         )
                         .await;
                 };
-                self.begin_and_send(claim.message.id, owner, path).await
+                match self
+                    .inspect_modem_sms(claim.message.id, &owner, path)
+                    .await
+                {
+                    Ok(snapshot) if snapshot.state == ModemSmsState::Unknown => {
+                        self.defer_outbound(
+                            claim.message.id,
+                            owner,
+                            OutboundPhase::Unknown,
+                            Some(
+                                "prepared modem SMS is no longer available; automatic send suppressed"
+                                    .to_string(),
+                            ),
+                            None,
+                        )
+                        .await
+                    }
+                    Ok(snapshot) if !snapshot_matches_message(&snapshot, &claim.message) => {
+                        self.defer_outbound(
+                            claim.message.id,
+                            owner,
+                            OutboundPhase::Unknown,
+                            Some(
+                                "prepared modem SMS identity does not match the persisted request; automatic send suppressed"
+                                    .to_string(),
+                            ),
+                            None,
+                        )
+                        .await
+                    }
+                    Ok(snapshot) if snapshot.state == ModemSmsState::Stored => {
+                        self.begin_and_send(claim.message.id, owner, path).await
+                    }
+                    Ok(snapshot) if snapshot.state == ModemSmsState::Sent => {
+                        self.finish_outbound(
+                            claim.message.id,
+                            owner,
+                            MessageStatus::Sent,
+                            None,
+                        )
+                        .await
+                    }
+                    Ok(_) => {
+                        self.defer_outbound(
+                            claim.message.id,
+                            owner,
+                            OutboundPhase::Uncertain,
+                            Some(
+                                "prepared modem SMS is already being sent; automatic resend suppressed"
+                                    .to_string(),
+                            ),
+                            Some(Duration::from_secs(5)),
+                        )
+                        .await
+                    }
+                    Err(error) => {
+                        self.defer_outbound(
+                            claim.message.id,
+                            owner,
+                            OutboundPhase::Prepared,
+                            Some(format!("reading prepared modem SMS failed: {error}")),
+                            Some(Duration::from_secs(5)),
+                        )
+                        .await
+                    }
+                }
             }
             OutboundPhase::SendStarted | OutboundPhase::Uncertain => {
                 self.reconcile_claim(claim.message, owner).await
@@ -414,15 +529,40 @@ impl Messaging {
                 )
                 .await;
         };
-        match self
-            .with_outbound_lease(message.id, &owner, self.sms_sender.sms_state(path))
-            .await
-        {
-            Ok(crate::dbus::ModemSmsState::Sent) => {
+        match self.inspect_modem_sms(message.id, &owner, path).await {
+            Ok(snapshot) if snapshot.state == ModemSmsState::Unknown => {
+                self.defer_outbound(
+                    message.id,
+                    owner,
+                    OutboundPhase::Unknown,
+                    Some("send outcome unknown; automatic resend suppressed".to_string()),
+                    None,
+                )
+                .await
+            }
+            Ok(snapshot) if !snapshot_matches_message(&snapshot, &message) => {
+                self.defer_outbound(
+                    message.id,
+                    owner,
+                    OutboundPhase::Unknown,
+                    Some(
+                        "modem SMS identity does not match the persisted request; automatic reconciliation suppressed"
+                            .to_string(),
+                    ),
+                    None,
+                )
+                .await
+            }
+            Ok(snapshot) if snapshot.state == ModemSmsState::Sent => {
                 self.finish_outbound(message.id, owner, MessageStatus::Sent, None)
                     .await
             }
-            Ok(crate::dbus::ModemSmsState::Stored) | Ok(crate::dbus::ModemSmsState::Sending) => {
+            Ok(snapshot)
+                if matches!(
+                    snapshot.state,
+                    ModemSmsState::Stored | ModemSmsState::Sending
+                ) =>
+            {
                 self.defer_outbound(
                     message.id,
                     owner,
@@ -434,16 +574,7 @@ impl Messaging {
                 )
                 .await
             }
-            Ok(crate::dbus::ModemSmsState::Unknown) => {
-                self.defer_outbound(
-                    message.id,
-                    owner,
-                    OutboundPhase::Unknown,
-                    Some("send outcome unknown; automatic resend suppressed".to_string()),
-                    None,
-                )
-                .await
-            }
+            Ok(_) => unreachable!("all modem SMS states are handled"),
             Err(error) => {
                 self.defer_outbound(
                     message.id,
@@ -455,6 +586,29 @@ impl Messaging {
                 .await
             }
         }
+    }
+
+    async fn inspect_modem_sms(
+        &self,
+        message_id: i64,
+        owner: &str,
+        modem_sms_path: &str,
+    ) -> anyhow::Result<SmsSnapshot> {
+        let verified_path = match self.verified_modem.as_ref() {
+            Some(modem) => Some(
+                modem
+                    .verified_path()
+                    .ok_or_else(|| anyhow::anyhow!("verified modem identity is not ready"))?,
+            ),
+            None => None,
+        };
+        self.with_outbound_lease(
+            message_id,
+            owner,
+            self.sms_sender
+                .sms_snapshot(verified_path.as_deref(), modem_sms_path),
+        )
+        .await
     }
 
     pub async fn has_pending_outbound(&self) -> anyhow::Result<bool> {
@@ -526,6 +680,10 @@ impl Messaging {
     }
 }
 
+fn snapshot_matches_message(snapshot: &SmsSnapshot, message: &Message) -> bool {
+    snapshot.phone_number == message.phone_number && snapshot.body == message.body
+}
+
 #[cfg(test)]
 mod tests {
     use std::future::Future;
@@ -534,7 +692,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::api::test_sms_sender;
-    use crate::dbus::{ModemSmsState, PreparedSms, SendAttemptOutcome, SmsSender};
+    use crate::dbus::{ModemSmsState, PreparedSms, SendAttemptOutcome, SmsSender, SmsSnapshot};
     use crate::delivery::DeliveryWakeup;
     use crate::events::{AppEvent, EventBus};
     use crate::message::{Message, MessageFilter, MessageSource, MessageStatus};
@@ -674,6 +832,20 @@ mod tests {
                 }
             })
         }
+
+        fn sms_snapshot<'a>(
+            &'a self,
+            _modem_path: Option<&'a str>,
+            modem_sms_path: &'a str,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<SmsSnapshot>> + Send + 'a>> {
+            Box::pin(async move {
+                Ok(SmsSnapshot {
+                    state: self.sms_state(modem_sms_path).await?,
+                    phone_number: "+15550000000".to_string(),
+                    body: "seeded outbound".to_string(),
+                })
+            })
+        }
     }
 
     impl SmsSender for RecoverySender {
@@ -707,6 +879,20 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = anyhow::Result<ModemSmsState>> + Send + 'a>> {
             let state = self.state;
             Box::pin(async move { Ok(state) })
+        }
+
+        fn sms_snapshot<'a>(
+            &'a self,
+            _modem_path: Option<&'a str>,
+            modem_sms_path: &'a str,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<SmsSnapshot>> + Send + 'a>> {
+            Box::pin(async move {
+                Ok(SmsSnapshot {
+                    state: self.sms_state(modem_sms_path).await?,
+                    phone_number: "+15550000000".to_string(),
+                    body: "seeded outbound".to_string(),
+                })
+            })
         }
     }
 
@@ -970,6 +1156,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn operator_can_delete_an_outbound_with_a_permanently_unknown_outcome() {
+        let store = Store::open_in_memory().unwrap();
+        let message = seed_claimable_outbound(
+            &store,
+            OutboundPhase::Unknown,
+            Some("/org/freedesktop/ModemManager1/SMS/missing"),
+        )
+        .await;
+        let messaging = Messaging::new(
+            store,
+            EventBus::new(),
+            DeliveryWakeup::new(),
+            test_sms_sender(),
+        );
+
+        messaging.delete(vec![message.id]).await.unwrap();
+
+        assert!(messaging
+            .list(MessageFilter::default())
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn heartbeat_and_detached_finalizer_protect_an_active_send() {
         let store = Store::open_in_memory().unwrap();
         let send_started = Arc::new(tokio::sync::Notify::new());
@@ -1117,6 +1328,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn committed_terminal_update_event_is_replayed_after_owner_loss() {
+        let store = Store::open_in_memory().unwrap();
+        let owner = "crashed-owner".to_string();
+        let CreateOutboundOutcome::Created(message) = store
+            .create_claimed_outbound(
+                "+15550000000".to_string(),
+                "replay terminal event".to_string(),
+                MessageSource::Web,
+                None,
+                owner.clone(),
+            )
+            .await
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert!(matches!(
+            store
+                .finish_claimed_outbound(message.id, owner, MessageStatus::Sent, None)
+                .await
+                .unwrap(),
+            OutboundTransition::Applied(_)
+        ));
+        store.expire_outbound_lease(message.id).await.unwrap();
+        let replay_owner = "replay-owner".to_string();
+        let pending = store
+            .claim_pending_outbound_event(replay_owner.clone())
+            .await
+            .unwrap()
+            .expect("committed event must remain claimable");
+        let events = EventBus::new();
+        let mut receiver = events.subscribe();
+        let messaging = Messaging::new(
+            store.clone(),
+            events,
+            DeliveryWakeup::new(),
+            test_sms_sender(),
+        );
+
+        messaging
+            .publish_outbound_update(&pending, &replay_owner)
+            .await;
+
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            AppEvent::MessageUpdated(ref updated) if updated.id == message.id
+        ));
+        assert!(store
+            .claim_pending_outbound_event("another-owner".to_string())
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn recovery_finalizes_a_sent_modem_object_without_sending_again() {
         let store = Store::open_in_memory().unwrap();
         seed_claimable_outbound(
@@ -1249,6 +1515,62 @@ mod tests {
             Some("/org/freedesktop/ModemManager1/SMS/stored")
         );
         assert_eq!(send_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn recovery_does_not_send_a_reused_modem_path_with_different_contents() {
+        let store = Store::open_in_memory().unwrap();
+        let owner = uuid::Uuid::new_v4().to_string();
+        let CreateOutboundOutcome::Created(message) = store
+            .create_claimed_outbound(
+                "+15550000000".to_string(),
+                "original request".to_string(),
+                MessageSource::Web,
+                None,
+                owner.clone(),
+            )
+            .await
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        store
+            .set_outbound_prepared(
+                message.id,
+                owner.clone(),
+                "/org/freedesktop/ModemManager1/SMS/reused".to_string(),
+            )
+            .await
+            .unwrap();
+        store
+            .defer_outbound(message.id, owner, OutboundPhase::Prepared, None, None)
+            .await
+            .unwrap();
+        let send_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let messaging = Messaging::new(
+            store,
+            EventBus::new(),
+            DeliveryWakeup::new(),
+            Arc::new(RecoverySender {
+                send_calls: send_calls.clone(),
+                state: ModemSmsState::Stored,
+            }),
+        );
+
+        assert!(messaging.recover_one_outbound().await.unwrap());
+        let recovered = messaging
+            .list(MessageFilter::default())
+            .await
+            .unwrap()
+            .remove(0);
+
+        assert_eq!(recovered.status, MessageStatus::Sending);
+        assert!(recovered
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("identity does not match"));
+        assert_eq!(send_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

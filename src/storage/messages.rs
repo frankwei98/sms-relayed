@@ -233,15 +233,14 @@ impl MessageStore {
         status: MessageStatus,
         error: Option<&str>,
     ) -> Result<(Message, bool)> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = now_string();
-        let changed = conn.execute(
+        let changed = transaction.execute(
             "UPDATE messages
              SET status = ?1,
                  error = ?2,
                  outbound_phase = 'complete',
-                 outbound_owner = NULL,
-                 outbound_lease_until = NULL,
                  outbound_next_attempt_at = NULL,
                  updated_at = ?3
              WHERE id = ?4
@@ -250,7 +249,69 @@ impl MessageStore {
                AND outbound_owner = ?5",
             params![status_to_str(status), error, now, id, owner],
         )?;
-        Ok((map_get(&conn, id)?, changed == 1))
+        let message = map_get(&transaction, id)?;
+        transaction.commit()?;
+        Ok((message, changed == 1))
+    }
+
+    pub fn claim_pending_outbound_event(
+        &self,
+        owner: &str,
+        lease_for: Duration,
+    ) -> Result<Option<Message>> {
+        let mut conn = self.conn.lock().unwrap();
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (now, lease_until) = operation_timestamps(lease_for)?;
+        let id = transaction
+            .query_row(
+                "SELECT id FROM messages
+                 WHERE direction = 'outbound'
+                   AND status IN ('sent', 'failed')
+                   AND outbound_phase = 'complete'
+                   AND (outbound_owner IS NULL
+                        OR outbound_lease_until IS NULL
+                        OR julianday(outbound_lease_until) <= julianday(?1))
+                 ORDER BY id
+                 LIMIT 1",
+                params![now],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(id) = id else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        let changed = transaction.execute(
+            "UPDATE messages
+             SET outbound_owner = ?1, outbound_lease_until = ?2
+             WHERE id = ?3
+               AND outbound_phase = 'complete'
+               AND (outbound_owner IS NULL
+                    OR outbound_lease_until IS NULL
+                    OR julianday(outbound_lease_until) <= julianday(?4))",
+            params![owner, lease_until, id, now],
+        )?;
+        let message = if changed == 1 {
+            Some(map_get(&transaction, id)?)
+        } else {
+            None
+        };
+        transaction.commit()?;
+        Ok(message)
+    }
+
+    pub fn acknowledge_outbound_event(&self, id: i64, owner: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE messages
+             SET outbound_phase = NULL,
+                 outbound_owner = NULL,
+                 outbound_lease_until = NULL
+             WHERE id = ?1
+               AND outbound_phase = 'complete'
+               AND outbound_owner = ?2",
+            params![id, owner],
+        )? == 1)
     }
 
     pub fn renew_outbound_lease(&self, id: i64, owner: &str, lease_for: Duration) -> Result<bool> {
@@ -432,15 +493,18 @@ impl MessageStore {
         let mut conn = self.conn.lock().unwrap();
         let transaction = conn.transaction()?;
         for id in ids {
-            let is_sending = transaction
+            let sending_phase = transaction
                 .query_row(
-                    "SELECT status = 'sending' FROM messages WHERE id = ?1",
+                    "SELECT status, outbound_phase FROM messages WHERE id = ?1",
                     params![id],
-                    |row| row.get::<_, bool>(0),
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
                 )
-                .optional()?
-                .unwrap_or(false);
-            if is_sending {
+                .optional()?;
+            if matches!(
+                sending_phase,
+                Some((ref status, ref phase))
+                    if status == "sending" && phase.as_deref() != Some("unknown")
+            ) {
                 anyhow::bail!("message {id} cannot be deleted while sending");
             }
         }

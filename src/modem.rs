@@ -605,6 +605,7 @@ pub struct ModemService {
     pub(crate) action_lock: Arc<tokio::sync::Mutex<()>>,
     reset_limits: Arc<Mutex<HashMap<String, Instant>>>,
     health_refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    verified_path: Arc<Mutex<Option<String>>>,
 }
 
 impl ModemService {
@@ -623,7 +624,16 @@ impl ModemService {
             action_lock: Arc::new(tokio::sync::Mutex::new(())),
             reset_limits: Arc::new(Mutex::new(HashMap::new())),
             health_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            verified_path: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub(crate) fn set_verified_path(&self, path: Option<String>) {
+        *self.verified_path.lock().unwrap() = path;
+    }
+
+    pub fn verified_path(&self) -> Option<String> {
+        self.verified_path.lock().unwrap().clone()
     }
 
     pub async fn status(&self, configured_path: &str) -> ModemStatus {
