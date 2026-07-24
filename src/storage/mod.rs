@@ -3,8 +3,10 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 #[cfg(test)]
+use rusqlite::params;
+#[cfg(test)]
 use rusqlite::params_from_iter;
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -20,6 +22,7 @@ mod metadata;
 mod migrations;
 mod retention;
 
+#[cfg(test)]
 use codecs::now_string;
 #[cfg(test)]
 use messages::{build_message_query, resolve_message_cursor};
@@ -209,6 +212,20 @@ fn compute_inbound_dedupe_key(
     hex_encode(hasher.finalize().as_slice())
 }
 
+fn compute_outbound_request_hash(phone: &str, body: &str, source: MessageSource) -> String {
+    let mut hasher = Sha256::new();
+    let source = match source {
+        MessageSource::Modem => "modem",
+        MessageSource::Web => "web",
+        MessageSource::Cli => "cli",
+    };
+    for value in [source, phone, body] {
+        hasher.update((value.len() as u32).to_be_bytes());
+        hasher.update(value.as_bytes());
+    }
+    hex_encode(hasher.finalize().as_slice())
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX_CHARS: &[u8] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -269,8 +286,25 @@ impl MessageStore {
                 error TEXT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                inbound_dedupe_key TEXT NULL
+                inbound_dedupe_key TEXT NULL,
+                outbound_phase TEXT NULL CHECK (
+                    outbound_phase IN (
+                        'created', 'prepared', 'send_started', 'uncertain', 'unknown', 'complete'
+                    )
+                ),
+                outbound_owner TEXT NULL,
+                outbound_lease_until TEXT NULL,
+                outbound_next_attempt_at TEXT NULL
             );
+            CREATE TABLE IF NOT EXISTS outbound_idempotency (
+                key TEXT PRIMARY KEY,
+                request_hash TEXT NOT NULL,
+                message_id INTEGER NULL REFERENCES messages(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_outbound_idempotency_message
+                ON outbound_idempotency(message_id)
+                WHERE message_id IS NOT NULL;
             CREATE INDEX IF NOT EXISTS idx_messages_phone_number ON messages(phone_number);
             CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
             DROP INDEX IF EXISTS idx_messages_timeline;
@@ -1143,6 +1177,52 @@ mod tests {
     }
 
     #[test]
+    fn retention_preserves_outbound_idempotency_tombstones() {
+        let store = memory_store();
+        let request = || NewMessage {
+            direction: MessageDirection::Outbound,
+            phone_number: "+1".to_string(),
+            body: "send once".to_string(),
+            timestamp: "2020-01-01T00:00:00Z".to_string(),
+            status: MessageStatus::Sending,
+            source: MessageSource::Web,
+            modem_sms_path: None,
+            read_at: Some("2020-01-01T00:00:00Z".to_string()),
+            error: None,
+            inbound_dedupe_key: None,
+        };
+        let (message, created) = store
+            .create_or_get_outbound(
+                request(),
+                Some("retained-key"),
+                "owner",
+                std::time::Duration::from_secs(90),
+            )
+            .unwrap();
+        assert!(created);
+        assert!(
+            store
+                .finish_claimed_outbound(message.id, "owner", MessageStatus::Sent, None,)
+                .unwrap()
+                .1
+        );
+
+        assert_eq!(store.run_retention(1, 100).unwrap(), 1);
+        let replay = store
+            .create_or_get_outbound(
+                request(),
+                Some("retained-key"),
+                "another-owner",
+                std::time::Duration::from_secs(90),
+            )
+            .unwrap_err();
+        assert!(replay
+            .downcast_ref::<crate::message::IdempotencyReplayUnavailable>()
+            .is_some());
+        assert_eq!(store.count_messages().unwrap(), 0);
+    }
+
+    #[test]
     fn retention_compares_rfc3339_timestamps_by_instant() {
         let store = memory_store();
         let cutoff = OffsetDateTime::now_utc() - time::Duration::days(1);
@@ -1584,6 +1664,19 @@ mod tests {
                 VALUES
                     ('inbound', '+1', 'legacy', '2026-01-01T00:00:00Z', 'received',
                      'modem', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                INSERT INTO messages
+                    (direction, phone_number, body, timestamp, status, source, modem_sms_path,
+                     created_at, updated_at)
+                VALUES
+                    ('outbound', '+2', 'prepared-or-sent', '2026-01-01T00:00:00Z', 'sending',
+                     'web', '/org/freedesktop/ModemManager1/SMS/2',
+                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                INSERT INTO messages
+                    (direction, phone_number, body, timestamp, status, source,
+                     created_at, updated_at)
+                VALUES
+                    ('outbound', '+3', 'not-prepared', '2026-01-01T00:00:00Z', 'sending',
+                     'cli', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
                 CREATE TABLE forward_deliveries (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     message_id INTEGER NOT NULL,
@@ -1603,13 +1696,42 @@ mod tests {
         drop(legacy);
 
         let store = MessageStore::open(&path).unwrap();
-        assert_eq!(store.count_messages().unwrap(), 1);
+        assert_eq!(store.count_messages().unwrap(), 3);
         store
             .insert_deliveries(1, &["bark.primary".to_string()])
             .unwrap();
         assert_eq!(store.count_deliveries().unwrap(), 1);
         {
             let conn = store.conn.lock().unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*)
+                     FROM pragma_index_list('outbound_idempotency')
+                     WHERE name = 'idx_outbound_idempotency_message'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                1
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT outbound_phase FROM messages WHERE id = 2",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+                "uncertain"
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT outbound_phase FROM messages WHERE id = 3",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+                "created"
+            );
             assert!(conn
                 .execute(
                     "INSERT INTO messages

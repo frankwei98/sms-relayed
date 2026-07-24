@@ -1,30 +1,45 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::dbus::{ReceivedSms, SmsSender};
+use crate::dbus::{ReceivedSms, SendAttemptOutcome, SmsSender};
 use crate::delivery::DeliveryWakeup;
 use crate::events::{AppEvent, EventBus};
 use crate::message::{ConversationSummary, Message, MessageFilter, MessageSource, MessageStatus};
-use crate::persistence::{InboundMessage, InboundOutcome, Store};
+use crate::persistence::{
+    CreateOutboundOutcome, InboundMessage, InboundOutcome, OutboundClaim, OutboundPhase,
+    OutboundTransition, Store,
+};
 
 pub struct SendMessage {
     pub modem_path: String,
     pub phone_number: String,
     pub body: String,
     pub source: MessageSource,
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendOutcome {
     Sent(Message),
     Failed(Message),
+    Pending(Message),
 }
 
 impl SendOutcome {
     pub fn into_message(self) -> Message {
         match self {
-            Self::Sent(message) | Self::Failed(message) => message,
+            Self::Sent(message) | Self::Failed(message) | Self::Pending(message) => message,
         }
+    }
+}
+
+fn send_outcome(message: Message) -> SendOutcome {
+    match message.status {
+        MessageStatus::Sent => SendOutcome::Sent(message),
+        MessageStatus::Failed => SendOutcome::Failed(message),
+        MessageStatus::Sending => SendOutcome::Pending(message),
+        MessageStatus::Received => unreachable!("outbound operation cannot be received"),
     }
 }
 
@@ -40,13 +55,6 @@ pub enum ReceiveOutcome {
     Duplicate,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResolvedModemSmsState {
-    Stored,
-    Sent,
-    Unknown,
-}
-
 #[derive(Clone)]
 pub struct Messaging {
     store: Store,
@@ -56,6 +64,11 @@ pub struct Messaging {
 }
 
 impl Messaging {
+    #[cfg(not(test))]
+    const OUTBOUND_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+    #[cfg(test)]
+    const OUTBOUND_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(10);
+
     pub fn new(
         store: Store,
         events: EventBus,
@@ -77,200 +90,375 @@ impl Messaging {
     ///
     /// A transport rejection is returned as `SendOutcome::Failed` after that
     /// state is persisted. `Err` means the finalizer task itself panicked or
-    /// was aborted by runtime shutdown; startup recovery resumes such rows.
+    /// was aborted by runtime shutdown; the supervised outbound worker resumes
+    /// such rows after their lease expires.
     pub async fn send(&self, request: SendMessage) -> anyhow::Result<SendOutcome> {
+        let owner = uuid::Uuid::new_v4().to_string();
         let messaging = self.clone();
         let finalizer =
-            tokio::spawn(async move { messaging.create_and_run_outbound(request).await });
+            tokio::spawn(async move { messaging.create_and_run_outbound(request, owner).await });
         finalizer
             .await
             .map_err(|error| anyhow::anyhow!("outbound finalizer task failed: {error}"))?
     }
 
-    async fn create_and_run_outbound(&self, request: SendMessage) -> anyhow::Result<SendOutcome> {
+    async fn create_and_run_outbound(
+        &self,
+        request: SendMessage,
+        owner: String,
+    ) -> anyhow::Result<SendOutcome> {
         let SendMessage {
             ref phone_number,
             ref body,
             source,
             ..
         } = request;
-        let message = self
+        let created = self
             .store
-            .create_outbound(phone_number.clone(), body.clone(), source)
+            .create_claimed_outbound(
+                phone_number.clone(),
+                body.clone(),
+                source,
+                request.idempotency_key.clone(),
+                owner.clone(),
+            )
             .await?;
-        self.events.send(AppEvent::MessageCreated(message.clone()));
-        self.run_outbound(message.id, request).await
+        match created {
+            CreateOutboundOutcome::Created(message) => {
+                self.events.send(AppEvent::MessageCreated(message.clone()));
+                self.run_new_outbound(message, request, owner).await
+            }
+            CreateOutboundOutcome::Existing(message) => Ok(send_outcome(message)),
+        }
     }
 
-    async fn run_outbound(
+    async fn run_new_outbound(
         &self,
-        message_id: i64,
+        message: Message,
         request: SendMessage,
+        owner: String,
     ) -> anyhow::Result<SendOutcome> {
-        let (status, error) = match self
-            .sms_sender
-            .prepare(&request.modem_path, &request.phone_number, &request.body)
+        let prepared = match self
+            .with_outbound_lease(
+                message.id,
+                &owner,
+                self.sms_sender
+                    .prepare(&request.modem_path, &request.phone_number, &request.body),
+            )
             .await
         {
-            Ok(prepared) => {
-                self.persist_modem_path(message_id, prepared.modem_sms_path.clone())
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return self
+                    .finish_outbound(
+                        message.id,
+                        owner,
+                        MessageStatus::Failed,
+                        Some(error.to_string()),
+                    )
                     .await;
-                self.send_prepared_and_reconcile(&prepared.modem_sms_path)
+            }
+        };
+        match self
+            .store
+            .set_outbound_prepared(message.id, owner.clone(), prepared.modem_sms_path.clone())
+            .await?
+        {
+            OutboundTransition::Applied(_) => {
+                self.begin_and_send(message.id, owner, &prepared.modem_sms_path)
                     .await
             }
-            Err(error) => (MessageStatus::Failed, Some(error.to_string())),
-        };
-        Ok(self.finish_outbound(message_id, status, error).await)
+            OutboundTransition::OwnershipLost(message) => Ok(send_outcome(message)),
+        }
     }
 
-    async fn persist_modem_path(&self, message_id: i64, modem_sms_path: String) {
-        let mut delay = Duration::from_millis(100);
-        loop {
-            match self
-                .store
-                .set_outbound_modem_sms_path(message_id, modem_sms_path.clone())
+    async fn begin_and_send(
+        &self,
+        message_id: i64,
+        owner: String,
+        modem_sms_path: &str,
+    ) -> anyhow::Result<SendOutcome> {
+        match self
+            .store
+            .begin_outbound_send(message_id, owner.clone())
+            .await?
+        {
+            OutboundTransition::Applied(_) => {
+                let outcome = self
+                    .with_outbound_lease(
+                        message_id,
+                        &owner,
+                        self.sms_sender.send_prepared(modem_sms_path),
+                    )
+                    .await;
+                self.handle_send_attempt(message_id, owner, outcome).await
+            }
+            OutboundTransition::OwnershipLost(message) => Ok(send_outcome(message)),
+        }
+    }
+
+    async fn handle_send_attempt(
+        &self,
+        message_id: i64,
+        owner: String,
+        outcome: SendAttemptOutcome,
+    ) -> anyhow::Result<SendOutcome> {
+        match outcome {
+            SendAttemptOutcome::Accepted => {
+                self.finish_outbound(message_id, owner, MessageStatus::Sent, None)
+                    .await
+            }
+            SendAttemptOutcome::Rejected(error) => {
+                self.finish_outbound(
+                    message_id,
+                    owner,
+                    MessageStatus::Failed,
+                    Some(error.to_string()),
+                )
                 .await
-            {
-                Ok(_) => return,
-                Err(error) => {
-                    log::error!(
-                        "persisting outbound modem path failed; message_id={message_id}: {error}"
-                    );
-                    tokio::time::sleep(delay).await;
-                    delay = (delay * 2).min(Duration::from_secs(30));
-                }
+            }
+            SendAttemptOutcome::NotAttempted(error) => {
+                self.defer_outbound(
+                    message_id,
+                    owner,
+                    OutboundPhase::Prepared,
+                    Some(error.to_string()),
+                    Some(Duration::from_secs(5)),
+                )
+                .await
+            }
+            SendAttemptOutcome::Unknown(error) => {
+                self.defer_outbound(
+                    message_id,
+                    owner,
+                    OutboundPhase::Uncertain,
+                    Some(format!(
+                        "send outcome unknown; automatic resend suppressed: {error}"
+                    )),
+                    Some(Duration::from_secs(5)),
+                )
+                .await
             }
         }
     }
 
-    async fn send_prepared_and_reconcile(
+    async fn with_outbound_lease<T>(
         &self,
-        modem_sms_path: &str,
-    ) -> (MessageStatus, Option<String>) {
-        match self.sms_sender.send_prepared(modem_sms_path).await {
-            Ok(()) => (MessageStatus::Sent, None),
-            Err(error) => match self.resolve_modem_sms_state(modem_sms_path).await {
-                ResolvedModemSmsState::Sent => (MessageStatus::Sent, None),
-                ResolvedModemSmsState::Stored => (MessageStatus::Failed, Some(error.to_string())),
-                ResolvedModemSmsState::Unknown => (
-                    MessageStatus::Failed,
-                    Some(format!(
-                        "delivery outcome unknown; automatic retry suppressed: {error}"
-                    )),
-                ),
-            },
-        }
-    }
-
-    async fn resolve_modem_sms_state(&self, modem_sms_path: &str) -> ResolvedModemSmsState {
-        let mut delay = Duration::from_millis(100);
-        let mut stored_observations = 0;
+        message_id: i64,
+        owner: &str,
+        operation: impl Future<Output = T>,
+    ) -> T {
+        tokio::pin!(operation);
+        let mut heartbeat = tokio::time::interval(Self::OUTBOUND_HEARTBEAT_INTERVAL);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        heartbeat.tick().await;
         loop {
-            match self.sms_sender.sms_state(modem_sms_path).await {
-                Ok(crate::dbus::ModemSmsState::Sent) => return ResolvedModemSmsState::Sent,
-                Ok(crate::dbus::ModemSmsState::Stored) => {
-                    stored_observations += 1;
-                    if stored_observations >= 3 {
-                        return ResolvedModemSmsState::Stored;
+            tokio::select! {
+                result = &mut operation => return result,
+                _ = heartbeat.tick() => {
+                    match self
+                        .store
+                        .renew_outbound_lease(message_id, owner.to_string())
+                        .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            log::warn!(
+                                "outbound lease ownership was lost; message_id={message_id}"
+                            );
+                        }
+                        Err(error) => {
+                            log::error!(
+                                "renewing outbound lease failed; message_id={message_id}: {error}"
+                            );
+                        }
                     }
                 }
-                Ok(crate::dbus::ModemSmsState::Unknown) => {
-                    return ResolvedModemSmsState::Unknown;
-                }
-                Ok(crate::dbus::ModemSmsState::Sending) => stored_observations = 0,
-                Err(error) => {
-                    stored_observations = 0;
-                    log::warn!("reading outbound modem state failed: {error}");
-                }
             }
-            tokio::time::sleep(delay).await;
-            delay = (delay * 2).min(Duration::from_secs(5));
         }
     }
 
     async fn finish_outbound(
         &self,
         message_id: i64,
+        owner: String,
         status: MessageStatus,
         error: Option<String>,
-    ) -> SendOutcome {
+    ) -> anyhow::Result<SendOutcome> {
         let mut delay = Duration::from_millis(100);
-        loop {
+        for attempt in 0..5 {
             match self
                 .store
-                .finish_outbound(message_id, status, error.clone())
+                .finish_claimed_outbound(message_id, owner.clone(), status, error.clone())
                 .await
             {
-                Ok(updated) => {
+                Ok(OutboundTransition::Applied(updated)) => {
                     self.events.send(AppEvent::MessageUpdated(updated.clone()));
-                    return match updated.status {
-                        MessageStatus::Sent => SendOutcome::Sent(updated),
-                        MessageStatus::Failed => SendOutcome::Failed(updated),
-                        _ => unreachable!("outbound send must finish as sent or failed"),
-                    };
+                    return Ok(send_outcome(updated));
+                }
+                Ok(OutboundTransition::OwnershipLost(message)) => {
+                    return Ok(send_outcome(message));
                 }
                 Err(update_error) => {
                     log::error!(
                         "finalizing outbound message failed; message_id={message_id}: {update_error}"
                     );
+                    if attempt == 4 {
+                        return Err(update_error);
+                    }
                     tokio::time::sleep(delay).await;
-                    delay = (delay * 2).min(Duration::from_secs(30));
+                    delay *= 2;
+                }
+            }
+        }
+        unreachable!()
+    }
+
+    async fn defer_outbound(
+        &self,
+        message_id: i64,
+        owner: String,
+        phase: OutboundPhase,
+        error: Option<String>,
+        retry_after: Option<Duration>,
+    ) -> anyhow::Result<SendOutcome> {
+        let transition = self
+            .store
+            .defer_outbound(message_id, owner, phase, error, retry_after)
+            .await?;
+        let message = match transition {
+            OutboundTransition::Applied(message) | OutboundTransition::OwnershipLost(message) => {
+                message
+            }
+        };
+        self.events.send(AppEvent::MessageUpdated(message.clone()));
+        Ok(send_outcome(message))
+    }
+
+    pub async fn run_outbound_worker(&self) {
+        let owner = uuid::Uuid::new_v4().to_string();
+        loop {
+            match self.store.claim_due_outbound(owner.clone()).await {
+                Ok(Some(claim)) => {
+                    if let Err(error) = self.recover_claim(claim, owner.clone()).await {
+                        log::error!("outbound recovery attempt failed: {error}");
+                    }
+                }
+                Ok(None) => tokio::time::sleep(Duration::from_secs(1)).await,
+                Err(error) => {
+                    log::error!("claiming outbound recovery work failed: {error}");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
                 }
             }
         }
     }
 
-    /// Take a startup snapshot before the service accepts new sends, then
-    /// recover each pre-existing row independently. New rows can therefore
-    /// never be mistaken for interrupted work, and one unavailable modem
-    /// object cannot hold up recovery of the others.
-    pub async fn start_outbound_recovery(&self) -> anyhow::Result<usize> {
-        let messages = self.store.sending_outbound().await?;
-        let count = messages.len();
-        for message in messages {
-            let messaging = self.clone();
-            tokio::spawn(async move {
-                messaging.recover_outbound_message(message).await;
-            });
-        }
-        Ok(count)
-    }
-
     #[cfg(test)]
-    async fn recover_outbound(&self) -> anyhow::Result<usize> {
-        let messages = self.store.sending_outbound().await?;
-        let count = messages.len();
-        for message in messages {
-            self.recover_outbound_message(message).await;
-        }
-        Ok(count)
+    async fn recover_one_outbound(&self) -> anyhow::Result<bool> {
+        let owner = uuid::Uuid::new_v4().to_string();
+        let Some(claim) = self.store.claim_due_outbound(owner.clone()).await? else {
+            return Ok(false);
+        };
+        self.recover_claim(claim, owner).await?;
+        Ok(true)
     }
 
-    async fn recover_outbound_message(&self, message: Message) {
-        let Some(modem_sms_path) = message.modem_sms_path else {
-            self.finish_outbound(
-                message.id,
-                MessageStatus::Failed,
-                Some("outbound interrupted before modem preparation".to_string()),
-            )
-            .await;
-            return;
-        };
-
-        let (status, error) = match self.resolve_modem_sms_state(&modem_sms_path).await {
-            ResolvedModemSmsState::Sent => (MessageStatus::Sent, None),
-            ResolvedModemSmsState::Stored => {
-                self.send_prepared_and_reconcile(&modem_sms_path).await
+    async fn recover_claim(
+        &self,
+        claim: OutboundClaim,
+        owner: String,
+    ) -> anyhow::Result<SendOutcome> {
+        match claim.phase {
+            OutboundPhase::Created => {
+                self.finish_outbound(
+                    claim.message.id,
+                    owner,
+                    MessageStatus::Failed,
+                    Some("outbound interrupted before modem preparation".to_string()),
+                )
+                .await
             }
-            ResolvedModemSmsState::Unknown => (
-                MessageStatus::Failed,
-                Some(
-                    "delivery outcome unknown during startup recovery; automatic retry suppressed"
-                        .to_string(),
-                ),
-            ),
+            OutboundPhase::Prepared => {
+                let Some(path) = claim.message.modem_sms_path.as_deref() else {
+                    return self
+                        .finish_outbound(
+                            claim.message.id,
+                            owner,
+                            MessageStatus::Failed,
+                            Some("prepared outbound has no modem SMS path".to_string()),
+                        )
+                        .await;
+                };
+                self.begin_and_send(claim.message.id, owner, path).await
+            }
+            OutboundPhase::SendStarted | OutboundPhase::Uncertain => {
+                self.reconcile_claim(claim.message, owner).await
+            }
+            OutboundPhase::Unknown => Ok(SendOutcome::Pending(claim.message)),
+        }
+    }
+
+    async fn reconcile_claim(
+        &self,
+        message: Message,
+        owner: String,
+    ) -> anyhow::Result<SendOutcome> {
+        let Some(path) = message.modem_sms_path.as_deref() else {
+            return self
+                .defer_outbound(
+                    message.id,
+                    owner,
+                    OutboundPhase::Unknown,
+                    Some("send outcome unknown and modem SMS path is missing".to_string()),
+                    None,
+                )
+                .await;
         };
-        self.finish_outbound(message.id, status, error).await;
+        match self
+            .with_outbound_lease(message.id, &owner, self.sms_sender.sms_state(path))
+            .await
+        {
+            Ok(crate::dbus::ModemSmsState::Sent) => {
+                self.finish_outbound(message.id, owner, MessageStatus::Sent, None)
+                    .await
+            }
+            Ok(crate::dbus::ModemSmsState::Stored) | Ok(crate::dbus::ModemSmsState::Sending) => {
+                self.defer_outbound(
+                    message.id,
+                    owner,
+                    OutboundPhase::Uncertain,
+                    Some(
+                        "send outcome remains unresolved; automatic resend suppressed".to_string(),
+                    ),
+                    Some(Duration::from_secs(5)),
+                )
+                .await
+            }
+            Ok(crate::dbus::ModemSmsState::Unknown) => {
+                self.defer_outbound(
+                    message.id,
+                    owner,
+                    OutboundPhase::Unknown,
+                    Some("send outcome unknown; automatic resend suppressed".to_string()),
+                    None,
+                )
+                .await
+            }
+            Err(error) => {
+                self.defer_outbound(
+                    message.id,
+                    owner,
+                    OutboundPhase::Uncertain,
+                    Some(format!("reading modem SMS state failed: {error}")),
+                    Some(Duration::from_secs(5)),
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn has_pending_outbound(&self) -> anyhow::Result<bool> {
+        self.store.has_pending_outbound().await
     }
 
     pub async fn receive(&self, request: ReceiveMessage) -> anyhow::Result<ReceiveOutcome> {
@@ -346,11 +534,11 @@ mod tests {
     use std::sync::Arc;
 
     use crate::api::test_sms_sender;
-    use crate::dbus::{ModemSmsState, PreparedSms, SmsSender};
+    use crate::dbus::{ModemSmsState, PreparedSms, SendAttemptOutcome, SmsSender};
     use crate::delivery::DeliveryWakeup;
     use crate::events::{AppEvent, EventBus};
-    use crate::message::{MessageFilter, MessageSource, MessageStatus};
-    use crate::persistence::Store;
+    use crate::message::{Message, MessageFilter, MessageSource, MessageStatus};
+    use crate::persistence::{CreateOutboundOutcome, OutboundPhase, OutboundTransition, Store};
 
     use super::{Messaging, ReceiveMessage, ReceiveOutcome, SendMessage, SendOutcome};
 
@@ -371,6 +559,53 @@ mod tests {
 
     struct AmbiguousSender;
 
+    async fn seed_claimable_outbound(
+        store: &Store,
+        phase: OutboundPhase,
+        modem_sms_path: Option<&str>,
+    ) -> Message {
+        let owner = uuid::Uuid::new_v4().to_string();
+        let CreateOutboundOutcome::Created(message) = store
+            .create_claimed_outbound(
+                "+15550000000".to_string(),
+                "seeded outbound".to_string(),
+                MessageSource::Web,
+                None,
+                owner.clone(),
+            )
+            .await
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        if let Some(path) = modem_sms_path {
+            assert!(matches!(
+                store
+                    .set_outbound_prepared(message.id, owner.clone(), path.to_string())
+                    .await
+                    .unwrap(),
+                OutboundTransition::Applied(_)
+            ));
+        }
+        if matches!(phase, OutboundPhase::SendStarted | OutboundPhase::Uncertain) {
+            assert!(matches!(
+                store
+                    .begin_outbound_send(message.id, owner.clone())
+                    .await
+                    .unwrap(),
+                OutboundTransition::Applied(_)
+            ));
+        }
+        let OutboundTransition::Applied(message) = store
+            .defer_outbound(message.id, owner, phase, None, None)
+            .await
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        message
+    }
+
     impl SmsSender for AmbiguousSender {
         fn prepare<'a>(
             &'a self,
@@ -388,8 +623,8 @@ mod tests {
         fn send_prepared<'a>(
             &'a self,
             _modem_sms_path: &'a str,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
-            Box::pin(async { Err(anyhow::anyhow!("send reply timed out")) })
+        ) -> Pin<Box<dyn Future<Output = SendAttemptOutcome> + Send + 'a>> {
+            Box::pin(async { SendAttemptOutcome::Unknown(anyhow::anyhow!("send reply timed out")) })
         }
 
         fn sms_state<'a>(
@@ -418,11 +653,11 @@ mod tests {
         fn send_prepared<'a>(
             &'a self,
             _modem_sms_path: &'a str,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = SendAttemptOutcome> + Send + 'a>> {
             let send_calls = self.send_calls.clone();
             Box::pin(async move {
                 send_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(())
+                SendAttemptOutcome::Accepted
             })
         }
 
@@ -448,17 +683,21 @@ mod tests {
             _tel_number: &'a str,
             _sms_text: &'a str,
         ) -> Pin<Box<dyn Future<Output = anyhow::Result<PreparedSms>> + Send + 'a>> {
-            Box::pin(async { unreachable!("recovery must not create a new modem SMS") })
+            Box::pin(async {
+                Ok(PreparedSms {
+                    modem_sms_path: "/org/freedesktop/ModemManager1/SMS/idempotent".to_string(),
+                })
+            })
         }
 
         fn send_prepared<'a>(
             &'a self,
             _modem_sms_path: &'a str,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = SendAttemptOutcome> + Send + 'a>> {
             let send_calls = self.send_calls.clone();
             Box::pin(async move {
                 send_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(())
+                SendAttemptOutcome::Accepted
             })
         }
 
@@ -488,13 +727,13 @@ mod tests {
         fn send_prepared<'a>(
             &'a self,
             _modem_sms_path: &'a str,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = SendAttemptOutcome> + Send + 'a>> {
             let send_started = self.send_started.clone();
             let release_send = self.release_send.clone();
             Box::pin(async move {
                 send_started.notify_one();
                 release_send.notified().await;
-                Ok(())
+                SendAttemptOutcome::Accepted
             })
         }
 
@@ -523,17 +762,20 @@ mod tests {
         fn send_prepared<'a>(
             &'a self,
             modem_sms_path: &'a str,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = SendAttemptOutcome> + Send + 'a>> {
             let store = self.store.clone();
             let observed = self.observed_persisted_path.clone();
             let modem_sms_path = modem_sms_path.to_string();
             Box::pin(async move {
-                let messages = store.list_messages(MessageFilter::default()).await?;
+                let messages = store
+                    .list_messages(MessageFilter::default())
+                    .await
+                    .expect("path observation should read the store");
                 observed.store(
                     messages[0].modem_sms_path.as_deref() == Some(modem_sms_path.as_str()),
                     Ordering::SeqCst,
                 );
-                Ok(())
+                SendAttemptOutcome::Accepted
             })
         }
 
@@ -560,7 +802,7 @@ mod tests {
         fn send_prepared<'a>(
             &'a self,
             _modem_sms_path: &'a str,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = SendAttemptOutcome> + Send + 'a>> {
             Box::pin(async { unreachable!("prepare failed") })
         }
 
@@ -590,6 +832,7 @@ mod tests {
                 phone_number: "+15550000000".to_string(),
                 body: "shared outbound flow".to_string(),
                 source: MessageSource::Web,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -607,6 +850,48 @@ mod tests {
             received_events.recv().await.unwrap(),
             AppEvent::MessageUpdated(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn repeated_idempotency_key_returns_the_original_send() {
+        let send_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let messaging = Messaging::new(
+            Store::open_in_memory().unwrap(),
+            EventBus::new(),
+            DeliveryWakeup::new(),
+            Arc::new(RecoverySender {
+                send_calls: send_calls.clone(),
+                state: ModemSmsState::Sent,
+            }),
+        );
+        let send = |body: &str| SendMessage {
+            modem_path: "/org/freedesktop/ModemManager1/Modem/0".to_string(),
+            phone_number: "+15550000000".to_string(),
+            body: body.to_string(),
+            source: MessageSource::Web,
+            idempotency_key: Some("request-42".to_string()),
+        };
+
+        let (first, repeated) = tokio::join!(
+            messaging.send(send("send once")),
+            messaging.send(send("send once"))
+        );
+        let first = first.unwrap().into_message();
+        let repeated = repeated.unwrap().into_message();
+
+        assert_eq!(first.id, repeated.id);
+        assert_eq!(send_calls.load(Ordering::SeqCst), 1);
+        let conflict = messaging.send(send("different request")).await.unwrap_err();
+        assert!(conflict
+            .downcast_ref::<crate::message::IdempotencyConflict>()
+            .is_some());
+
+        messaging.delete(vec![first.id]).await.unwrap();
+        let replay = messaging.send(send("send once")).await.unwrap_err();
+        assert!(replay
+            .downcast_ref::<crate::message::IdempotencyReplayUnavailable>()
+            .is_some());
+        assert_eq!(send_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -629,6 +914,7 @@ mod tests {
                 phone_number: "+15550000000".to_string(),
                 body: "durable outbound".to_string(),
                 source: MessageSource::Web,
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -643,7 +929,7 @@ mod tests {
         let send_started = Arc::new(tokio::sync::Notify::new());
         let release_send = Arc::new(tokio::sync::Notify::new());
         let messaging = Messaging::new(
-            store,
+            store.clone(),
             EventBus::new(),
             DeliveryWakeup::new(),
             Arc::new(BlockingSender {
@@ -660,6 +946,7 @@ mod tests {
                         phone_number: "+15550000000".to_string(),
                         body: "cannot delete while sending".to_string(),
                         source: MessageSource::Web,
+                        idempotency_key: None,
                     })
                     .await
             }
@@ -683,12 +970,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn caller_cancellation_does_not_cancel_outbound_finalization() {
+    async fn heartbeat_and_detached_finalizer_protect_an_active_send() {
         let store = Store::open_in_memory().unwrap();
         let send_started = Arc::new(tokio::sync::Notify::new());
         let release_send = Arc::new(tokio::sync::Notify::new());
         let messaging = Messaging::new(
-            store,
+            store.clone(),
             EventBus::new(),
             DeliveryWakeup::new(),
             Arc::new(BlockingSender {
@@ -705,6 +992,7 @@ mod tests {
                         phone_number: "+15550000000".to_string(),
                         body: "survives cancellation".to_string(),
                         source: MessageSource::Web,
+                        idempotency_key: None,
                     })
                     .await
             }
@@ -712,6 +1000,18 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), send_started.notified())
             .await
             .unwrap();
+        let message = messaging
+            .list(MessageFilter::default())
+            .await
+            .unwrap()
+            .remove(0);
+        store.expire_outbound_lease(message.id).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert!(store
+            .claim_due_outbound("competing-owner".to_string())
+            .await
+            .unwrap()
+            .is_none());
 
         send_task.abort();
         let _ = send_task.await;
@@ -757,6 +1057,7 @@ mod tests {
                         phone_number: "+15550000000".to_string(),
                         body: "cancel after commit".to_string(),
                         source: MessageSource::Web,
+                        idempotency_key: None,
                     })
                     .await
             }
@@ -805,6 +1106,7 @@ mod tests {
                 phone_number: "+15550000000".to_string(),
                 body: "retry finalization".to_string(),
                 source: MessageSource::Web,
+                idempotency_key: None,
             }),
         )
         .await
@@ -817,21 +1119,12 @@ mod tests {
     #[tokio::test]
     async fn recovery_finalizes_a_sent_modem_object_without_sending_again() {
         let store = Store::open_in_memory().unwrap();
-        let message = store
-            .create_outbound(
-                "+15550000000".to_string(),
-                "recover me".to_string(),
-                MessageSource::Web,
-            )
-            .await
-            .unwrap();
-        store
-            .set_outbound_modem_sms_path(
-                message.id,
-                "/org/freedesktop/ModemManager1/SMS/recover".to_string(),
-            )
-            .await
-            .unwrap();
+        seed_claimable_outbound(
+            &store,
+            OutboundPhase::Uncertain,
+            Some("/org/freedesktop/ModemManager1/SMS/recover"),
+        )
+        .await;
         let send_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let messaging = Messaging::new(
             store,
@@ -843,7 +1136,7 @@ mod tests {
             }),
         );
 
-        assert_eq!(messaging.recover_outbound().await.unwrap(), 1);
+        assert!(messaging.recover_one_outbound().await.unwrap());
         let recovered = messaging
             .list(MessageFilter::default())
             .await
@@ -854,85 +1147,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_recovery_snapshot_excludes_new_outbound_rows() {
+    async fn ownership_and_terminal_cas_exclude_competing_processes() {
         let store = Store::open_in_memory().unwrap();
-        let interrupted = store
-            .create_outbound(
+        let owner = "active-owner".to_string();
+        let CreateOutboundOutcome::Created(message) = store
+            .create_claimed_outbound(
                 "+15550000000".to_string(),
-                "pre-existing send".to_string(),
+                "owned send".to_string(),
                 MessageSource::Web,
+                None,
+                owner.clone(),
             )
-            .await
-            .unwrap();
-        store
-            .set_outbound_modem_sms_path(
-                interrupted.id,
-                "/org/freedesktop/ModemManager1/SMS/pre-existing".to_string(),
-            )
-            .await
-            .unwrap();
-        let messaging = Messaging::new(
-            store.clone(),
-            EventBus::new(),
-            DeliveryWakeup::new(),
-            Arc::new(RecoverySender {
-                send_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                state: ModemSmsState::Sent,
-            }),
-        );
-
-        assert_eq!(messaging.start_outbound_recovery().await.unwrap(), 1);
-        let new_message = store
-            .create_outbound(
-                "+15550000001".to_string(),
-                "new active send".to_string(),
-                MessageSource::Web,
-            )
-            .await
-            .unwrap();
-
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            loop {
-                let messages = messaging.list(MessageFilter::default()).await.unwrap();
-                if messages.iter().any(|message| {
-                    message.id == interrupted.id && message.status == MessageStatus::Sent
-                }) {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        let new_message = messaging
-            .list(MessageFilter::default())
             .await
             .unwrap()
-            .into_iter()
-            .find(|message| message.id == new_message.id)
-            .unwrap();
-        assert_eq!(new_message.status, MessageStatus::Sending);
-        assert!(new_message.modem_sms_path.is_none());
+        else {
+            unreachable!()
+        };
+
+        assert!(store
+            .claim_due_outbound("competing-owner".to_string())
+            .await
+            .unwrap()
+            .is_none());
+        store.expire_outbound_lease(message.id).await.unwrap();
+        let claimed = store
+            .claim_due_outbound("competing-owner".to_string())
+            .await
+            .unwrap()
+            .expect("expired lease should be claimable");
+        assert_eq!(claimed.message.id, message.id);
+        assert!(matches!(
+            store
+                .finish_claimed_outbound(
+                    message.id,
+                    owner,
+                    MessageStatus::Failed,
+                    Some("late failure".to_string())
+                )
+                .await
+                .unwrap(),
+            OutboundTransition::OwnershipLost(ref current)
+                if current.status == MessageStatus::Sending
+        ));
+        assert!(matches!(
+            store
+                .finish_claimed_outbound(
+                    message.id,
+                    "competing-owner".to_string(),
+                    MessageStatus::Sent,
+                    None
+                )
+                .await
+                .unwrap(),
+            OutboundTransition::Applied(ref current)
+                if current.status == MessageStatus::Sent
+        ));
+        assert!(matches!(
+            store
+                .finish_claimed_outbound(
+                    message.id,
+                    "competing-owner".to_string(),
+                    MessageStatus::Failed,
+                    Some("late failure".to_string())
+                )
+                .await
+                .unwrap(),
+            OutboundTransition::OwnershipLost(ref current)
+                if current.status == MessageStatus::Sent
+        ));
     }
 
     #[tokio::test]
     async fn recovery_resumes_the_same_stored_modem_object() {
         let store = Store::open_in_memory().unwrap();
-        let message = store
-            .create_outbound(
-                "+15550000000".to_string(),
-                "resume prepared object".to_string(),
-                MessageSource::Web,
-            )
-            .await
-            .unwrap();
-        store
-            .set_outbound_modem_sms_path(
-                message.id,
-                "/org/freedesktop/ModemManager1/SMS/stored".to_string(),
-            )
-            .await
-            .unwrap();
+        seed_claimable_outbound(
+            &store,
+            OutboundPhase::Prepared,
+            Some("/org/freedesktop/ModemManager1/SMS/stored"),
+        )
+        .await;
         let send_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let messaging = Messaging::new(
             store,
@@ -944,7 +1237,7 @@ mod tests {
             }),
         );
 
-        assert_eq!(messaging.recover_outbound().await.unwrap(), 1);
+        assert!(messaging.recover_one_outbound().await.unwrap());
         let recovered = messaging
             .list(MessageFilter::default())
             .await
@@ -959,9 +1252,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_error_is_reconciled_against_the_persisted_modem_object() {
+    async fn unknown_send_result_stays_pending_without_state_based_resend() {
+        let store = Store::open_in_memory().unwrap();
         let messaging = Messaging::new(
-            Store::open_in_memory().unwrap(),
+            store,
             EventBus::new(),
             DeliveryWakeup::new(),
             Arc::new(AmbiguousSender),
@@ -973,31 +1267,32 @@ mod tests {
                 phone_number: "+15550000000".to_string(),
                 body: "reply may be lost".to_string(),
                 source: MessageSource::Web,
+                idempotency_key: None,
             })
             .await
             .unwrap();
 
-        assert!(matches!(outcome, SendOutcome::Sent(_)));
+        let SendOutcome::Pending(message) = outcome else {
+            panic!("an ambiguous D-Bus result must remain pending");
+        };
+        assert_eq!(message.status, MessageStatus::Sending);
+        assert!(message
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("automatic resend suppressed"));
+        assert!(messaging.has_pending_outbound().await.unwrap());
     }
 
     #[tokio::test]
     async fn recovery_waits_for_a_queued_modem_object_without_resending() {
         let store = Store::open_in_memory().unwrap();
-        let message = store
-            .create_outbound(
-                "+15550000000".to_string(),
-                "already queued".to_string(),
-                MessageSource::Web,
-            )
-            .await
-            .unwrap();
-        store
-            .set_outbound_modem_sms_path(
-                message.id,
-                "/org/freedesktop/ModemManager1/SMS/sending".to_string(),
-            )
-            .await
-            .unwrap();
+        seed_claimable_outbound(
+            &store,
+            OutboundPhase::Uncertain,
+            Some("/org/freedesktop/ModemManager1/SMS/sending"),
+        )
+        .await;
         let send_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let messaging = Messaging::new(
             store,
@@ -1009,34 +1304,25 @@ mod tests {
             }),
         );
 
-        assert_eq!(messaging.recover_outbound().await.unwrap(), 1);
+        assert!(messaging.recover_one_outbound().await.unwrap());
         let recovered = messaging
             .list(MessageFilter::default())
             .await
             .unwrap()
             .remove(0);
-        assert_eq!(recovered.status, MessageStatus::Sent);
+        assert_eq!(recovered.status, MessageStatus::Sending);
         assert_eq!(send_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
     async fn recovery_does_not_resend_a_missing_modem_object() {
         let store = Store::open_in_memory().unwrap();
-        let message = store
-            .create_outbound(
-                "+15550000000".to_string(),
-                "object was removed".to_string(),
-                MessageSource::Web,
-            )
-            .await
-            .unwrap();
-        store
-            .set_outbound_modem_sms_path(
-                message.id,
-                "/org/freedesktop/ModemManager1/SMS/missing".to_string(),
-            )
-            .await
-            .unwrap();
+        seed_claimable_outbound(
+            &store,
+            OutboundPhase::Uncertain,
+            Some("/org/freedesktop/ModemManager1/SMS/missing"),
+        )
+        .await;
         let send_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let messaging = Messaging::new(
             store,
@@ -1048,31 +1334,24 @@ mod tests {
             }),
         );
 
-        assert_eq!(messaging.recover_outbound().await.unwrap(), 1);
+        assert!(messaging.recover_one_outbound().await.unwrap());
         let recovered = messaging
             .list(MessageFilter::default())
             .await
             .unwrap()
             .remove(0);
-        assert_eq!(recovered.status, MessageStatus::Failed);
+        assert_eq!(recovered.status, MessageStatus::Sending);
         assert!(recovered
             .error
             .unwrap()
-            .contains("automatic retry suppressed"));
+            .contains("automatic resend suppressed"));
         assert_eq!(send_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
     async fn recovery_fails_an_unprepared_message_without_sending() {
         let store = Store::open_in_memory().unwrap();
-        store
-            .create_outbound(
-                "+15550000000".to_string(),
-                "never reached modem create".to_string(),
-                MessageSource::Web,
-            )
-            .await
-            .unwrap();
+        seed_claimable_outbound(&store, OutboundPhase::Created, None).await;
         let send_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let messaging = Messaging::new(
             store,
@@ -1084,7 +1363,7 @@ mod tests {
             }),
         );
 
-        assert_eq!(messaging.recover_outbound().await.unwrap(), 1);
+        assert!(messaging.recover_one_outbound().await.unwrap());
         let recovered = messaging
             .list(MessageFilter::default())
             .await
@@ -1117,6 +1396,7 @@ mod tests {
                 phone_number: "+15550000000".to_string(),
                 body: "will fail".to_string(),
                 source: MessageSource::Cli,
+                idempotency_key: None,
             })
             .await
             .unwrap();

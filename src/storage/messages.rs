@@ -1,17 +1,328 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use rusqlite::{
     params, params_from_iter, types::Value, Connection, OptionalExtension, TransactionBehavior,
 };
+use time::OffsetDateTime;
 
 use crate::message::{ConversationSummary, Message, MessageCursor, MessageFilter, MessageStatus};
+use crate::message::{IdempotencyConflict, IdempotencyReplayUnavailable};
 
 use super::codecs::{
     direction_to_str, now_string, row_to_message, source_to_str, status_to_str, str_to_direction,
     str_to_source, str_to_status,
 };
-use super::{InboundInsertResult, InvalidMessageCursor, MessageStore, NewMessage};
+use super::{
+    compute_outbound_request_hash, InboundInsertResult, InvalidMessageCursor, MessageStore,
+    NewMessage,
+};
+
+fn operation_timestamps(after: Duration) -> Result<(String, String)> {
+    let now = OffsetDateTime::now_utc();
+    let deadline = now + time::Duration::try_from(after)?;
+    let format = &time::format_description::well_known::Rfc3339;
+    Ok((now.format(format)?, deadline.format(format)?))
+}
+
+struct PhaseTransition<'a> {
+    id: i64,
+    owner: &'a str,
+    expected_phase: &'a str,
+    next_phase: &'a str,
+    modem_sms_path: Option<&'a str>,
+    error: Option<&'a str>,
+    next_attempt_at: Option<&'a str>,
+    lease_for: Duration,
+}
 
 impl MessageStore {
+    pub fn create_or_get_outbound(
+        &self,
+        input: NewMessage,
+        idempotency_key: Option<&str>,
+        owner: &str,
+        lease_for: Duration,
+    ) -> Result<(Message, bool)> {
+        let mut conn = self.conn.lock().unwrap();
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(key) = idempotency_key {
+            let request_hash =
+                compute_outbound_request_hash(&input.phone_number, &input.body, input.source);
+            let existing = transaction
+                .query_row(
+                    "SELECT request_hash, message_id
+                     FROM outbound_idempotency
+                     WHERE key = ?1",
+                    params![key],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+                )
+                .optional()?;
+            if let Some((existing_hash, message_id)) = existing {
+                if existing_hash != request_hash {
+                    return Err(IdempotencyConflict.into());
+                }
+                let message_id = message_id.ok_or(IdempotencyReplayUnavailable)?;
+                let message =
+                    map_find(&transaction, message_id)?.ok_or(IdempotencyReplayUnavailable)?;
+                return Ok((message, false));
+            }
+        }
+
+        let message = insert_message_on(&transaction, input)?;
+        let (now, lease_until) = operation_timestamps(lease_for)?;
+        let changed = transaction.execute(
+            "UPDATE messages
+             SET outbound_phase = 'created',
+                 outbound_owner = ?1,
+                 outbound_lease_until = ?2,
+                 outbound_next_attempt_at = NULL
+             WHERE id = ?3",
+            params![owner, lease_until, message.id],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("failed to initialize outbound operation {}", message.id);
+        }
+        if let Some(key) = idempotency_key {
+            transaction.execute(
+                "INSERT INTO outbound_idempotency (key, request_hash, message_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    key,
+                    compute_outbound_request_hash(
+                        &message.phone_number,
+                        &message.body,
+                        message.source
+                    ),
+                    message.id,
+                    now
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok((message, true))
+    }
+
+    pub fn claim_due_outbound(
+        &self,
+        owner: &str,
+        lease_for: Duration,
+    ) -> Result<Option<(Message, String)>> {
+        let mut conn = self.conn.lock().unwrap();
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (now, lease_until) = operation_timestamps(lease_for)?;
+        let candidate = transaction
+            .query_row(
+                "SELECT id, outbound_phase
+                 FROM messages
+                 WHERE direction = 'outbound'
+                   AND status = 'sending'
+                   AND outbound_phase IN ('created', 'prepared', 'send_started', 'uncertain')
+                   AND (outbound_next_attempt_at IS NULL
+                        OR julianday(outbound_next_attempt_at) <= julianday(?1))
+                   AND (outbound_owner IS NULL
+                        OR outbound_lease_until IS NULL
+                        OR julianday(outbound_lease_until) <= julianday(?1))
+                 ORDER BY id
+                 LIMIT 1",
+                params![now],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((id, phase)) = candidate else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        let changed = transaction.execute(
+            "UPDATE messages
+             SET outbound_owner = ?1,
+                 outbound_lease_until = ?2,
+                 outbound_next_attempt_at = NULL,
+                 updated_at = ?3
+             WHERE id = ?4
+               AND status = 'sending'
+               AND (outbound_owner IS NULL
+                    OR outbound_lease_until IS NULL
+                    OR julianday(outbound_lease_until) <= julianday(?3))",
+            params![owner, lease_until, now, id],
+        )?;
+        if changed != 1 {
+            transaction.commit()?;
+            return Ok(None);
+        }
+        let message = map_get(&transaction, id)?;
+        transaction.commit()?;
+        Ok(Some((message, phase)))
+    }
+
+    pub fn set_outbound_prepared(
+        &self,
+        id: i64,
+        owner: &str,
+        modem_sms_path: &str,
+        lease_for: Duration,
+    ) -> Result<(Message, bool)> {
+        self.transition_outbound(PhaseTransition {
+            id,
+            owner,
+            expected_phase: "created",
+            next_phase: "prepared",
+            modem_sms_path: Some(modem_sms_path),
+            error: None,
+            next_attempt_at: None,
+            lease_for,
+        })
+    }
+
+    pub fn begin_outbound_send(
+        &self,
+        id: i64,
+        owner: &str,
+        lease_for: Duration,
+    ) -> Result<(Message, bool)> {
+        self.transition_outbound(PhaseTransition {
+            id,
+            owner,
+            expected_phase: "prepared",
+            next_phase: "send_started",
+            modem_sms_path: None,
+            error: None,
+            next_attempt_at: None,
+            lease_for,
+        })
+    }
+
+    pub fn defer_outbound(
+        &self,
+        id: i64,
+        owner: &str,
+        phase: &str,
+        error: Option<&str>,
+        retry_after: Option<Duration>,
+    ) -> Result<(Message, bool)> {
+        let conn = self.conn.lock().unwrap();
+        let now = OffsetDateTime::now_utc();
+        let format = &time::format_description::well_known::Rfc3339;
+        let now_string = now.format(format)?;
+        let next_attempt_at = retry_after
+            .map(|duration| -> Result<String> {
+                Ok((now + time::Duration::try_from(duration)?).format(format)?)
+            })
+            .transpose()?;
+        let changed = conn.execute(
+            "UPDATE messages
+             SET outbound_phase = ?1,
+                 outbound_owner = NULL,
+                 outbound_lease_until = NULL,
+                 outbound_next_attempt_at = ?2,
+                 error = ?3,
+                 updated_at = ?4
+             WHERE id = ?5
+               AND direction = 'outbound'
+               AND status = 'sending'
+               AND outbound_owner = ?6",
+            params![phase, next_attempt_at, error, now_string, id, owner],
+        )?;
+        Ok((map_get(&conn, id)?, changed == 1))
+    }
+
+    pub fn finish_claimed_outbound(
+        &self,
+        id: i64,
+        owner: &str,
+        status: MessageStatus,
+        error: Option<&str>,
+    ) -> Result<(Message, bool)> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_string();
+        let changed = conn.execute(
+            "UPDATE messages
+             SET status = ?1,
+                 error = ?2,
+                 outbound_phase = 'complete',
+                 outbound_owner = NULL,
+                 outbound_lease_until = NULL,
+                 outbound_next_attempt_at = NULL,
+                 updated_at = ?3
+             WHERE id = ?4
+               AND direction = 'outbound'
+               AND status = 'sending'
+               AND outbound_owner = ?5",
+            params![status_to_str(status), error, now, id, owner],
+        )?;
+        Ok((map_get(&conn, id)?, changed == 1))
+    }
+
+    pub fn renew_outbound_lease(&self, id: i64, owner: &str, lease_for: Duration) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let (_, lease_until) = operation_timestamps(lease_for)?;
+        Ok(conn.execute(
+            "UPDATE messages
+             SET outbound_lease_until = ?1
+             WHERE id = ?2
+               AND direction = 'outbound'
+               AND status = 'sending'
+               AND outbound_owner = ?3",
+            params![lease_until, id, owner],
+        )? == 1)
+    }
+
+    pub fn has_pending_outbound(&self) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM messages
+                WHERE direction = 'outbound' AND status = 'sending'
+             )",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    #[cfg(test)]
+    pub fn expire_outbound_lease(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE messages
+             SET outbound_lease_until = '1970-01-01T00:00:00Z'
+             WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    fn transition_outbound(&self, transition: PhaseTransition<'_>) -> Result<(Message, bool)> {
+        let conn = self.conn.lock().unwrap();
+        let (now, lease_until) = operation_timestamps(transition.lease_for)?;
+        let changed = conn.execute(
+            "UPDATE messages
+             SET outbound_phase = ?1,
+                 modem_sms_path = COALESCE(?2, modem_sms_path),
+                 error = ?3,
+                 outbound_next_attempt_at = ?4,
+                 outbound_lease_until = ?5,
+                 updated_at = ?6
+             WHERE id = ?7
+               AND direction = 'outbound'
+               AND status = 'sending'
+               AND outbound_owner = ?8
+               AND outbound_phase = ?9",
+            params![
+                transition.next_phase,
+                transition.modem_sms_path,
+                transition.error,
+                transition.next_attempt_at,
+                lease_until,
+                now,
+                transition.id,
+                transition.owner,
+                transition.expected_phase
+            ],
+        )?;
+        Ok((map_get(&conn, transition.id)?, changed == 1))
+    }
+
+    #[cfg(test)]
     pub fn insert_message(&self, input: NewMessage) -> Result<Message> {
         let conn = self.conn.lock().unwrap();
         insert_message_on(&conn, input)
@@ -77,18 +388,6 @@ impl MessageStore {
         self.query_messages(filter, true)
     }
 
-    pub fn list_sending_outbound(&self) -> Result<Vec<Message>> {
-        let conn = self.conn.lock().unwrap();
-        let mut statement = conn.prepare(
-            "SELECT * FROM messages
-             WHERE direction = 'outbound' AND status = 'sending'
-             ORDER BY id",
-        )?;
-        let rows = statement.query_map([], row_to_message)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
-    }
-
     fn query_messages(&self, filter: &MessageFilter, apply_limit: bool) -> Result<Vec<Message>> {
         let conn = self.conn.lock().unwrap();
         let cursor = resolve_message_cursor(&conn, filter.before.as_ref())?;
@@ -150,36 +449,6 @@ impl MessageStore {
         }
         transaction.commit()?;
         Ok(())
-    }
-
-    pub fn update_status(
-        &self,
-        id: i64,
-        status: MessageStatus,
-        error: Option<String>,
-    ) -> Result<Message> {
-        let now = now_string();
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE messages SET status = ?1, error = ?2, updated_at = ?3 WHERE id = ?4",
-            params![status_to_str(status), error, now, id],
-        )?;
-        map_get(&conn, id)
-    }
-
-    pub fn set_outbound_modem_sms_path(&self, id: i64, modem_sms_path: &str) -> Result<Message> {
-        let now = now_string();
-        let conn = self.conn.lock().unwrap();
-        let changed = conn.execute(
-            "UPDATE messages
-             SET modem_sms_path = ?1, updated_at = ?2
-             WHERE id = ?3 AND direction = 'outbound' AND status = 'sending'",
-            params![modem_sms_path, now, id],
-        )?;
-        if changed != 1 {
-            anyhow::bail!("sending outbound message {id} not found");
-        }
-        map_get(&conn, id)
     }
 
     pub fn list_conversations(&self) -> Result<Vec<ConversationSummary>> {

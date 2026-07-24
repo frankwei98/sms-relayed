@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Result;
 
@@ -12,6 +13,35 @@ use crate::message::{ConversationSummary, Message, MessageFilter, MessageSource,
 use crate::storage::{ForwardAttemptSample, MessageStore, NewMessage};
 
 const MODEM_FINGERPRINT_META_KEY: &str = "modem_fingerprint";
+
+fn outbound_phase_to_str(phase: OutboundPhase) -> &'static str {
+    match phase {
+        OutboundPhase::Created => "created",
+        OutboundPhase::Prepared => "prepared",
+        OutboundPhase::SendStarted => "send_started",
+        OutboundPhase::Uncertain => "uncertain",
+        OutboundPhase::Unknown => "unknown",
+    }
+}
+
+fn parse_outbound_phase(value: &str) -> Result<OutboundPhase> {
+    match value {
+        "created" => Ok(OutboundPhase::Created),
+        "prepared" => Ok(OutboundPhase::Prepared),
+        "send_started" => Ok(OutboundPhase::SendStarted),
+        "uncertain" => Ok(OutboundPhase::Uncertain),
+        "unknown" => Ok(OutboundPhase::Unknown),
+        _ => anyhow::bail!("unknown outbound phase: {value}"),
+    }
+}
+
+fn transition_from(result: (Message, bool)) -> OutboundTransition {
+    if result.1 {
+        OutboundTransition::Applied(result.0)
+    } else {
+        OutboundTransition::OwnershipLost(result.0)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct InboundMessage {
@@ -25,6 +55,33 @@ pub struct InboundMessage {
 pub enum InboundOutcome {
     Inserted(Message),
     Duplicate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboundPhase {
+    Created,
+    Prepared,
+    SendStarted,
+    Uncertain,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundClaim {
+    pub message: Message,
+    pub phase: OutboundPhase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateOutboundOutcome {
+    Created(Message),
+    Existing(Message),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutboundTransition {
+    Applied(Message),
+    OwnershipLost(Message),
 }
 
 #[derive(Clone)]
@@ -56,6 +113,8 @@ impl From<MessageStore> for Store {
 }
 
 impl Store {
+    const OUTBOUND_LEASE: Duration = Duration::from_secs(90);
+
     pub async fn open(path: &Path) -> Result<Self> {
         let path = path.to_path_buf();
         let sqlite = tokio::task::spawn_blocking(move || MessageStore::open(&path)).await??;
@@ -116,47 +175,114 @@ impl Store {
         })
     }
 
-    pub async fn create_outbound(
+    pub async fn create_claimed_outbound(
         &self,
         phone_number: String,
         body: String,
         source: MessageSource,
-    ) -> Result<Message> {
-        let message = self
+        idempotency_key: Option<String>,
+        owner: String,
+    ) -> Result<CreateOutboundOutcome> {
+        let result = self
             .run(move |sqlite| {
                 let now = time::OffsetDateTime::now_utc()
                     .format(&time::format_description::well_known::Rfc3339)?;
-                sqlite.insert_message(NewMessage {
-                    direction: crate::message::MessageDirection::Outbound,
-                    phone_number,
-                    body,
-                    timestamp: now.clone(),
-                    status: MessageStatus::Sending,
-                    source,
-                    modem_sms_path: None,
-                    read_at: Some(now),
-                    error: None,
-                    inbound_dedupe_key: None,
-                })
+                sqlite.create_or_get_outbound(
+                    NewMessage {
+                        direction: crate::message::MessageDirection::Outbound,
+                        phone_number,
+                        body,
+                        timestamp: now.clone(),
+                        status: MessageStatus::Sending,
+                        source,
+                        modem_sms_path: None,
+                        read_at: Some(now),
+                        error: None,
+                        inbound_dedupe_key: None,
+                    },
+                    idempotency_key.as_deref(),
+                    &owner,
+                    Self::OUTBOUND_LEASE,
+                )
             })
             .await?;
         #[cfg(test)]
-        {
+        if result.1 {
             let pause = self.outbound_creation_pause.lock().unwrap().take();
             if let Some(pause) = pause {
                 pause.committed.notify_one();
                 pause.release.notified().await;
             }
         }
-        Ok(message)
+        Ok(if result.1 {
+            CreateOutboundOutcome::Created(result.0)
+        } else {
+            CreateOutboundOutcome::Existing(result.0)
+        })
     }
 
-    pub async fn finish_outbound(
+    pub async fn claim_due_outbound(&self, owner: String) -> Result<Option<OutboundClaim>> {
+        let result = self
+            .run(move |sqlite| sqlite.claim_due_outbound(&owner, Self::OUTBOUND_LEASE))
+            .await?;
+        result
+            .map(|(message, phase)| {
+                Ok(OutboundClaim {
+                    message,
+                    phase: parse_outbound_phase(&phase)?,
+                })
+            })
+            .transpose()
+    }
+
+    pub async fn set_outbound_prepared(
         &self,
         id: i64,
+        owner: String,
+        modem_sms_path: String,
+    ) -> Result<OutboundTransition> {
+        let result = self
+            .run(move |sqlite| {
+                sqlite.set_outbound_prepared(id, &owner, &modem_sms_path, Self::OUTBOUND_LEASE)
+            })
+            .await?;
+        Ok(transition_from(result))
+    }
+
+    pub async fn begin_outbound_send(&self, id: i64, owner: String) -> Result<OutboundTransition> {
+        let result = self
+            .run(move |sqlite| sqlite.begin_outbound_send(id, &owner, Self::OUTBOUND_LEASE))
+            .await?;
+        Ok(transition_from(result))
+    }
+
+    pub async fn defer_outbound(
+        &self,
+        id: i64,
+        owner: String,
+        phase: OutboundPhase,
+        error: Option<String>,
+        retry_after: Option<Duration>,
+    ) -> Result<OutboundTransition> {
+        let phase = outbound_phase_to_str(phase);
+        let result = self
+            .run(move |sqlite| {
+                sqlite.defer_outbound(id, &owner, phase, error.as_deref(), retry_after)
+            })
+            .await?;
+        Ok(transition_from(result))
+    }
+
+    pub async fn finish_claimed_outbound(
+        &self,
+        id: i64,
+        owner: String,
         status: MessageStatus,
         error: Option<String>,
-    ) -> Result<Message> {
+    ) -> Result<OutboundTransition> {
+        if !matches!(status, MessageStatus::Sent | MessageStatus::Failed) {
+            anyhow::bail!("outbound terminal status must be sent or failed");
+        }
         #[cfg(test)]
         if self
             .outbound_finalization_failures
@@ -167,7 +293,24 @@ impl Store {
         {
             anyhow::bail!("injected outbound finalization failure");
         }
-        self.run(move |sqlite| sqlite.update_status(id, status, error))
+        let result = self
+            .run(move |sqlite| sqlite.finish_claimed_outbound(id, &owner, status, error.as_deref()))
+            .await?;
+        Ok(transition_from(result))
+    }
+
+    pub async fn renew_outbound_lease(&self, id: i64, owner: String) -> Result<bool> {
+        self.run(move |sqlite| sqlite.renew_outbound_lease(id, &owner, Self::OUTBOUND_LEASE))
+            .await
+    }
+
+    pub async fn has_pending_outbound(&self) -> Result<bool> {
+        self.run(|sqlite| sqlite.has_pending_outbound()).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn expire_outbound_lease(&self, id: i64) -> Result<()> {
+        self.run(move |sqlite| sqlite.expire_outbound_lease(id))
             .await
     }
 
@@ -189,21 +332,8 @@ impl Store {
         (pause.committed, pause.release)
     }
 
-    pub async fn set_outbound_modem_sms_path(
-        &self,
-        id: i64,
-        modem_sms_path: String,
-    ) -> Result<Message> {
-        self.run(move |sqlite| sqlite.set_outbound_modem_sms_path(id, &modem_sms_path))
-            .await
-    }
-
     pub async fn list_messages(&self, filter: MessageFilter) -> Result<Vec<Message>> {
         self.run(move |sqlite| sqlite.list_messages(&filter)).await
-    }
-
-    pub async fn sending_outbound(&self) -> Result<Vec<Message>> {
-        self.run(|sqlite| sqlite.list_sending_outbound()).await
     }
 
     pub async fn list_conversations(&self) -> Result<Vec<ConversationSummary>> {

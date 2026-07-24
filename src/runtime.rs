@@ -32,10 +32,6 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
         delivery_wakeup.clone(),
         sms_sender.clone(),
     );
-    let recovered_outbound = messaging.start_outbound_recovery().await?;
-    if recovered_outbound > 0 {
-        log::info!("recovering {recovered_outbound} outbound messages");
-    }
 
     let client = Arc::new(build_http_client(&config.http));
     let shell_timeout = Duration::from_secs(config.http.shell_timeout_secs);
@@ -75,6 +71,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
         delivery_wakeup.clone(),
     );
     let retention_worker = run_retention_worker(store.clone(), config.clone());
+    let outbound_worker = messaging.run_outbound_worker();
 
     if config.api.enabled {
         let api_state = ApiState {
@@ -101,6 +98,9 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
             _ = retention_worker => {
                 Err(anyhow::anyhow!("retention worker exited unexpectedly"))
             }
+            _ = outbound_worker => {
+                Err(anyhow::anyhow!("outbound worker exited unexpectedly"))
+            }
         }
     } else {
         tokio::select! {
@@ -110,6 +110,9 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
             }
             _ = retention_worker => {
                 Err(anyhow::anyhow!("retention worker exited unexpectedly"))
+            }
+            _ = outbound_worker => {
+                Err(anyhow::anyhow!("outbound worker exited unexpectedly"))
             }
         }
     }
@@ -168,18 +171,18 @@ pub async fn send_interactive(config_path: &Path) -> Result<()> {
         return Ok(());
     }
     let sms_sender = Arc::new(dbus::SystemSmsSender::connect().await?);
-    let messaging = Messaging::new(
-        Store::open(Path::new(&config.api.database_path)).await?,
-        EventBus::new(),
-        DeliveryWakeup::new(),
-        sms_sender,
-    );
+    let store = Store::open(Path::new(&config.api.database_path)).await?;
+    let messaging = Messaging::new(store, EventBus::new(), DeliveryWakeup::new(), sms_sender);
+    if messaging.has_pending_outbound().await? {
+        anyhow::bail!("an outbound SMS is still unresolved; refusing a blind CLI retry");
+    }
     let outcome = messaging
         .send(SendMessage {
             modem_path: config.app.modem_path,
             phone_number: tel_number.trim().to_string(),
             body: sms_text.trim().to_string(),
             source: MessageSource::Cli,
+            idempotency_key: None,
         })
         .await?;
     finish_interactive_send(outcome)
@@ -189,6 +192,9 @@ fn finish_interactive_send(outcome: SendOutcome) -> Result<()> {
     match outcome {
         SendOutcome::Sent(_) => Ok(()),
         SendOutcome::Failed(_) => Err(anyhow::anyhow!("SMS send failed")),
+        SendOutcome::Pending(_) => Err(anyhow::anyhow!(
+            "SMS outcome is unresolved; do not retry blindly"
+        )),
     }
 }
 
