@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -122,6 +122,7 @@ async fn list_conversations(
 
 async fn send_message(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     Json(req): Json<SendRequest>,
 ) -> ApiResult<Json<Message>> {
     if req.phone_number.trim().is_empty() {
@@ -132,6 +133,21 @@ async fn send_message(
     }
     let phone_number = req.phone_number.trim().to_string();
     let body = req.body;
+    let idempotency_key = match headers.get("idempotency-key") {
+        Some(value) => {
+            let value = value
+                .to_str()
+                .map_err(|_| ApiError::bad_request("invalid Idempotency-Key header"))?
+                .trim();
+            if value.is_empty() || value.len() > 200 {
+                return Err(ApiError::bad_request(
+                    "Idempotency-Key must contain 1 to 200 characters",
+                ));
+            }
+            Some(value.to_string())
+        }
+        None => None,
+    };
     let updated = state
         .messaging()
         .send(SendMessage {
@@ -139,9 +155,32 @@ async fn send_message(
             phone_number: phone_number.clone(),
             body: body.clone(),
             source: MessageSource::Web,
+            idempotency_key,
         })
         .await
-        .map_err(|error| ApiError::internal(error.to_string()))?
+        .map_err(|error| {
+            if error
+                .downcast_ref::<crate::message::IdempotencyConflict>()
+                .is_some()
+            {
+                ApiError::new(
+                    StatusCode::CONFLICT,
+                    "idempotency_conflict",
+                    error.to_string(),
+                )
+            } else if error
+                .downcast_ref::<crate::message::IdempotencyReplayUnavailable>()
+                .is_some()
+            {
+                ApiError::new(
+                    StatusCode::CONFLICT,
+                    "idempotency_replay_unavailable",
+                    error.to_string(),
+                )
+            } else {
+                ApiError::internal(error.to_string())
+            }
+        })?
         .into_message();
     Ok(Json(updated))
 }
@@ -292,8 +331,8 @@ mod tests {
         fn send_prepared<'a>(
             &'a self,
             _modem_sms_path: &'a str,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
-            Box::pin(async { Ok(()) })
+        ) -> Pin<Box<dyn Future<Output = crate::dbus::SendAttemptOutcome> + Send + 'a>> {
+            Box::pin(async { crate::dbus::SendAttemptOutcome::Accepted })
         }
 
         fn sms_state<'a>(
@@ -340,8 +379,11 @@ mod tests {
             sms_sender: Arc::new(sender.clone()),
         };
 
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", "api-request-1".parse().unwrap());
         let message = send_message(
-            State(state),
+            State(state.clone()),
+            headers.clone(),
             Json(SendRequest {
                 phone_number: "+15551234567".to_string(),
                 body: "test body".to_string(),
@@ -350,8 +392,31 @@ mod tests {
         .await
         .unwrap()
         .0;
+        let repeated = send_message(
+            State(state.clone()),
+            headers.clone(),
+            Json(SendRequest {
+                phone_number: "+15551234567".to_string(),
+                body: "test body".to_string(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let conflict = send_message(
+            State(state),
+            headers,
+            Json(SendRequest {
+                phone_number: "+15551234567".to_string(),
+                body: "different body".to_string(),
+            }),
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(message.status, MessageStatus::Sent);
+        assert_eq!(repeated.id, message.id);
+        assert_eq!(conflict.status, StatusCode::CONFLICT);
         assert_eq!(
             sender.calls.lock().unwrap().as_slice(),
             [(

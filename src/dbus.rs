@@ -20,6 +20,14 @@ pub struct PreparedSms {
     pub modem_sms_path: String,
 }
 
+#[derive(Debug)]
+pub enum SendAttemptOutcome {
+    Accepted,
+    Rejected(anyhow::Error),
+    NotAttempted(anyhow::Error),
+    Unknown(anyhow::Error),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModemSmsState {
     Stored,
@@ -39,7 +47,7 @@ pub trait SmsSender: Send + Sync {
     fn send_prepared<'a>(
         &'a self,
         modem_sms_path: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = SendAttemptOutcome> + Send + 'a>>;
 
     fn sms_state<'a>(
         &'a self,
@@ -105,14 +113,17 @@ impl SmsSender for SystemSmsSender {
     fn send_prepared<'a>(
         &'a self,
         modem_sms_path: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = SendAttemptOutcome> + Send + 'a>> {
         Box::pin(async move {
-            let connection = self.get_or_connect().await?;
-            let result = send_prepared_sms(&connection, modem_sms_path).await;
-            if result.is_err() {
+            let connection = match self.get_or_connect().await {
+                Ok(connection) => connection,
+                Err(error) => return SendAttemptOutcome::NotAttempted(error),
+            };
+            let outcome = send_prepared_sms(&connection, modem_sms_path).await;
+            if !matches!(outcome, SendAttemptOutcome::Accepted) {
                 self.discard_connection(&connection).await;
             }
-            result
+            outcome
         })
     }
 
@@ -585,7 +596,10 @@ pub async fn create_sms(
     })
 }
 
-pub async fn send_prepared_sms(connection: &Connection, modem_sms_path: &str) -> Result<()> {
+pub async fn send_prepared_sms(
+    connection: &Connection,
+    modem_sms_path: &str,
+) -> SendAttemptOutcome {
     let send_call = connection.call_method(
         Some(MM_DESTINATION),
         modem_sms_path,
@@ -593,12 +607,36 @@ pub async fn send_prepared_sms(connection: &Connection, modem_sms_path: &str) ->
         "Send",
         &(),
     );
-    let _reply = tokio::time::timeout(Duration::from_secs(30), send_call)
-        .await
-        .map_err(|_| anyhow::anyhow!("dbus Send timeout"))??;
+    match tokio::time::timeout(Duration::from_secs(30), send_call).await {
+        Err(_) => SendAttemptOutcome::Unknown(anyhow::anyhow!("dbus Send timeout")),
+        Ok(Ok(_)) => {
+            println!("短信已发送");
+            SendAttemptOutcome::Accepted
+        }
+        Ok(Err(error)) if is_explicit_send_rejection(&error) => {
+            SendAttemptOutcome::Rejected(error.into())
+        }
+        Ok(Err(error)) => SendAttemptOutcome::Unknown(error.into()),
+    }
+}
 
-    println!("短信已发送");
-    Ok(())
+fn is_explicit_send_rejection(error: &zbus::Error) -> bool {
+    let zbus::Error::MethodError(name, _, _) = error else {
+        return false;
+    };
+    is_explicit_send_rejection_name(name.as_str())
+}
+
+fn is_explicit_send_rejection_name(name: &str) -> bool {
+    name.starts_with("org.freedesktop.ModemManager1.Error.")
+        || matches!(
+            name,
+            "org.freedesktop.DBus.Error.AccessDenied"
+                | "org.freedesktop.DBus.Error.InvalidArgs"
+                | "org.freedesktop.DBus.Error.UnknownMethod"
+                | "org.freedesktop.DBus.Error.UnknownObject"
+                | "org.freedesktop.DBus.Error.UnknownInterface"
+        )
 }
 
 pub async fn get_sms_state(connection: &Connection, modem_sms_path: &str) -> Result<ModemSmsState> {
@@ -675,6 +713,22 @@ mod tests {
         ));
         assert!(!is_missing_sms_object_error_name(
             "org.freedesktop.DBus.Error.NoReply"
+        ));
+    }
+
+    #[test]
+    fn no_reply_is_unknown_but_modem_rejection_is_explicit() {
+        assert!(!is_explicit_send_rejection_name(
+            "org.freedesktop.DBus.Error.NoReply"
+        ));
+        assert!(!is_explicit_send_rejection_name(
+            "org.freedesktop.DBus.Error.Disconnected"
+        ));
+        assert!(is_explicit_send_rejection_name(
+            "org.freedesktop.ModemManager1.Error.Core.WrongState"
+        ));
+        assert!(is_explicit_send_rejection_name(
+            "org.freedesktop.DBus.Error.AccessDenied"
         ));
     }
     use crate::modem::{MmcliOutput, MmcliRunner, ModemError};

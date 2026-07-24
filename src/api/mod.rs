@@ -75,8 +75,10 @@ impl crate::dbus::SmsSender for TestSmsSender {
     fn send_prepared<'a>(
         &'a self,
         _modem_sms_path: &'a str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
-        Box::pin(async { Ok(()) })
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = crate::dbus::SendAttemptOutcome> + Send + 'a>,
+    > {
+        Box::pin(async { crate::dbus::SendAttemptOutcome::Accepted })
     }
 
     fn sms_state<'a>(

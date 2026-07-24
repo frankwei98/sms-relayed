@@ -18,6 +18,34 @@ pub(super) fn migrate_existing_schema(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    for (name, definition) in [
+        (
+            "outbound_phase",
+            "TEXT NULL CHECK (
+                outbound_phase IN (
+                    'created', 'prepared', 'send_started', 'uncertain', 'unknown', 'complete'
+                )
+            )",
+        ),
+        ("outbound_owner", "TEXT NULL"),
+        ("outbound_lease_until", "TEXT NULL"),
+        ("outbound_next_attempt_at", "TEXT NULL"),
+    ] {
+        let exists: bool = conn
+            .prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('messages')
+                 WHERE name = ?1",
+            )?
+            .query_row(params![name], |row| row.get::<_, i64>(0))
+            .map(|count| count > 0)?;
+        if !exists {
+            conn.execute(
+                &format!("ALTER TABLE messages ADD COLUMN {name} {definition}"),
+                [],
+            )?;
+        }
+    }
+
     let has_dispatch_delay: bool = conn
         .prepare(
             "SELECT COUNT(*) FROM pragma_table_info('forward_attempt_samples')
@@ -37,6 +65,23 @@ pub(super) fn migrate_existing_schema(conn: &Connection) -> Result<()> {
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_dedupe
          ON messages(inbound_dedupe_key)
          WHERE inbound_dedupe_key IS NOT NULL",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_outbound_due
+         ON messages(julianday(COALESCE(outbound_next_attempt_at, created_at)), id)
+         WHERE direction = 'outbound' AND status = 'sending'",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE messages
+         SET outbound_phase = CASE
+             WHEN modem_sms_path IS NULL THEN 'created'
+             ELSE 'uncertain'
+         END
+         WHERE direction = 'outbound'
+           AND status = 'sending'
+           AND outbound_phase IS NULL",
         [],
     )?;
 

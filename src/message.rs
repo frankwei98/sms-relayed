@@ -1,5 +1,29 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug)]
+pub struct IdempotencyConflict;
+
+impl std::fmt::Display for IdempotencyConflict {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("idempotency key was already used with a different request")
+    }
+}
+
+impl std::error::Error for IdempotencyConflict {}
+
+#[derive(Debug)]
+pub struct IdempotencyReplayUnavailable;
+
+impl std::fmt::Display for IdempotencyReplayUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            "idempotency key was already completed, but its message is no longer available",
+        )
+    }
+}
+
+impl std::error::Error for IdempotencyReplayUnavailable {}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum MessageDirection {
