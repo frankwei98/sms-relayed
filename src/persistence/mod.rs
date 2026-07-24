@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::message::{ConversationSummary, Message, MessageFilter, MessageSource, MessageStatus};
-use crate::storage::{ForwardAttemptSample, InboundInsertResult, MessageStore, NewMessage};
+use crate::storage::{ForwardAttemptSample, MessageStore, NewMessage};
 
 const MODEM_FINGERPRINT_META_KEY: &str = "modem_fingerprint";
 
@@ -15,6 +15,12 @@ pub struct InboundMessage {
     pub body: String,
     pub timestamp: String,
     pub modem_sms_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InboundOutcome {
+    Inserted(Message),
+    Duplicate,
 }
 
 #[derive(Clone)]
@@ -29,10 +35,10 @@ impl From<MessageStore> for Store {
 }
 
 impl Store {
-    pub fn open(path: &Path) -> Result<Self> {
-        Ok(Self {
-            sqlite: MessageStore::open(path)?,
-        })
+    pub async fn open(path: &Path) -> Result<Self> {
+        let path = path.to_path_buf();
+        let sqlite = tokio::task::spawn_blocking(move || MessageStore::open(&path)).await??;
+        Ok(Self { sqlite })
     }
 
     #[cfg(test)]
@@ -66,22 +72,29 @@ impl Store {
         &self,
         input: InboundMessage,
         profile_keys: Vec<String>,
-    ) -> Result<InboundInsertResult> {
-        self.run(move |sqlite| {
-            let fingerprint = sqlite
-                .get_meta(MODEM_FINGERPRINT_META_KEY)?
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("modem fingerprint is not enrolled"))?;
-            let message = NewMessage::modem_inbound(
-                &input.phone_number,
-                &input.body,
-                &input.timestamp,
-                &input.modem_sms_path,
-                &fingerprint,
-            );
-            sqlite.insert_inbound_message_with_deliveries(message, &profile_keys)
+    ) -> Result<InboundOutcome> {
+        let result = self
+            .run(move |sqlite| {
+                let fingerprint = sqlite
+                    .get_meta(MODEM_FINGERPRINT_META_KEY)?
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("modem fingerprint is not enrolled"))?;
+                let message = NewMessage::modem_inbound(
+                    &input.phone_number,
+                    &input.body,
+                    &input.timestamp,
+                    &input.modem_sms_path,
+                    &fingerprint,
+                );
+                sqlite.insert_inbound_message_with_deliveries(message, &profile_keys)
+            })
+            .await?;
+        Ok(match result {
+            crate::storage::InboundInsertResult::Inserted(message) => {
+                InboundOutcome::Inserted(message)
+            }
+            crate::storage::InboundInsertResult::Duplicate(_) => InboundOutcome::Duplicate,
         })
-        .await
     }
 
     pub async fn create_outbound(
@@ -186,20 +199,96 @@ impl Store {
             .await
     }
 
-    pub fn stream_messages(
+    pub fn stream_messages<T, F>(
         &self,
         filter: MessageFilter,
-    ) -> tokio::sync::mpsc::Receiver<Result<Message>> {
+        transform: F,
+    ) -> tokio::sync::mpsc::Receiver<Result<T>>
+    where
+        T: Send + 'static,
+        F: FnMut(Message) -> Result<T> + Send + 'static,
+    {
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         let sqlite = self.sqlite.clone();
         tokio::task::spawn_blocking(move || {
-            let result = sqlite.for_each_export_message(&filter, |message| {
-                Ok(sender.blocking_send(Ok(message)).is_ok())
-            });
+            let result = produce_messages(&sqlite, &filter, transform, &sender);
             if let Err(error) = result {
                 let _ = sender.blocking_send(Err(error));
             }
         });
         receiver
+    }
+}
+
+fn produce_messages<T, F>(
+    sqlite: &MessageStore,
+    filter: &MessageFilter,
+    mut transform: F,
+    sender: &tokio::sync::mpsc::Sender<Result<T>>,
+) -> Result<()>
+where
+    T: Send + 'static,
+    F: FnMut(Message) -> Result<T>,
+{
+    sqlite.for_each_export_message(filter, |message| {
+        let item = transform(message)?;
+        Ok(sender.blocking_send(Ok(item)).is_ok())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use crate::message::MessageFilter;
+    use crate::storage::NewMessage;
+
+    use super::{produce_messages, Store};
+
+    #[tokio::test]
+    async fn open_initializes_storage_through_the_async_interface() {
+        let path = std::env::temp_dir().join(format!(
+            "sms-relayed-async-open-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+
+        let store = Store::open(&path).await.unwrap();
+
+        store.health_check().await.unwrap();
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn export_producer_stops_when_the_consumer_disconnects() {
+        let sqlite = Store::open_in_memory().unwrap().sqlite();
+        for index in 0..10 {
+            sqlite
+                .insert_message(NewMessage::inbound("+1", &format!("message-{index}")))
+                .unwrap();
+        }
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        drop(receiver);
+        let transformed = Arc::new(AtomicUsize::new(0));
+        let transformed_in_worker = transformed.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            produce_messages(
+                &sqlite,
+                &MessageFilter::default(),
+                move |message| {
+                    transformed_in_worker.fetch_add(1, Ordering::SeqCst);
+                    Ok(message)
+                },
+                &sender,
+            )
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(transformed.load(Ordering::SeqCst), 1);
     }
 }

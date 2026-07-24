@@ -13,7 +13,7 @@ use crate::dbus::{self, ReceivedSms};
 use crate::delivery::{run_delivery_worker, DeliveryWakeup};
 use crate::events::EventBus;
 use crate::message::MessageSource;
-use crate::messaging::{Messaging, ReceiveMessage, SendMessage};
+use crate::messaging::{Messaging, ReceiveMessage, SendMessage, SendOutcome};
 use crate::modem::ModemService;
 use crate::persistence::Store;
 use crate::runner::{build_http_client, RealProcessRunner};
@@ -22,7 +22,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
     let config = AppConfig::load(config_path)?;
     config.validate()?;
 
-    let store = Store::open(Path::new(&config.api.database_path))?;
+    let store = Store::open(Path::new(&config.api.database_path)).await?;
     let events = EventBus::new();
     let delivery_wakeup = DeliveryWakeup::new();
     let sms_sender = Arc::new(dbus::SystemSmsSender::new());
@@ -164,12 +164,12 @@ pub async fn send_interactive(config_path: &Path) -> Result<()> {
         return Ok(());
     }
     let messaging = Messaging::new(
-        Store::open(Path::new(&config.api.database_path))?,
+        Store::open(Path::new(&config.api.database_path)).await?,
         EventBus::new(),
         DeliveryWakeup::new(),
         Arc::new(dbus::SystemSmsSender::new()),
     );
-    messaging
+    let outcome = messaging
         .send(SendMessage {
             modem_path: config.app.modem_path,
             phone_number: tel_number.trim().to_string(),
@@ -177,5 +177,38 @@ pub async fn send_interactive(config_path: &Path) -> Result<()> {
             source: MessageSource::Cli,
         })
         .await?;
-    Ok(())
+    finish_interactive_send(outcome)
+}
+
+fn finish_interactive_send(outcome: SendOutcome) -> Result<()> {
+    match outcome {
+        SendOutcome::Sent(_) => Ok(()),
+        SendOutcome::Failed(_) => Err(anyhow::anyhow!("SMS send failed")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::message::{Message, MessageDirection, MessageSource, MessageStatus};
+    use crate::messaging::SendOutcome;
+
+    #[test]
+    fn failed_send_outcome_makes_the_cli_command_fail() {
+        let result = super::finish_interactive_send(SendOutcome::Failed(Message {
+            id: 1,
+            direction: MessageDirection::Outbound,
+            phone_number: "+15550000000".to_string(),
+            body: "failed send".to_string(),
+            timestamp: "2026-07-24T00:00:00Z".to_string(),
+            status: MessageStatus::Failed,
+            source: MessageSource::Cli,
+            modem_sms_path: None,
+            read_at: Some("2026-07-24T00:00:00Z".to_string()),
+            error: Some("system bus unavailable".to_string()),
+            created_at: "2026-07-24T00:00:00Z".to_string(),
+            updated_at: "2026-07-24T00:00:00Z".to_string(),
+        }));
+
+        assert!(result.is_err());
+    }
 }

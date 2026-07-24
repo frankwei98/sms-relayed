@@ -1,4 +1,4 @@
-use axum::body::{Body, Bytes};
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::sse::{Event, Sse};
@@ -7,11 +7,11 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use tokio_stream::wrappers::BroadcastStream;
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
 #[cfg(test)]
 use crate::events::AppEvent;
+use crate::export::MessageExportFormat;
 use crate::message::{
     Message, MessageCursor, MessageDirection, MessageFilter, MessageSource, MessageStatus,
 };
@@ -141,7 +141,8 @@ async fn send_message(
             source: MessageSource::Web,
         })
         .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .into_message();
     Ok(Json(updated))
 }
 
@@ -208,23 +209,16 @@ async fn export_messages(
     Query(query): Query<MessageQuery>,
 ) -> ApiResult<Response> {
     let format = if query.format.as_deref() == Some("json") {
-        ExportFormat::Json
+        MessageExportFormat::Json
     } else {
-        ExportFormat::Csv
+        MessageExportFormat::Csv
     };
     let filter = to_filter(&query)?;
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
+    let stream = crate::export::stream(&state.store, filter, format);
 
-    tokio::spawn(async move {
-        let result = stream_export(&state.store, filter, format, &tx).await;
-        if let Err(err) = result {
-            let _ = tx.send(Err(std::io::Error::other(err.to_string()))).await;
-        }
-    });
-
-    let body = Body::from_stream(ReceiverStream::new(rx));
+    let body = Body::from_stream(stream);
     let headers = match format {
-        ExportFormat::Json => [
+        MessageExportFormat::Json => [
             (
                 header::CONTENT_TYPE,
                 "application/json; charset=utf-8".to_string(),
@@ -234,7 +228,7 @@ async fn export_messages(
                 "attachment; filename=messages.json".to_string(),
             ),
         ],
-        ExportFormat::Csv => [
+        MessageExportFormat::Csv => [
             (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
             (
                 header::CONTENT_DISPOSITION,
@@ -243,91 +237,6 @@ async fn export_messages(
         ],
     };
     Ok((headers, body).into_response())
-}
-
-#[derive(Clone, Copy)]
-enum ExportFormat {
-    Json,
-    Csv,
-}
-
-async fn stream_export(
-    store: &crate::persistence::Store,
-    filter: MessageFilter,
-    format: ExportFormat,
-    tx: &tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
-) -> anyhow::Result<()> {
-    let mut messages = store.stream_messages(filter);
-    match format {
-        ExportFormat::Json => {
-            if tx.send(Ok(Bytes::from_static(b"["))).await.is_err() {
-                return Ok(());
-            }
-            let mut first = true;
-            while let Some(message) = messages.recv().await {
-                let message = message?;
-                let mut chunk = if first { Vec::new() } else { vec![b','] };
-                first = false;
-                serde_json::to_writer(&mut chunk, &message)?;
-                if tx.send(Ok(Bytes::from(chunk))).await.is_err() {
-                    return Ok(());
-                }
-            }
-            let _ = tx.send(Ok(Bytes::from_static(b"]"))).await;
-        }
-        ExportFormat::Csv => {
-            let header = csv_record_bytes(&[
-                "id",
-                "direction",
-                "phone_number",
-                "body",
-                "timestamp",
-                "status",
-                "source",
-                "read_at",
-                "error",
-                "created_at",
-                "updated_at",
-            ])?;
-            if tx.send(Ok(Bytes::from(header))).await.is_err() {
-                return Ok(());
-            }
-            while let Some(message) = messages.recv().await {
-                let message = message?;
-                let fields = vec![
-                    message.id.to_string(),
-                    enum_json(&message.direction)?,
-                    message.phone_number,
-                    message.body,
-                    message.timestamp,
-                    enum_json(&message.status)?,
-                    enum_json(&message.source)?,
-                    message.read_at.unwrap_or_default(),
-                    message.error.unwrap_or_default(),
-                    message.created_at,
-                    message.updated_at,
-                ];
-                let chunk = csv_record_bytes(&fields)?;
-                if tx.send(Ok(Bytes::from(chunk))).await.is_err() {
-                    return Ok(());
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn csv_record_bytes<S: AsRef<str>>(fields: &[S]) -> anyhow::Result<Vec<u8>> {
-    let mut writer = csv::WriterBuilder::new()
-        .terminator(csv::Terminator::Any(b'\n'))
-        .from_writer(Vec::new());
-    writer.write_record(fields.iter().map(AsRef::as_ref))?;
-    Ok(writer.into_inner()?)
-}
-
-fn enum_json<T: serde::Serialize>(value: &T) -> anyhow::Result<String> {
-    let encoded = serde_json::to_string(value)?;
-    Ok(encoded.trim_matches('"').to_string())
 }
 
 async fn events(State(state): State<ApiState>) -> impl IntoResponse {
@@ -490,24 +399,20 @@ mod tests {
             .insert_message(NewMessage::inbound("+2", "second"))
             .unwrap();
 
-        for format in [ExportFormat::Json, ExportFormat::Csv] {
-            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        for format in [MessageExportFormat::Json, MessageExportFormat::Csv] {
             let worker_store = crate::persistence::Store::from(store.clone());
-            let worker = tokio::spawn(async move {
-                stream_export(&worker_store, MessageFilter::default(), format, &tx).await
-            });
+            let mut stream = crate::export::stream(&worker_store, MessageFilter::default(), format);
             let mut bytes = Vec::new();
-            while let Some(chunk) = rx.recv().await {
+            while let Some(chunk) = stream.next().await {
                 bytes.extend_from_slice(&chunk.unwrap());
             }
-            worker.await.unwrap().unwrap();
 
             match format {
-                ExportFormat::Json => {
+                MessageExportFormat::Json => {
                     let messages: Vec<Message> = serde_json::from_slice(&bytes).unwrap();
                     assert_eq!(messages.len(), 2);
                 }
-                ExportFormat::Csv => {
+                MessageExportFormat::Csv => {
                     let csv = String::from_utf8(bytes).unwrap();
                     assert!(csv.starts_with("id,direction,phone_number,body"));
                     assert!(csv.contains("first"));
@@ -515,27 +420,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[tokio::test]
-    async fn export_stops_when_client_disconnects() {
-        let store = crate::storage::MessageStore::open_in_memory().unwrap();
-        for i in 0..100 {
-            store
-                .insert_message(NewMessage::inbound("+1", &format!("message-{i}")))
-                .unwrap();
-        }
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
-        drop(rx);
-        let store = crate::persistence::Store::from(store);
-        let worker = tokio::spawn(async move {
-            stream_export(&store, MessageFilter::default(), ExportFormat::Json, &tx).await
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(1), worker)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
     }
 
     #[tokio::test]

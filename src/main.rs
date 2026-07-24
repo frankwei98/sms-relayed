@@ -5,6 +5,7 @@ mod config;
 mod dbus;
 mod delivery;
 mod events;
+mod export;
 mod forward;
 mod message;
 mod messaging;

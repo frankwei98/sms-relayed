@@ -4,14 +4,27 @@ use crate::dbus::{ReceivedSms, SmsSender};
 use crate::delivery::DeliveryWakeup;
 use crate::events::{AppEvent, EventBus};
 use crate::message::{ConversationSummary, Message, MessageFilter, MessageSource, MessageStatus};
-use crate::persistence::{InboundMessage, Store};
-use crate::storage::InboundInsertResult;
+use crate::persistence::{InboundMessage, InboundOutcome, Store};
 
 pub struct SendMessage {
     pub modem_path: String,
     pub phone_number: String,
     pub body: String,
     pub source: MessageSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendOutcome {
+    Sent(Message),
+    Failed(Message),
+}
+
+impl SendOutcome {
+    pub fn into_message(self) -> Message {
+        match self {
+            Self::Sent(message) | Self::Failed(message) => message,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -49,7 +62,10 @@ impl Messaging {
         }
     }
 
-    pub async fn send(&self, request: SendMessage) -> anyhow::Result<Message> {
+    /// A transport rejection is returned as `SendOutcome::Failed` after that
+    /// state is persisted. `Err` means the local state machine could not be
+    /// created or finalized reliably.
+    pub async fn send(&self, request: SendMessage) -> anyhow::Result<SendOutcome> {
         let SendMessage {
             modem_path,
             phone_number,
@@ -75,7 +91,11 @@ impl Messaging {
             .finish_outbound(message.id, status, error)
             .await?;
         self.events.send(AppEvent::MessageUpdated(updated.clone()));
-        Ok(updated)
+        Ok(match updated.status {
+            MessageStatus::Sent => SendOutcome::Sent(updated),
+            MessageStatus::Failed => SendOutcome::Failed(updated),
+            _ => unreachable!("outbound send must finish as sent or failed"),
+        })
     }
 
     pub async fn receive(&self, request: ReceiveMessage) -> anyhow::Result<ReceiveOutcome> {
@@ -100,14 +120,14 @@ impl Messaging {
             .await?;
 
         match insert_result {
-            InboundInsertResult::Inserted(message) => {
+            InboundOutcome::Inserted(message) => {
                 if has_profiles {
                     self.delivery_wakeup.notify();
                 }
                 self.events.send(AppEvent::MessageCreated(message.clone()));
                 Ok(ReceiveOutcome::Inserted(message))
             }
-            InboundInsertResult::Duplicate(_) => Ok(ReceiveOutcome::Duplicate),
+            InboundOutcome::Duplicate => Ok(ReceiveOutcome::Duplicate),
         }
     }
 
@@ -145,13 +165,31 @@ impl Messaging {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+
     use crate::api::test_sms_sender;
+    use crate::dbus::{SendSmsOutcome, SmsSender};
     use crate::delivery::DeliveryWakeup;
     use crate::events::{AppEvent, EventBus};
-    use crate::message::{MessageSource, MessageStatus};
+    use crate::message::{MessageFilter, MessageSource, MessageStatus};
     use crate::persistence::Store;
 
-    use super::{Messaging, ReceiveMessage, ReceiveOutcome, SendMessage};
+    use super::{Messaging, ReceiveMessage, ReceiveOutcome, SendMessage, SendOutcome};
+
+    struct FailingSmsSender;
+
+    impl SmsSender for FailingSmsSender {
+        fn send<'a>(
+            &'a self,
+            _modem_path: &'a str,
+            _tel_number: &'a str,
+            _sms_text: &'a str,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<SendSmsOutcome>> + Send + 'a>> {
+            Box::pin(async { Err(anyhow::anyhow!("system bus unavailable")) })
+        }
+    }
 
     #[tokio::test]
     async fn outbound_send_persists_one_state_machine_and_emits_both_events() {
@@ -165,7 +203,7 @@ mod tests {
             test_sms_sender(),
         );
 
-        let message = messaging
+        let outcome = messaging
             .send(SendMessage {
                 modem_path: "/org/freedesktop/ModemManager1/Modem/0".to_string(),
                 phone_number: "+15550000000".to_string(),
@@ -175,8 +213,55 @@ mod tests {
             .await
             .unwrap();
 
+        let SendOutcome::Sent(message) = outcome else {
+            panic!("successful transport must produce a sent outcome");
+        };
         assert_eq!(message.status, MessageStatus::Sent);
         assert_eq!(store.sqlite().count_messages().unwrap(), 1);
+        assert!(matches!(
+            received_events.recv().await.unwrap(),
+            AppEvent::MessageCreated(_)
+        ));
+        assert!(matches!(
+            received_events.recv().await.unwrap(),
+            AppEvent::MessageUpdated(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn outbound_transport_failure_is_an_explicit_failed_outcome() {
+        let store = Store::open_in_memory().unwrap();
+        let events = EventBus::new();
+        let mut received_events = events.subscribe();
+        let messaging = Messaging::new(
+            store,
+            events,
+            DeliveryWakeup::new(),
+            Arc::new(FailingSmsSender),
+        );
+
+        let outcome = messaging
+            .send(SendMessage {
+                modem_path: "/org/freedesktop/ModemManager1/Modem/0".to_string(),
+                phone_number: "+15550000000".to_string(),
+                body: "will fail".to_string(),
+                source: MessageSource::Cli,
+            })
+            .await
+            .unwrap();
+
+        let SendOutcome::Failed(message) = outcome else {
+            panic!("transport failure must be explicit");
+        };
+        assert_eq!(message.status, MessageStatus::Failed);
+        assert_eq!(
+            messaging
+                .list(MessageFilter::default())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(matches!(
             received_events.recv().await.unwrap(),
             AppEvent::MessageCreated(_)
