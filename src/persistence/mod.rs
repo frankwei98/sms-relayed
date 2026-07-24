@@ -1,6 +1,10 @@
 //! Async persistence interface backed by the private synchronous SQLite module.
 
 use std::path::Path;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 
@@ -26,11 +30,28 @@ pub enum InboundOutcome {
 #[derive(Clone)]
 pub struct Store {
     sqlite: MessageStore,
+    #[cfg(test)]
+    outbound_finalization_failures: Arc<AtomicUsize>,
+    #[cfg(test)]
+    outbound_creation_pause: Arc<Mutex<Option<OutboundCreationPause>>>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct OutboundCreationPause {
+    committed: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
 }
 
 impl From<MessageStore> for Store {
     fn from(sqlite: MessageStore) -> Self {
-        Self { sqlite }
+        Self {
+            sqlite,
+            #[cfg(test)]
+            outbound_finalization_failures: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            outbound_creation_pause: Arc::new(Mutex::new(None)),
+        }
     }
 }
 
@@ -38,14 +59,12 @@ impl Store {
     pub async fn open(path: &Path) -> Result<Self> {
         let path = path.to_path_buf();
         let sqlite = tokio::task::spawn_blocking(move || MessageStore::open(&path)).await??;
-        Ok(Self { sqlite })
+        Ok(sqlite.into())
     }
 
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
-        Ok(Self {
-            sqlite: MessageStore::open_in_memory()?,
-        })
+        Ok(MessageStore::open_in_memory()?.into())
     }
 
     /// Transitional seam for the delivery worker. Phase three will move its
@@ -103,23 +122,33 @@ impl Store {
         body: String,
         source: MessageSource,
     ) -> Result<Message> {
-        self.run(move |sqlite| {
-            let now = time::OffsetDateTime::now_utc()
-                .format(&time::format_description::well_known::Rfc3339)?;
-            sqlite.insert_message(NewMessage {
-                direction: crate::message::MessageDirection::Outbound,
-                phone_number,
-                body,
-                timestamp: now.clone(),
-                status: MessageStatus::Sending,
-                source,
-                modem_sms_path: None,
-                read_at: Some(now),
-                error: None,
-                inbound_dedupe_key: None,
+        let message = self
+            .run(move |sqlite| {
+                let now = time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)?;
+                sqlite.insert_message(NewMessage {
+                    direction: crate::message::MessageDirection::Outbound,
+                    phone_number,
+                    body,
+                    timestamp: now.clone(),
+                    status: MessageStatus::Sending,
+                    source,
+                    modem_sms_path: None,
+                    read_at: Some(now),
+                    error: None,
+                    inbound_dedupe_key: None,
+                })
             })
-        })
-        .await
+            .await?;
+        #[cfg(test)]
+        {
+            let pause = self.outbound_creation_pause.lock().unwrap().take();
+            if let Some(pause) = pause {
+                pause.committed.notify_one();
+                pause.release.notified().await;
+            }
+        }
+        Ok(message)
     }
 
     pub async fn finish_outbound(
@@ -128,12 +157,53 @@ impl Store {
         status: MessageStatus,
         error: Option<String>,
     ) -> Result<Message> {
+        #[cfg(test)]
+        if self
+            .outbound_finalization_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            anyhow::bail!("injected outbound finalization failure");
+        }
         self.run(move |sqlite| sqlite.update_status(id, status, error))
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_outbound_finalizations(&self, count: usize) {
+        self.outbound_finalization_failures
+            .store(count, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_next_outbound_creation(
+        &self,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let pause = OutboundCreationPause {
+            committed: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+        };
+        *self.outbound_creation_pause.lock().unwrap() = Some(pause.clone());
+        (pause.committed, pause.release)
+    }
+
+    pub async fn set_outbound_modem_sms_path(
+        &self,
+        id: i64,
+        modem_sms_path: String,
+    ) -> Result<Message> {
+        self.run(move |sqlite| sqlite.set_outbound_modem_sms_path(id, &modem_sms_path))
             .await
     }
 
     pub async fn list_messages(&self, filter: MessageFilter) -> Result<Vec<Message>> {
         self.run(move |sqlite| sqlite.list_messages(&filter)).await
+    }
+
+    pub async fn sending_outbound(&self) -> Result<Vec<Message>> {
+        self.run(|sqlite| sqlite.list_sending_outbound()).await
     }
 
     pub async fn list_conversations(&self) -> Result<Vec<ConversationSummary>> {

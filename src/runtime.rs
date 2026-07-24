@@ -32,6 +32,10 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
         delivery_wakeup.clone(),
         sms_sender.clone(),
     );
+    let recovered_outbound = messaging.start_outbound_recovery().await?;
+    if recovered_outbound > 0 {
+        log::info!("recovering {recovered_outbound} outbound messages");
+    }
 
     let client = Arc::new(build_http_client(&config.http));
     let shell_timeout = Duration::from_secs(config.http.shell_timeout_secs);
@@ -163,11 +167,12 @@ pub async fn send_interactive(config_path: &Path) -> Result<()> {
         println!("send cancelled");
         return Ok(());
     }
+    let sms_sender = Arc::new(dbus::SystemSmsSender::connect().await?);
     let messaging = Messaging::new(
         Store::open(Path::new(&config.api.database_path)).await?,
         EventBus::new(),
         DeliveryWakeup::new(),
-        Arc::new(dbus::SystemSmsSender::new()),
+        sms_sender,
     );
     let outcome = messaging
         .send(SendMessage {

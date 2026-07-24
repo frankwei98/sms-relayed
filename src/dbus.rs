@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::future::Future;
-use std::io::{self, Write};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,32 +15,41 @@ use crate::config::AppConfig;
 use crate::modem::ModemService;
 use crate::persistence::Store;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SendTarget {
-    Command,
-    #[allow(dead_code)]
-    Api,
-    #[allow(dead_code)]
-    Cli,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SendSmsOutcome {
+pub struct PreparedSms {
     pub modem_sms_path: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModemSmsState {
+    Stored,
+    Sending,
+    Sent,
+    Unknown,
+}
+
 pub trait SmsSender: Send + Sync {
-    fn send<'a>(
+    fn prepare<'a>(
         &'a self,
         modem_path: &'a str,
         tel_number: &'a str,
         sms_text: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<SendSmsOutcome>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<PreparedSms>> + Send + 'a>>;
+
+    fn send_prepared<'a>(
+        &'a self,
+        modem_sms_path: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
+    fn sms_state<'a>(
+        &'a self,
+        modem_sms_path: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<ModemSmsState>> + Send + 'a>>;
 }
 
 #[derive(Clone, Default)]
 pub struct SystemSmsSender {
-    connection: Arc<tokio::sync::Mutex<Option<Connection>>>,
+    connection: Arc<tokio::sync::Mutex<Option<Arc<Connection>>>>,
 }
 
 impl SystemSmsSender {
@@ -49,34 +57,76 @@ impl SystemSmsSender {
         Self::default()
     }
 
-    async fn get_or_connect(&self) -> Result<Connection> {
+    pub async fn connect() -> Result<Self> {
+        let connection = Connection::system().await?;
+        Ok(Self {
+            connection: Arc::new(tokio::sync::Mutex::new(Some(Arc::new(connection)))),
+        })
+    }
+
+    async fn get_or_connect(&self) -> Result<Arc<Connection>> {
         let mut connection = self.connection.lock().await;
         if let Some(connection) = connection.as_ref() {
             return Ok(connection.clone());
         }
-        let new_connection = Connection::system().await?;
+        let new_connection = Arc::new(Connection::system().await?);
         *connection = Some(new_connection.clone());
         Ok(new_connection)
+    }
+
+    async fn discard_connection(&self, failed: &Arc<Connection>) {
+        let mut connection = self.connection.lock().await;
+        if connection
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, failed))
+        {
+            *connection = None;
+        }
     }
 }
 
 impl SmsSender for SystemSmsSender {
-    fn send<'a>(
+    fn prepare<'a>(
         &'a self,
         modem_path: &'a str,
         tel_number: &'a str,
         sms_text: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<SendSmsOutcome>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<PreparedSms>> + Send + 'a>> {
         Box::pin(async move {
             let connection = self.get_or_connect().await?;
-            send_sms(
-                &connection,
-                modem_path,
-                tel_number,
-                sms_text,
-                SendTarget::Api,
-            )
-            .await
+            let result = create_sms(&connection, modem_path, tel_number, sms_text).await;
+            if result.is_err() {
+                self.discard_connection(&connection).await;
+            }
+            result
+        })
+    }
+
+    fn send_prepared<'a>(
+        &'a self,
+        modem_sms_path: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let connection = self.get_or_connect().await?;
+            let result = send_prepared_sms(&connection, modem_sms_path).await;
+            if result.is_err() {
+                self.discard_connection(&connection).await;
+            }
+            result
+        })
+    }
+
+    fn sms_state<'a>(
+        &'a self,
+        modem_sms_path: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<ModemSmsState>> + Send + 'a>> {
+        Box::pin(async move {
+            let connection = self.get_or_connect().await?;
+            let result = get_sms_state(&connection, modem_sms_path).await;
+            if result.is_err() {
+                self.discard_connection(&connection).await;
+            }
+            result
         })
     }
 }
@@ -507,13 +557,12 @@ fn should_ignore_storage(storage: u32, filters: &[StorageType]) -> bool {
         .any(|filter| !matches!(filter, StorageType::All) && filter.should_ignore(storage))
 }
 
-pub async fn send_sms(
+pub async fn create_sms(
     connection: &Connection,
     modem_path: &str,
     tel_number: &str,
     sms_text: &str,
-    target: SendTarget,
-) -> Result<SendSmsOutcome> {
+) -> Result<PreparedSms> {
     let mut properties = HashMap::new();
     properties.insert("text", Value::from(sms_text));
     properties.insert("number", Value::from(tel_number));
@@ -531,38 +580,16 @@ pub async fn send_sms(
         .map_err(|_| anyhow::anyhow!("dbus Create timeout"))??;
 
     let sms_path: zbus::zvariant::OwnedObjectPath = reply.body().deserialize()?;
-    let sms_path_str = sms_path.as_str();
+    Ok(PreparedSms {
+        modem_sms_path: sms_path.to_string(),
+    })
+}
 
-    if target == SendTarget::Command {
-        println!("短信创建成功，是否发送？(1.发送短信,其他按键退出程序)");
-        io::stdout().flush().unwrap();
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).unwrap();
-        if input.trim() != "1" {
-            let del_args = (&sms_path,);
-            let del_call = connection.call_method(
-                Some(MM_DESTINATION),
-                modem_path,
-                Some(MM_MESSAGING_INTERFACE),
-                "Delete",
-                &del_args,
-            );
-            let _ = tokio::time::timeout(Duration::from_secs(5), del_call).await;
-            println!("短信缓存已清理，按任意键退出程序");
-            let mut temp = String::new();
-            io::stdin().read_line(&mut temp).unwrap();
-            return Ok(SendSmsOutcome {
-                modem_sms_path: sms_path_str.to_string(),
-            });
-        }
-    } else if target == SendTarget::Cli {
-        // Confirmation already handled by runtime::send_interactive; skip prompt.
-    }
-
+pub async fn send_prepared_sms(connection: &Connection, modem_sms_path: &str) -> Result<()> {
     let send_call = connection.call_method(
         Some(MM_DESTINATION),
-        sms_path_str,
-        Some("org.freedesktop.ModemManager1.Sms"),
+        modem_sms_path,
+        Some(MM_SMS_INTERFACE),
         "Send",
         &(),
     );
@@ -571,9 +598,51 @@ pub async fn send_sms(
         .map_err(|_| anyhow::anyhow!("dbus Send timeout"))??;
 
     println!("短信已发送");
-    Ok(SendSmsOutcome {
-        modem_sms_path: sms_path_str.to_string(),
-    })
+    Ok(())
+}
+
+pub async fn get_sms_state(connection: &Connection, modem_sms_path: &str) -> Result<ModemSmsState> {
+    let call = connection.call_method(
+        Some(MM_DESTINATION),
+        modem_sms_path,
+        Some(DBUS_PROPERTIES_INTERFACE),
+        "GetAll",
+        &(MM_SMS_INTERFACE,),
+    );
+    let reply = tokio::time::timeout(Duration::from_secs(5), call)
+        .await
+        .map_err(|_| anyhow::anyhow!("dbus SMS state timeout"))?;
+    let reply = match reply {
+        Ok(reply) => reply,
+        Err(error) if is_missing_sms_object(&error) => return Ok(ModemSmsState::Unknown),
+        Err(error) => return Err(error.into()),
+    };
+    let properties: HashMap<String, OwnedValue> = reply.body().deserialize()?;
+    Ok(sms_state_from_raw(extract_u32(&properties, "State")))
+}
+
+fn is_missing_sms_object(error: &zbus::Error) -> bool {
+    let zbus::Error::MethodError(name, _, _) = error else {
+        return false;
+    };
+    is_missing_sms_object_error_name(name.as_str())
+}
+
+fn is_missing_sms_object_error_name(name: &str) -> bool {
+    matches!(
+        name,
+        "org.freedesktop.DBus.Error.UnknownObject"
+            | "org.freedesktop.ModemManager1.Error.Core.NotFound"
+    )
+}
+
+fn sms_state_from_raw(state: u32) -> ModemSmsState {
+    match state {
+        1 => ModemSmsState::Stored,
+        4 => ModemSmsState::Sending,
+        5 => ModemSmsState::Sent,
+        _ => ModemSmsState::Unknown,
+    }
 }
 
 #[cfg(test)]
@@ -586,6 +655,28 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
+
+    #[test]
+    fn modem_sms_states_map_to_recovery_states() {
+        assert_eq!(sms_state_from_raw(1), ModemSmsState::Stored);
+        assert_eq!(sms_state_from_raw(4), ModemSmsState::Sending);
+        assert_eq!(sms_state_from_raw(5), ModemSmsState::Sent);
+        assert_eq!(sms_state_from_raw(0), ModemSmsState::Unknown);
+        assert_eq!(sms_state_from_raw(6), ModemSmsState::Unknown);
+    }
+
+    #[test]
+    fn missing_sms_object_errors_are_terminal_for_recovery() {
+        assert!(is_missing_sms_object_error_name(
+            "org.freedesktop.DBus.Error.UnknownObject"
+        ));
+        assert!(is_missing_sms_object_error_name(
+            "org.freedesktop.ModemManager1.Error.Core.NotFound"
+        ));
+        assert!(!is_missing_sms_object_error_name(
+            "org.freedesktop.DBus.Error.NoReply"
+        ));
+    }
     use crate::modem::{MmcliOutput, MmcliRunner, ModemError};
 
     #[test]

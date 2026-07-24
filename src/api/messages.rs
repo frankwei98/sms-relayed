@@ -267,12 +267,12 @@ mod tests {
     }
 
     impl crate::dbus::SmsSender for RecordingSmsSender {
-        fn send<'a>(
+        fn prepare<'a>(
             &'a self,
             modem_path: &'a str,
             tel_number: &'a str,
             sms_text: &'a str,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<crate::dbus::SendSmsOutcome>> + Send + 'a>>
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<crate::dbus::PreparedSms>> + Send + 'a>>
         {
             let calls = self.calls.clone();
             let modem_path = modem_path.to_string();
@@ -283,10 +283,25 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push((modem_path, tel_number, sms_text));
-                Ok(crate::dbus::SendSmsOutcome {
+                Ok(crate::dbus::PreparedSms {
                     modem_sms_path: "/org/freedesktop/ModemManager1/SMS/test".to_string(),
                 })
             })
+        }
+
+        fn send_prepared<'a>(
+            &'a self,
+            _modem_sms_path: &'a str,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn sms_state<'a>(
+            &'a self,
+            _modem_sms_path: &'a str,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<crate::dbus::ModemSmsState>> + Send + 'a>>
+        {
+            Box::pin(async { Ok(crate::dbus::ModemSmsState::Sent) })
         }
     }
 

@@ -77,6 +77,18 @@ impl MessageStore {
         self.query_messages(filter, true)
     }
 
+    pub fn list_sending_outbound(&self) -> Result<Vec<Message>> {
+        let conn = self.conn.lock().unwrap();
+        let mut statement = conn.prepare(
+            "SELECT * FROM messages
+             WHERE direction = 'outbound' AND status = 'sending'
+             ORDER BY id",
+        )?;
+        let rows = statement.query_map([], row_to_message)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     fn query_messages(&self, filter: &MessageFilter, apply_limit: bool) -> Result<Vec<Message>> {
         let conn = self.conn.lock().unwrap();
         let cursor = resolve_message_cursor(&conn, filter.before.as_ref())?;
@@ -121,6 +133,19 @@ impl MessageStore {
         let mut conn = self.conn.lock().unwrap();
         let transaction = conn.transaction()?;
         for id in ids {
+            let is_sending = transaction
+                .query_row(
+                    "SELECT status = 'sending' FROM messages WHERE id = ?1",
+                    params![id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if is_sending {
+                anyhow::bail!("message {id} cannot be deleted while sending");
+            }
+        }
+        for id in ids {
             transaction.execute("DELETE FROM messages WHERE id = ?1", params![id])?;
         }
         transaction.commit()?;
@@ -139,6 +164,21 @@ impl MessageStore {
             "UPDATE messages SET status = ?1, error = ?2, updated_at = ?3 WHERE id = ?4",
             params![status_to_str(status), error, now, id],
         )?;
+        map_get(&conn, id)
+    }
+
+    pub fn set_outbound_modem_sms_path(&self, id: i64, modem_sms_path: &str) -> Result<Message> {
+        let now = now_string();
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE messages
+             SET modem_sms_path = ?1, updated_at = ?2
+             WHERE id = ?3 AND direction = 'outbound' AND status = 'sending'",
+            params![modem_sms_path, now, id],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("sending outbound message {id} not found");
+        }
         map_get(&conn, id)
     }
 
