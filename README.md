@@ -188,6 +188,8 @@ http://<设备 IP>:8080/
 | `/api/forwarding/attempts` | 转发投递状态。 |
 | `/api/health` | 无需登录的服务与 Modem 健康检查。 |
 
+`POST /api/messages/send` 必须携带 1–200 字符的 `Idempotency-Key` 请求头。请求超时后重试时必须复用同一个 key；相同 key 搭配不同号码或正文会返回 `409`。消息被保留策略删除后，该 key 的重放保证随消息一起结束；手动删除消息留下的 key 最多保留 30 天。
+
 `/api/health` 会隐藏对象路径、运营商、信号、SIM 标识、号码、短信正文和原始命令输出。Web 服务当前直接提供 HTTP；不要将它裸露到公网，请放在可信网络、VPN 或带 TLS 和访问控制的反向代理后面。
 
 ### CLI
@@ -462,6 +464,8 @@ Main API groups:
 | `/api/modem/*` | Modem status and controls. |
 | `/api/forwarding/attempts` | Forwarding delivery status. |
 | `/api/health` | Public service and modem health check. |
+
+`POST /api/messages/send` requires an `Idempotency-Key` header containing 1–200 characters. Reuse the same key when retrying a timed-out request; using one key with a different number or body returns `409`. The replay guarantee ends when message retention deletes the corresponding message. Keys left by manual deletion are retained for at most 30 days.
 
 `/api/health` omits object paths, operator details, signal values, SIM identifiers, phone numbers, message bodies, and raw command output. The web service currently speaks plain HTTP. Do not expose it directly to the public Internet; use a trusted network, VPN, or a reverse proxy with TLS and access control.
 

@@ -44,6 +44,7 @@ impl ApiState {
             self.delivery_wakeup.clone(),
             self.sms_sender.clone(),
         )
+        .with_verified_modem(self.modem.clone())
     }
 }
 

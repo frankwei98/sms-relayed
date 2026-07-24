@@ -5,6 +5,18 @@ use time::OffsetDateTime;
 use super::MessageStore;
 
 impl MessageStore {
+    pub fn prune_outbound_idempotency(&self, max_age_days: u64) -> Result<usize> {
+        let cutoff = (OffsetDateTime::now_utc() - time::Duration::days(max_age_days as i64))
+            .format(&time::format_description::well_known::Rfc3339)?;
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "DELETE FROM outbound_idempotency
+             WHERE message_id IS NULL
+               AND julianday(created_at) < julianday(?1)",
+            params![cutoff],
+        )?)
+    }
+
     #[allow(dead_code)]
     pub fn run_retention(&self, max_age_days: u64, batch_size: u32) -> Result<usize> {
         let cutoff = (OffsetDateTime::now_utc() - time::Duration::days(max_age_days as i64))
@@ -29,8 +41,18 @@ impl MessageStore {
         let count = ids.len();
         drop(statement);
         for id in &ids {
+            transaction.execute(
+                "DELETE FROM outbound_idempotency WHERE message_id = ?1",
+                params![id],
+            )?;
             transaction.execute("DELETE FROM messages WHERE id = ?1", params![id])?;
         }
+        transaction.execute(
+            "DELETE FROM outbound_idempotency
+             WHERE message_id IS NULL
+               AND julianday(created_at) < julianday(?1)",
+            params![cutoff],
+        )?;
         transaction.commit()?;
         Ok(count)
     }

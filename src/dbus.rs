@@ -36,6 +36,13 @@ pub enum ModemSmsState {
     Unknown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmsSnapshot {
+    pub state: ModemSmsState,
+    pub phone_number: String,
+    pub body: String,
+}
+
 pub trait SmsSender: Send + Sync {
     fn prepare<'a>(
         &'a self,
@@ -53,6 +60,20 @@ pub trait SmsSender: Send + Sync {
         &'a self,
         modem_sms_path: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<ModemSmsState>> + Send + 'a>>;
+
+    fn sms_snapshot<'a>(
+        &'a self,
+        _modem_path: Option<&'a str>,
+        modem_sms_path: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<SmsSnapshot>> + Send + 'a>> {
+        Box::pin(async move {
+            Ok(SmsSnapshot {
+                state: self.sms_state(modem_sms_path).await?,
+                phone_number: String::new(),
+                body: String::new(),
+            })
+        })
+    }
 }
 
 #[derive(Clone, Default)]
@@ -134,6 +155,21 @@ impl SmsSender for SystemSmsSender {
         Box::pin(async move {
             let connection = self.get_or_connect().await?;
             let result = get_sms_state(&connection, modem_sms_path).await;
+            if result.is_err() {
+                self.discard_connection(&connection).await;
+            }
+            result
+        })
+    }
+
+    fn sms_snapshot<'a>(
+        &'a self,
+        modem_path: Option<&'a str>,
+        modem_sms_path: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<SmsSnapshot>> + Send + 'a>> {
+        Box::pin(async move {
+            let connection = self.get_or_connect().await?;
+            let result = get_sms_snapshot(&connection, modem_path, modem_sms_path).await;
             if result.is_err() {
                 self.discard_connection(&connection).await;
             }
@@ -247,7 +283,7 @@ async fn backfill_dedupe_keys(store: &Store) -> Result<()> {
     Ok(())
 }
 
-async fn resolve_monitor_path(
+pub(crate) async fn resolve_monitor_path(
     configured_path: &str,
     modem_service: &ModemService,
     store: &Store,
@@ -516,9 +552,13 @@ where
         if current_path.is_none() {
             current_path =
                 match resolve_monitor_path(configured_modem_path, modem_service, store).await {
-                    Ok(path) => path,
+                    Ok(path) => {
+                        modem_service.set_verified_path(path.clone());
+                        path
+                    }
                     Err(error) => {
                         error!("modem resolution failed: {}", error);
+                        modem_service.set_verified_path(None);
                         None
                     }
                 };
@@ -541,6 +581,7 @@ where
                         Ok(resolved) => resolved,
                         Err(error) => {
                             error!("modem resolution failed: {}", error);
+                            modem_service.set_verified_path(None);
                             None
                         }
                     };
@@ -548,9 +589,11 @@ where
                     if new_path != path {
                         info!("modem path changed from {} to {}", path, new_path);
                     }
+                    modem_service.set_verified_path(Some(new_path.clone()));
                     current_path = Some(new_path);
                 } else {
                     warn!("modem re-resolution failed; will retry");
+                    modem_service.set_verified_path(None);
                     current_path = None;
                 }
             }
@@ -640,6 +683,36 @@ fn is_explicit_send_rejection_name(name: &str) -> bool {
 }
 
 pub async fn get_sms_state(connection: &Connection, modem_sms_path: &str) -> Result<ModemSmsState> {
+    Ok(get_sms_snapshot(connection, None, modem_sms_path)
+        .await?
+        .state)
+}
+
+pub async fn get_sms_snapshot(
+    connection: &Connection,
+    modem_path: Option<&str>,
+    modem_sms_path: &str,
+) -> Result<SmsSnapshot> {
+    if let Some(modem_path) = modem_path {
+        let list_call = connection.call_method(
+            Some(MM_DESTINATION),
+            modem_path,
+            Some(MM_MESSAGING_INTERFACE),
+            "List",
+            &(),
+        );
+        let list_reply = tokio::time::timeout(Duration::from_secs(5), list_call)
+            .await
+            .map_err(|_| anyhow::anyhow!("dbus SMS list timeout"))??;
+        let paths: Vec<zbus::zvariant::OwnedObjectPath> = list_reply.body().deserialize()?;
+        if !paths.iter().any(|path| path.as_str() == modem_sms_path) {
+            return Ok(SmsSnapshot {
+                state: ModemSmsState::Unknown,
+                phone_number: String::new(),
+                body: String::new(),
+            });
+        }
+    }
     let call = connection.call_method(
         Some(MM_DESTINATION),
         modem_sms_path,
@@ -652,11 +725,21 @@ pub async fn get_sms_state(connection: &Connection, modem_sms_path: &str) -> Res
         .map_err(|_| anyhow::anyhow!("dbus SMS state timeout"))?;
     let reply = match reply {
         Ok(reply) => reply,
-        Err(error) if is_missing_sms_object(&error) => return Ok(ModemSmsState::Unknown),
+        Err(error) if is_missing_sms_object(&error) => {
+            return Ok(SmsSnapshot {
+                state: ModemSmsState::Unknown,
+                phone_number: String::new(),
+                body: String::new(),
+            });
+        }
         Err(error) => return Err(error.into()),
     };
     let properties: HashMap<String, OwnedValue> = reply.body().deserialize()?;
-    Ok(sms_state_from_raw(extract_u32(&properties, "State")))
+    Ok(SmsSnapshot {
+        state: sms_state_from_raw(extract_u32(&properties, "State")),
+        phone_number: extract_string(&properties, "Number"),
+        body: extract_string(&properties, "Text"),
+    })
 }
 
 fn is_missing_sms_object(error: &zbus::Error) -> bool {

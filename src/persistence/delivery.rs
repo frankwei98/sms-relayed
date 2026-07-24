@@ -56,8 +56,13 @@ pub struct DeliveryAttempt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeliveryDisposition {
     Succeeded,
-    RetryAfter { error_code: String, delay: Duration },
-    PermanentFailure { error_code: String },
+    RetryAt {
+        error_code: String,
+        at: OffsetDateTime,
+    },
+    PermanentFailure {
+        error_code: String,
+    },
 }
 
 #[derive(Clone)]
@@ -132,11 +137,13 @@ impl Store {
                 disposition,
                 attempt,
             } = completion;
-            let (state, error, retry_after) = match disposition {
+            let (state, error, next_attempt_at) = match disposition {
                 DeliveryDisposition::Succeeded => (DeliveryState::Succeeded, None, None),
-                DeliveryDisposition::RetryAfter { error_code, delay } => {
-                    (DeliveryState::RetryWait, Some(error_code), Some(delay))
-                }
+                DeliveryDisposition::RetryAt { error_code, at } => (
+                    DeliveryState::RetryWait,
+                    Some(error_code),
+                    Some(format_timestamp(at)?),
+                ),
                 DeliveryDisposition::PermanentFailure { error_code } => {
                     (DeliveryState::PermanentFailed, Some(error_code), None)
                 }
@@ -173,7 +180,7 @@ impl Store {
                         state,
                         error: error.as_deref(),
                         attempt_count,
-                        retry_after,
+                        next_attempt_at: next_attempt_at.as_deref(),
                         lease_token: &claim.lease_token,
                         sample,
                     })?
@@ -183,7 +190,7 @@ impl Store {
                     state,
                     error.as_deref(),
                     attempt_count,
-                    retry_after,
+                    next_attempt_at.as_deref(),
                     &claim.lease_token,
                 )?,
             };

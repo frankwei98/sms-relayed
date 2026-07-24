@@ -84,6 +84,31 @@ pub(super) fn migrate_existing_schema(conn: &Connection) -> Result<()> {
            AND outbound_phase IS NULL",
         [],
     )?;
+    let event_outbox_initialized = conn
+        .query_row(
+            "SELECT 1 FROM meta WHERE key = 'outbound_event_outbox_v1_initialized'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !event_outbox_initialized {
+        conn.execute(
+            "UPDATE messages
+             SET outbound_phase = NULL,
+                 outbound_owner = NULL,
+                 outbound_lease_until = NULL
+             WHERE direction = 'outbound'
+               AND status IN ('sent', 'failed')
+               AND outbound_phase = 'complete'",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO meta (key, value)
+             VALUES ('outbound_event_outbox_v1_initialized', '1')",
+            [],
+        )?;
+    }
 
     backfill_dedupe_keys_on(conn)?;
 

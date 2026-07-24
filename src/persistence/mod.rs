@@ -300,6 +300,16 @@ impl Store {
         Ok(transition_from(result))
     }
 
+    pub async fn claim_pending_outbound_event(&self, owner: String) -> Result<Option<Message>> {
+        self.run(move |sqlite| sqlite.claim_pending_outbound_event(&owner, Self::OUTBOUND_LEASE))
+            .await
+    }
+
+    pub async fn acknowledge_outbound_event(&self, id: i64, owner: String) -> Result<bool> {
+        self.run(move |sqlite| sqlite.acknowledge_outbound_event(id, &owner))
+            .await
+    }
+
     pub async fn renew_outbound_lease(&self, id: i64, owner: String) -> Result<bool> {
         self.run(move |sqlite| sqlite.renew_outbound_lease(id, &owner, Self::OUTBOUND_LEASE))
             .await
@@ -397,6 +407,11 @@ impl Store {
 
     pub async fn run_retention(&self, max_age_days: u64, batch_size: u32) -> Result<usize> {
         self.run(move |sqlite| sqlite.run_retention(max_age_days, batch_size))
+            .await
+    }
+
+    pub async fn prune_outbound_idempotency(&self, max_age_days: u64) -> Result<usize> {
+        self.run(move |sqlite| sqlite.prune_outbound_idempotency(max_age_days))
             .await
     }
 
