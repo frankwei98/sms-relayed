@@ -46,7 +46,7 @@ async fn forwarding_attempts(State(state): State<ApiState>) -> ApiResult<Json<Fo
     for profile in &config_profiles {
         let key = profile.key();
         seen_keys.insert(key.clone());
-        let samples = load_samples(&state, &key)?;
+        let samples = load_samples(&state, &key).await?;
         profiles.push(ProfileStatus {
             profile_key: key,
             enabled: true,
@@ -54,10 +54,13 @@ async fn forwarding_attempts(State(state): State<ApiState>) -> ApiResult<Json<Fo
         });
     }
 
-    let all_keys = state.store.list_forward_attempt_profiles()?;
+    let store = state.store.clone();
+    let all_keys = tokio::task::spawn_blocking(move || store.list_forward_attempt_profiles())
+        .await
+        .map_err(|error| super::ApiError::internal(error.to_string()))??;
     for key in all_keys {
         if seen_keys.insert(key.clone()) {
-            let samples = load_samples(&state, &key)?;
+            let samples = load_samples(&state, &key).await?;
             profiles.push(ProfileStatus {
                 profile_key: key,
                 enabled: false,
@@ -76,8 +79,12 @@ async fn forwarding_attempts(State(state): State<ApiState>) -> ApiResult<Json<Fo
     }))
 }
 
-fn load_samples(state: &ApiState, profile_key: &str) -> ApiResult<Vec<SampleView>> {
-    let samples = state.store.list_forward_attempts(profile_key, 5)?;
+async fn load_samples(state: &ApiState, profile_key: &str) -> ApiResult<Vec<SampleView>> {
+    let store = state.store.clone();
+    let profile_key = profile_key.to_string();
+    let samples = tokio::task::spawn_blocking(move || store.list_forward_attempts(&profile_key, 5))
+        .await
+        .map_err(|error| super::ApiError::internal(error.to_string()))??;
     Ok(samples
         .into_iter()
         .map(|s| SampleView {

@@ -169,7 +169,10 @@ async fn send_message(
 }
 
 async fn mark_read(State(state): State<ApiState>, Path(id): Path<i64>) -> ApiResult<Json<Message>> {
-    let msg = state.store.mark_read(id)?;
+    let store = state.store.clone();
+    let msg = tokio::task::spawn_blocking(move || store.mark_read(id))
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))??;
     state
         .events
         .send(AppEvent::MessageReadStateChanged(msg.clone()));
@@ -180,7 +183,10 @@ async fn mark_unread(
     State(state): State<ApiState>,
     Path(id): Path<i64>,
 ) -> ApiResult<Json<Message>> {
-    let msg = state.store.mark_unread(id)?;
+    let store = state.store.clone();
+    let msg = tokio::task::spawn_blocking(move || store.mark_unread(id))
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))??;
     state
         .events
         .send(AppEvent::MessageReadStateChanged(msg.clone()));
@@ -203,7 +209,10 @@ async fn delete_message(
     State(state): State<ApiState>,
     Path(id): Path<i64>,
 ) -> ApiResult<StatusCode> {
-    state.store.delete_messages(&[id])?;
+    let store = state.store.clone();
+    tokio::task::spawn_blocking(move || store.delete_messages(&[id]))
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))??;
     state
         .events
         .send(AppEvent::MessageDeleted { ids: vec![id] });
@@ -215,7 +224,11 @@ async fn delete_many(
     Json(req): Json<DeleteManyRequest>,
 ) -> ApiResult<StatusCode> {
     let ids = req.ids.clone();
-    state.store.delete_messages(&ids)?;
+    let store = state.store.clone();
+    let ids_to_delete = ids.clone();
+    tokio::task::spawn_blocking(move || store.delete_messages(&ids_to_delete))
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))??;
     state.events.send(AppEvent::MessageDeleted { ids });
     Ok(StatusCode::NO_CONTENT)
 }

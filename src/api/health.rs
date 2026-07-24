@@ -27,12 +27,12 @@ pub fn routes() -> Router<ApiState> {
 
 async fn health(State(state): State<ApiState>) -> Json<HealthResponse> {
     let checked_at = OffsetDateTime::now_utc();
+    let store = state.store.clone();
+    let storage_ok = tokio::task::spawn_blocking(move || store.health_check().is_ok())
+        .await
+        .unwrap_or(false);
     let service = ServiceHealth {
-        status: if state.store.health_check().is_ok() {
-            "ok"
-        } else {
-            "error"
-        },
+        status: if storage_ok { "ok" } else { "error" },
         checked_at,
     };
     let modem = state

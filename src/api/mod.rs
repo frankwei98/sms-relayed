@@ -6,6 +6,7 @@ pub mod messages;
 pub mod modem;
 pub mod service;
 
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -149,15 +150,104 @@ pub fn router(state: ApiState) -> Router {
 }
 
 pub async fn serve(state: ApiState) -> anyhow::Result<()> {
-    let addr = format!("{}:{}", state.config.api.bind, state.config.api.port);
+    let bind = state.config.api.bind.as_str();
+    let port = state.config.api.port;
+    let addr = listener_address(bind, port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let app = router(state.clone());
     log::info!("web api listening on {}", addr);
+
+    if let Some(ipv6_bind) = ipv6_companion_address(bind, state.config.api.enable_ipv6)? {
+        let socket = tokio::net::TcpSocket::new_v6()?;
+        set_ipv6_only(&socket)?;
+        socket.set_reuseaddr(true)?;
+        let ipv6_addr = SocketAddr::new(IpAddr::V6(ipv6_bind), port);
+        socket.bind(ipv6_addr)?;
+        let ipv6_listener = socket.listen(1024)?;
+        log::info!("web api listening on [{}]:{}", ipv6_bind, port);
+        tokio::try_join!(
+            serve_listener(listener, app.clone()),
+            serve_listener(ipv6_listener, app),
+        )?;
+    } else {
+        serve_listener(listener, app).await?;
+    }
+    Ok(())
+}
+
+async fn serve_listener(listener: tokio::net::TcpListener, app: Router) -> anyhow::Result<()> {
     axum::serve(
         listener,
-        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await?;
     Ok(())
+}
+
+fn listener_address(bind: &str, port: u16) -> String {
+    if is_ipv6_bind(bind) {
+        format!("[{}]:{}", bind.trim_matches(['[', ']']), port)
+    } else {
+        format!("{bind}:{port}")
+    }
+}
+
+fn is_ipv6_bind(bind: &str) -> bool {
+    bind.trim_matches(['[', ']'])
+        .parse::<IpAddr>()
+        .is_ok_and(|address| address.is_ipv6())
+}
+
+fn ipv6_companion_address(bind: &str, enabled: bool) -> anyhow::Result<Option<Ipv6Addr>> {
+    if !enabled || is_ipv6_bind(bind) {
+        return Ok(None);
+    }
+    let normalized = bind.trim_matches(['[', ']']);
+    if normalized.eq_ignore_ascii_case("localhost") {
+        return Ok(Some(Ipv6Addr::LOCALHOST));
+    }
+    match normalized.parse::<IpAddr>() {
+        Ok(IpAddr::V4(address)) if address.is_unspecified() => Ok(Some(Ipv6Addr::UNSPECIFIED)),
+        Ok(IpAddr::V4(address)) if address.is_loopback() => Ok(Some(Ipv6Addr::LOCALHOST)),
+        Ok(IpAddr::V4(_)) => anyhow::bail!(
+            "api.enable_ipv6 cannot infer a safe IPv6 companion for the specific IPv4 bind {bind}"
+        ),
+        Ok(IpAddr::V6(_)) => Ok(None),
+        Err(_) => anyhow::bail!(
+            "api.enable_ipv6 requires api.bind to be an IP literal or localhost, got {bind}"
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn set_ipv6_only(socket: &tokio::net::TcpSocket) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let enabled: libc::c_int = 1;
+    // SAFETY: the socket owns a valid file descriptor, and `enabled` is passed
+    // with its exact byte size for the IPV6_V6ONLY integer socket option.
+    let result = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_IPV6,
+            libc::IPV6_V6ONLY,
+            (&enabled as *const libc::c_int).cast(),
+            std::mem::size_of_val(&enabled) as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn set_ipv6_only(_socket: &tokio::net::TcpSocket) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "IPv6-only companion listeners are not supported on this platform",
+    ))
 }
 
 impl From<anyhow::Error> for ApiError {
@@ -176,7 +266,35 @@ impl From<rusqlite::Error> for ApiError {
 mod tests {
     use super::auth::SessionStore;
     use super::config::{check_config_payload, CheckConfigPayload};
+    use super::{ipv6_companion_address, listener_address};
     use crate::config::AppConfig;
+
+    #[test]
+    fn listener_address_brackets_ipv6_literals() {
+        assert_eq!(listener_address("::", 8080), "[::]:8080");
+        assert_eq!(listener_address("[::1]", 8080), "[::1]:8080");
+        assert_eq!(listener_address("0.0.0.0", 8080), "0.0.0.0:8080");
+    }
+
+    #[test]
+    fn ipv6_companion_preserves_the_ipv4_exposure_scope() {
+        assert_eq!(
+            ipv6_companion_address("0.0.0.0", true).unwrap(),
+            Some(std::net::Ipv6Addr::UNSPECIFIED)
+        );
+        assert_eq!(
+            ipv6_companion_address("127.0.0.1", true).unwrap(),
+            Some(std::net::Ipv6Addr::LOCALHOST)
+        );
+        assert_eq!(
+            ipv6_companion_address("localhost", true).unwrap(),
+            Some(std::net::Ipv6Addr::LOCALHOST)
+        );
+        assert_eq!(ipv6_companion_address("::1", true).unwrap(), None);
+        assert_eq!(ipv6_companion_address("0.0.0.0", false).unwrap(), None);
+        assert!(ipv6_companion_address("192.0.2.10", true).is_err());
+        assert!(ipv6_companion_address("api.internal", true).is_err());
+    }
 
     #[test]
     fn login_cookie_uses_p2_session_contract() {

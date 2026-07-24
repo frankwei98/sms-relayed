@@ -55,9 +55,11 @@ async fn save_config(
     payload
         .validate()
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
-    payload
-        .save_secure(&state.config_path)
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let config_path = state.config_path.clone();
+    tokio::task::spawn_blocking(move || payload.save_secure(&config_path))
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     state.events.send(AppEvent::ConfigSaved);
     Ok(Json(ConfigSaveResponse {
         requires_restart: true,

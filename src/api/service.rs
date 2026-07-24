@@ -40,7 +40,9 @@ async fn restart(State(state): State<ApiState>) -> ApiResult<StatusCode> {
     state.events.send(AppEvent::ServiceRestartScheduled);
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        restart_service();
+        if let Err(error) = tokio::task::spawn_blocking(restart_service).await {
+            log::warn!("service restart task failed: {}", error);
+        }
     });
     Ok(StatusCode::ACCEPTED)
 }

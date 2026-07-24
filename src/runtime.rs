@@ -34,10 +34,12 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
     // Recover expired delivery leases
     let lease_timeout =
         OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?;
-    if let Ok(count) = store.recover_expired_leases(&lease_timeout) {
-        if count > 0 {
-            log::info!("recovered {} expired delivery leases", count);
-        }
+    let lease_store = store.clone();
+    let recovered =
+        tokio::task::spawn_blocking(move || lease_store.recover_expired_leases(&lease_timeout))
+            .await??;
+    if recovered > 0 {
+        log::info!("recovered {} expired delivery leases", recovered);
     }
 
     let store_inbound = store.clone();
@@ -126,15 +128,25 @@ pub async fn process_inbound_sms(
         .collect();
     profile_keys.sort();
     profile_keys.dedup();
-    let fingerprint = store.get_meta(FINGERPRINT_META_KEY).unwrap_or_default();
-    let msg = NewMessage::modem_inbound(
-        &sms.phone_number,
-        &sms.body,
-        &sms.timestamp,
-        &sms.modem_sms_path,
-        &fingerprint,
-    );
-    match store.insert_inbound_message_with_deliveries(msg, &profile_keys)? {
+    let store_for_insert = store.clone();
+    let sms = sms.clone();
+    let profile_keys_for_insert = profile_keys.clone();
+    let insert_result = tokio::task::spawn_blocking(move || {
+        let fingerprint = store_for_insert
+            .get_meta(FINGERPRINT_META_KEY)?
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("modem fingerprint is not enrolled"))?;
+        let msg = NewMessage::modem_inbound(
+            &sms.phone_number,
+            &sms.body,
+            &sms.timestamp,
+            &sms.modem_sms_path,
+            &fingerprint,
+        );
+        store_for_insert.insert_inbound_message_with_deliveries(msg, &profile_keys_for_insert)
+    })
+    .await??;
+    match insert_result {
         InboundInsertResult::Inserted(m) => {
             if !profile_keys.is_empty() {
                 delivery_wakeup.notify();
@@ -213,29 +225,34 @@ async fn send_and_persist(
     target: SendTarget,
 ) -> anyhow::Result<Message> {
     let now = OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?;
-    let msg = store.insert_message(NewMessage {
-        direction: MessageDirection::Outbound,
-        phone_number: phone_number.to_string(),
-        body: body.to_string(),
-        timestamp: now.clone(),
-        status: MessageStatus::Sending,
-        source,
-        modem_sms_path: None,
-        read_at: Some(now),
-        error: None,
-        inbound_dedupe_key: None,
-    })?;
-    match dbus::send_sms(connection, modem_path, phone_number, body, target).await {
-        Ok(_outcome) => {
-            let updated = store.update_status(msg.id, MessageStatus::Sent, None)?;
-            Ok(updated)
-        }
-        Err(err) => {
-            let updated =
-                store.update_status(msg.id, MessageStatus::Failed, Some(err.to_string()))?;
-            Ok(updated)
-        }
-    }
+    let insert_store = store.clone();
+    let owned_phone_number = phone_number.to_string();
+    let owned_body = body.to_string();
+    let msg = tokio::task::spawn_blocking(move || {
+        insert_store.insert_message(NewMessage {
+            direction: MessageDirection::Outbound,
+            phone_number: owned_phone_number,
+            body: owned_body,
+            timestamp: now.clone(),
+            status: MessageStatus::Sending,
+            source,
+            modem_sms_path: None,
+            read_at: Some(now),
+            error: None,
+            inbound_dedupe_key: None,
+        })
+    })
+    .await??;
+    let (status, error) =
+        match dbus::send_sms(connection, modem_path, phone_number, body, target).await {
+            Ok(_outcome) => (MessageStatus::Sent, None),
+            Err(err) => (MessageStatus::Failed, Some(err.to_string())),
+        };
+    let update_store = store.clone();
+    Ok(
+        tokio::task::spawn_blocking(move || update_store.update_status(msg.id, status, error))
+            .await??,
+    )
 }
 
 #[cfg(test)]
@@ -308,6 +325,9 @@ mod tests {
     #[tokio::test]
     async fn inbound_without_forwarding_profiles_does_not_wake_delivery_worker() {
         let store = MessageStore::open_in_memory().unwrap();
+        store
+            .set_meta(crate::dbus::FINGERPRINT_META_KEY, "test-fingerprint")
+            .unwrap();
         let events = EventBus::new();
         let delivery_wakeup = DeliveryWakeup::new();
         let sms = ReceivedSms {
@@ -334,5 +354,26 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn inbound_without_an_enrolled_fingerprint_is_not_persisted() {
+        let store = MessageStore::open_in_memory().unwrap();
+        let result = process_inbound_sms(
+            &store,
+            &EventBus::new(),
+            &ReceivedSms {
+                phone_number: "+15550000000".to_string(),
+                body: "wait for enrollment".to_string(),
+                timestamp: "2026-07-12T17:02:00Z".to_string(),
+                modem_sms_path: "/org/freedesktop/ModemManager1/SMS/44".to_string(),
+            },
+            &AppConfig::default(),
+            &DeliveryWakeup::new(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(store.count_messages().unwrap(), 0);
     }
 }

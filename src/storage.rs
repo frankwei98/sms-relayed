@@ -21,7 +21,7 @@ pub struct DeliveryRow {
     pub id: i64,
     pub message_id: i64,
     pub profile_key: String,
-    pub state: String,
+    pub state: DeliveryState,
     pub attempt_count: i64,
     pub next_attempt_at: Option<String>,
     pub lease_at: Option<String>,
@@ -29,6 +29,27 @@ pub struct DeliveryRow {
     pub last_error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryState {
+    Pending,
+    InFlight,
+    RetryWait,
+    Succeeded,
+    PermanentFailed,
+}
+
+impl DeliveryState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::InFlight => "in_flight",
+            Self::RetryWait => "retry_wait",
+            Self::Succeeded => "succeeded",
+            Self::PermanentFailed => "permanent_failed",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -85,7 +106,7 @@ pub struct NewForwardAttemptSample {
 
 pub struct DeliveryCompletion<'a> {
     pub id: i64,
-    pub state: &'a str,
+    pub state: DeliveryState,
     pub error: Option<&'a str>,
     pub attempt_count: i64,
     pub next_attempt_at: Option<&'a str>,
@@ -227,12 +248,12 @@ impl MessageStore {
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                direction TEXT NOT NULL,
+                direction TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound')),
                 phone_number TEXT NOT NULL,
                 body TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
-                status TEXT NOT NULL,
-                source TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('received', 'sending', 'sent', 'failed')),
+                source TEXT NOT NULL CHECK (source IN ('modem', 'web', 'cli')),
                 modem_sms_path TEXT NULL,
                 read_at TEXT NULL,
                 error TEXT NULL,
@@ -336,7 +357,8 @@ impl MessageStore {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
                 profile_key TEXT NOT NULL,
-                state TEXT NOT NULL DEFAULT 'pending',
+                state TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (state IN ('pending', 'in_flight', 'retry_wait', 'succeeded', 'permanent_failed')),
                 attempt_count INTEGER NOT NULL DEFAULT 0,
                 next_attempt_at TEXT,
                 lease_at TEXT,
@@ -360,11 +382,52 @@ impl MessageStore {
                 completed_at TEXT NOT NULL,
                 latency_ms INTEGER NOT NULL,
                 dispatch_delay_ms INTEGER NULL,
-                outcome TEXT NOT NULL,
+                outcome TEXT NOT NULL
+                    CHECK (outcome IN ('success', 'transient_failure', 'permanent_failure')),
                 error_code TEXT NULL,
                 created_at TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_attempts_profile ON forward_attempt_samples(profile_key, completed_at DESC, id DESC);",
+            CREATE INDEX IF NOT EXISTS idx_attempts_profile ON forward_attempt_samples(profile_key, completed_at DESC, id DESC);
+            CREATE TRIGGER IF NOT EXISTS messages_validate_domain_insert
+            BEFORE INSERT ON messages
+            WHEN NEW.direction NOT IN ('inbound', 'outbound')
+              OR NEW.status NOT IN ('received', 'sending', 'sent', 'failed')
+              OR NEW.source NOT IN ('modem', 'web', 'cli')
+            BEGIN
+                SELECT RAISE(ABORT, 'invalid message domain value');
+            END;
+            CREATE TRIGGER IF NOT EXISTS messages_validate_domain_update
+            BEFORE UPDATE ON messages
+            WHEN NEW.direction NOT IN ('inbound', 'outbound')
+              OR NEW.status NOT IN ('received', 'sending', 'sent', 'failed')
+              OR NEW.source NOT IN ('modem', 'web', 'cli')
+            BEGIN
+                SELECT RAISE(ABORT, 'invalid message domain value');
+            END;
+            CREATE TRIGGER IF NOT EXISTS deliveries_validate_state_insert
+            BEFORE INSERT ON forward_deliveries
+            WHEN NEW.state NOT IN ('pending', 'in_flight', 'retry_wait', 'succeeded', 'permanent_failed')
+            BEGIN
+                SELECT RAISE(ABORT, 'invalid delivery state');
+            END;
+            CREATE TRIGGER IF NOT EXISTS deliveries_validate_state_update
+            BEFORE UPDATE ON forward_deliveries
+            WHEN NEW.state NOT IN ('pending', 'in_flight', 'retry_wait', 'succeeded', 'permanent_failed')
+            BEGIN
+                SELECT RAISE(ABORT, 'invalid delivery state');
+            END;
+            CREATE TRIGGER IF NOT EXISTS attempt_samples_validate_outcome_insert
+            BEFORE INSERT ON forward_attempt_samples
+            WHEN NEW.outcome NOT IN ('success', 'transient_failure', 'permanent_failure')
+            BEGIN
+                SELECT RAISE(ABORT, 'invalid forward attempt outcome');
+            END;
+            CREATE TRIGGER IF NOT EXISTS attempt_samples_validate_outcome_update
+            BEFORE UPDATE ON forward_attempt_samples
+            WHEN NEW.outcome NOT IN ('success', 'transient_failure', 'permanent_failure')
+            BEGIN
+                SELECT RAISE(ABORT, 'invalid forward attempt outcome');
+            END;",
         )?;
 
         // Migration: add inbound_dedupe_key column to existing databases
@@ -486,14 +549,15 @@ impl MessageStore {
         Ok(count)
     }
 
-    pub fn get_meta(&self, key: &str) -> Option<String> {
+    pub fn get_meta(&self, key: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT value FROM meta WHERE key = ?1",
             params![key],
             |row| row.get(0),
         )
-        .ok()
+        .optional()
+        .map_err(Into::into)
     }
 
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
@@ -674,12 +738,12 @@ impl MessageStore {
             let unread_count: i64 = row.get(2)?;
             let last_message = Message {
                 id: row.get(3)?,
-                direction: str_to_direction(&row.get::<_, String>(4)?),
+                direction: str_to_direction(&row.get::<_, String>(4)?, 4)?,
                 phone_number: row.get(5)?,
                 body: row.get(6)?,
                 timestamp: row.get(7)?,
-                status: str_to_status(&row.get::<_, String>(8)?),
-                source: str_to_source(&row.get::<_, String>(9)?),
+                status: str_to_status(&row.get::<_, String>(8)?, 8)?,
+                source: str_to_source(&row.get::<_, String>(9)?, 9)?,
                 modem_sms_path: row.get(10)?,
                 read_at: row.get(11)?,
                 error: row.get(12)?,
@@ -786,7 +850,7 @@ impl MessageStore {
     pub fn complete_delivery(
         &self,
         id: i64,
-        state: &str,
+        state: DeliveryState,
         error: Option<&str>,
         attempt_count: i64,
         next_attempt_at: Option<&str>,
@@ -800,7 +864,7 @@ impl MessageStore {
                  lease_at = NULL, lease_token = NULL, updated_at = ?5
              WHERE id = ?6 AND state = 'in_flight' AND lease_token = ?7",
             params![
-                state,
+                state.as_str(),
                 error,
                 attempt_count,
                 next_attempt_at,
@@ -834,7 +898,7 @@ impl MessageStore {
         // Find message IDs eligible for deletion: terminal status, old, and no non-terminal deliveries
         let mut stmt = tx.prepare(
             "SELECT m.id FROM messages m
-             WHERE m.timestamp < ?1
+             WHERE julianday(m.timestamp) < julianday(?1)
                AND m.status IN ('received', 'sent', 'failed')
                AND NOT EXISTS (
                    SELECT 1 FROM forward_deliveries d
@@ -1004,7 +1068,7 @@ impl MessageStore {
                  lease_at = NULL, lease_token = NULL, updated_at = ?5
              WHERE id = ?6 AND state = 'in_flight' AND lease_token = ?7",
             params![
-                state,
+                state.as_str(),
                 error,
                 attempt_count,
                 next_attempt_at,
@@ -1166,12 +1230,12 @@ where
 fn row_to_message(row: &Row) -> rusqlite::Result<Message> {
     Ok(Message {
         id: row.get(0)?,
-        direction: str_to_direction(&row.get::<_, String>(1)?),
+        direction: str_to_direction(&row.get::<_, String>(1)?, 1)?,
         phone_number: row.get(2)?,
         body: row.get(3)?,
         timestamp: row.get(4)?,
-        status: str_to_status(&row.get::<_, String>(5)?),
-        source: str_to_source(&row.get::<_, String>(6)?),
+        status: str_to_status(&row.get::<_, String>(5)?, 5)?,
+        source: str_to_source(&row.get::<_, String>(6)?, 6)?,
         modem_sms_path: row.get(7)?,
         read_at: row.get(8)?,
         error: row.get(9)?,
@@ -1204,27 +1268,30 @@ fn source_to_str(source: MessageSource) -> &'static str {
     }
 }
 
-fn str_to_direction(s: &str) -> MessageDirection {
+fn str_to_direction(s: &str, column: usize) -> rusqlite::Result<MessageDirection> {
     match s {
-        "outbound" => MessageDirection::Outbound,
-        _ => MessageDirection::Inbound,
+        "inbound" => Ok(MessageDirection::Inbound),
+        "outbound" => Ok(MessageDirection::Outbound),
+        _ => Err(invalid_enum_value(column, "message direction", s)),
     }
 }
 
-fn str_to_status(s: &str) -> MessageStatus {
+fn str_to_status(s: &str, column: usize) -> rusqlite::Result<MessageStatus> {
     match s {
-        "sending" => MessageStatus::Sending,
-        "sent" => MessageStatus::Sent,
-        "failed" => MessageStatus::Failed,
-        _ => MessageStatus::Received,
+        "received" => Ok(MessageStatus::Received),
+        "sending" => Ok(MessageStatus::Sending),
+        "sent" => Ok(MessageStatus::Sent),
+        "failed" => Ok(MessageStatus::Failed),
+        _ => Err(invalid_enum_value(column, "message status", s)),
     }
 }
 
-fn str_to_source(s: &str) -> MessageSource {
+fn str_to_source(s: &str, column: usize) -> rusqlite::Result<MessageSource> {
     match s {
-        "web" => MessageSource::Web,
-        "cli" => MessageSource::Cli,
-        _ => MessageSource::Modem,
+        "modem" => Ok(MessageSource::Modem),
+        "web" => Ok(MessageSource::Web),
+        "cli" => Ok(MessageSource::Cli),
+        _ => Err(invalid_enum_value(column, "message source", s)),
     }
 }
 
@@ -1236,13 +1303,25 @@ fn outcome_to_str(outcome: &ForwardAttemptOutcome) -> &'static str {
     }
 }
 
-fn str_to_outcome(s: &str) -> ForwardAttemptOutcome {
+fn str_to_outcome(s: &str, column: usize) -> rusqlite::Result<ForwardAttemptOutcome> {
     match s {
-        "success" => ForwardAttemptOutcome::Success,
-        "transient_failure" => ForwardAttemptOutcome::TransientFailure,
-        "permanent_failure" => ForwardAttemptOutcome::PermanentFailure,
-        _ => ForwardAttemptOutcome::PermanentFailure,
+        "success" => Ok(ForwardAttemptOutcome::Success),
+        "transient_failure" => Ok(ForwardAttemptOutcome::TransientFailure),
+        "permanent_failure" => Ok(ForwardAttemptOutcome::PermanentFailure),
+        _ => Err(invalid_enum_value(column, "forward attempt outcome", s)),
     }
+}
+
+fn invalid_enum_value(column: usize, kind: &str, value: &str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        column,
+        rusqlite::types::Type::Text,
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unknown {kind}: {value}"),
+        )
+        .into(),
+    )
 }
 
 fn row_to_attempt_sample(row: &Row) -> rusqlite::Result<ForwardAttemptSample> {
@@ -1255,17 +1334,19 @@ fn row_to_attempt_sample(row: &Row) -> rusqlite::Result<ForwardAttemptSample> {
         completed_at: row.get(5)?,
         latency_ms: row.get(6)?,
         dispatch_delay_ms: row.get(7)?,
-        outcome: str_to_outcome(&row.get::<_, String>(8)?),
+        outcome: str_to_outcome(&row.get::<_, String>(8)?, 8)?,
         error_code: row.get(9)?,
     })
 }
 
 fn row_to_delivery(row: &Row) -> rusqlite::Result<DeliveryRow> {
+    let state = row.get::<_, String>(3)?;
+    let state = str_to_delivery_state(&state, 3)?;
     Ok(DeliveryRow {
         id: row.get(0)?,
         message_id: row.get(1)?,
         profile_key: row.get(2)?,
-        state: row.get(3)?,
+        state,
         attempt_count: row.get(4)?,
         next_attempt_at: row.get(5)?,
         lease_at: row.get(6)?,
@@ -1274,6 +1355,17 @@ fn row_to_delivery(row: &Row) -> rusqlite::Result<DeliveryRow> {
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
     })
+}
+
+fn str_to_delivery_state(s: &str, column: usize) -> rusqlite::Result<DeliveryState> {
+    match s {
+        "pending" => Ok(DeliveryState::Pending),
+        "in_flight" => Ok(DeliveryState::InFlight),
+        "retry_wait" => Ok(DeliveryState::RetryWait),
+        "succeeded" => Ok(DeliveryState::Succeeded),
+        "permanent_failed" => Ok(DeliveryState::PermanentFailed),
+        _ => Err(invalid_enum_value(column, "delivery state", s)),
+    }
 }
 
 fn now_string() -> String {
@@ -1918,11 +2010,41 @@ mod tests {
     #[test]
     fn meta_read_write_roundtrip() {
         let store = memory_store();
-        assert_eq!(store.get_meta("test_key"), None);
+        assert_eq!(store.get_meta("test_key").unwrap(), None);
         store.set_meta("test_key", "hello").unwrap();
-        assert_eq!(store.get_meta("test_key").as_deref(), Some("hello"));
+        assert_eq!(
+            store.get_meta("test_key").unwrap().as_deref(),
+            Some("hello")
+        );
         store.set_meta("test_key", "updated").unwrap();
-        assert_eq!(store.get_meta("test_key").as_deref(), Some("updated"));
+        assert_eq!(
+            store.get_meta("test_key").unwrap().as_deref(),
+            Some("updated")
+        );
+    }
+
+    #[test]
+    fn message_reads_reject_unknown_persisted_enum_values() {
+        let store = memory_store();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.pragma_update(None, "ignore_check_constraints", "ON")
+                .unwrap();
+            conn.execute("DROP TRIGGER messages_validate_domain_insert", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO messages (
+                    direction, phone_number, body, timestamp, status, source,
+                    created_at, updated_at
+                 ) VALUES ('sideways', '+1', 'invalid', '2026-01-01T00:00:00Z',
+                           'received', 'modem', '2026-01-01T00:00:00Z',
+                           '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        assert!(store.get_message(1).is_err());
     }
 
     #[test]
@@ -1944,6 +2066,35 @@ mod tests {
             .unwrap();
         let deleted = store.run_retention(1, 100).unwrap();
         assert_eq!(deleted, 1);
+    }
+
+    #[test]
+    fn retention_compares_rfc3339_timestamps_by_instant() {
+        let store = memory_store();
+        let cutoff = OffsetDateTime::now_utc() - time::Duration::days(1);
+        let recent = (cutoff + time::Duration::minutes(30))
+            .to_offset(time::UtcOffset::from_hms(-12, 0, 0).unwrap())
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        store
+            .insert_message(NewMessage {
+                direction: MessageDirection::Inbound,
+                phone_number: "+1".to_string(),
+                body: "recent with negative offset".to_string(),
+                timestamp: recent,
+                status: MessageStatus::Received,
+                source: MessageSource::Modem,
+                modem_sms_path: None,
+                read_at: None,
+                error: None,
+                inbound_dedupe_key: None,
+            })
+            .unwrap();
+
+        let deleted = store.run_retention(1, 100).unwrap();
+
+        assert_eq!(deleted, 0);
+        assert_eq!(store.count_messages().unwrap(), 1);
     }
 
     #[test]
@@ -2265,7 +2416,7 @@ mod tests {
         store
             .complete_delivery(
                 delivery.id,
-                "retry_wait",
+                DeliveryState::RetryWait,
                 Some("http_timeout"),
                 1,
                 Some("2099-01-02T00:00:00Z"),
@@ -2297,7 +2448,7 @@ mod tests {
         let completed = store
             .complete_delivery_with_attempt(DeliveryCompletion {
                 id: delivery.id,
-                state: "succeeded",
+                state: DeliveryState::Succeeded,
                 error: None,
                 attempt_count: 1,
                 next_attempt_at: None,
@@ -2317,7 +2468,10 @@ mod tests {
             .unwrap();
 
         assert!(!completed);
-        assert_eq!(store.get_delivery(delivery.id).unwrap().state, "in_flight");
+        assert_eq!(
+            store.get_delivery(delivery.id).unwrap().state,
+            DeliveryState::InFlight
+        );
         assert_eq!(store.get_message(message.id).unwrap().body, "lease sample");
         assert_eq!(
             store
@@ -2355,7 +2509,21 @@ mod tests {
                     (direction, phone_number, body, timestamp, status, source, created_at, updated_at)
                 VALUES
                     ('inbound', '+1', 'legacy', '2026-01-01T00:00:00Z', 'received',
-                     'modem', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');",
+                     'modem', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                CREATE TABLE forward_deliveries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id INTEGER NOT NULL,
+                    profile_key TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at TEXT,
+                    lease_at TEXT,
+                    lease_token TEXT,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(message_id, profile_key)
+                );",
             )
             .unwrap();
         drop(legacy);
@@ -2366,6 +2534,39 @@ mod tests {
             .insert_deliveries(1, &["bark.primary".to_string()])
             .unwrap();
         assert_eq!(store.count_deliveries().unwrap(), 1);
+        {
+            let conn = store.conn.lock().unwrap();
+            assert!(conn
+                .execute(
+                    "INSERT INTO messages
+                        (direction, phone_number, body, timestamp, status, source, created_at, updated_at)
+                     VALUES ('sideways', '+2', 'invalid', '2026-01-01T00:00:00Z',
+                             'received', 'modem', '2026-01-01T00:00:00Z',
+                             '2026-01-01T00:00:00Z')",
+                    [],
+                )
+                .is_err());
+            assert!(conn
+                .execute(
+                    "INSERT INTO forward_deliveries
+                        (message_id, profile_key, state, created_at, updated_at)
+                     VALUES (1, 'invalid.state', 'unknown', '2026-01-01T00:00:00Z',
+                             '2026-01-01T00:00:00Z')",
+                    [],
+                )
+                .is_err());
+            assert!(conn
+                .execute(
+                    "INSERT INTO forward_attempt_samples
+                        (profile_key, attempt_number, started_at, completed_at, latency_ms,
+                         outcome, created_at)
+                     VALUES ('invalid.outcome', 1, '2026-01-01T00:00:00Z',
+                             '2026-01-01T00:00:01Z', 1000, 'unknown',
+                             '2026-01-01T00:00:01Z')",
+                    [],
+                )
+                .is_err());
+        }
         drop(store);
 
         let _ = std::fs::remove_file(&path);
@@ -2468,7 +2669,7 @@ mod tests {
 
         // Delivery state preserved (delivery is id=1 from legacy setup)
         let delivery = store.get_delivery(1).unwrap();
-        assert_eq!(delivery.state, "succeeded");
+        assert_eq!(delivery.state, DeliveryState::Succeeded);
         assert_eq!(delivery.attempt_count, 2);
 
         // Idempotent re-open
@@ -2591,12 +2792,29 @@ mod tests {
         let second_token = second.lease_token.clone().unwrap();
         assert_ne!(first_token, second_token);
         assert!(!store
-            .complete_delivery(second.id, "succeeded", None, 1, None, &first_token,)
+            .complete_delivery(
+                second.id,
+                DeliveryState::Succeeded,
+                None,
+                1,
+                None,
+                &first_token,
+            )
             .unwrap());
         assert!(store
-            .complete_delivery(second.id, "succeeded", None, 1, None, &second_token,)
+            .complete_delivery(
+                second.id,
+                DeliveryState::Succeeded,
+                None,
+                1,
+                None,
+                &second_token,
+            )
             .unwrap());
-        assert_eq!(store.get_delivery(second.id).unwrap().state, "succeeded");
+        assert_eq!(
+            store.get_delivery(second.id).unwrap().state,
+            DeliveryState::Succeeded
+        );
         assert_eq!(store.get_message(message.id).unwrap().body, "lease");
     }
 
@@ -2682,7 +2900,7 @@ mod tests {
         store
             .complete_delivery_with_attempt(DeliveryCompletion {
                 id: d1.id,
-                state: "succeeded",
+                state: DeliveryState::Succeeded,
                 error: None,
                 attempt_count: 1,
                 next_attempt_at: None,
@@ -2705,7 +2923,7 @@ mod tests {
         store
             .complete_delivery_with_attempt(DeliveryCompletion {
                 id: d2.id,
-                state: "permanent_failed",
+                state: DeliveryState::PermanentFailed,
                 error: Some("shell_exit_nonzero"),
                 attempt_count: 1,
                 next_attempt_at: None,
@@ -2727,13 +2945,16 @@ mod tests {
             store.get_delivery(d2.id).unwrap().last_error.as_deref(),
             Some("shell_exit_nonzero")
         );
-        assert_eq!(store.get_delivery(d2.id).unwrap().state, "permanent_failed");
+        assert_eq!(
+            store.get_delivery(d2.id).unwrap().state,
+            DeliveryState::PermanentFailed
+        );
 
         // Transient failure: last_error gets the error_code
         store
             .complete_delivery_with_attempt(DeliveryCompletion {
                 id: d3.id,
-                state: "retry_wait",
+                state: DeliveryState::RetryWait,
                 error: Some("http_timeout"),
                 attempt_count: 1,
                 next_attempt_at: Some("2099-01-02T00:00:00Z"),
@@ -2755,7 +2976,10 @@ mod tests {
             store.get_delivery(d3.id).unwrap().last_error.as_deref(),
             Some("http_timeout")
         );
-        assert_eq!(store.get_delivery(d3.id).unwrap().state, "retry_wait");
+        assert_eq!(
+            store.get_delivery(d3.id).unwrap().state,
+            DeliveryState::RetryWait
+        );
     }
 
     #[test]
