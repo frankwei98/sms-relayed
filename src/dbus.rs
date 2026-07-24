@@ -14,7 +14,7 @@ use zbus::Connection;
 
 use crate::config::AppConfig;
 use crate::modem::ModemService;
-use crate::storage::MessageStore;
+use crate::persistence::Store;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendTarget {
@@ -142,8 +142,6 @@ const MM_DESTINATION: &str = "org.freedesktop.ModemManager1";
 const DBUS_METHOD_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_INBOUND_TASKS: usize = 16;
 
-pub const FINGERPRINT_META_KEY: &str = "modem_fingerprint";
-
 fn extract_string(props: &HashMap<String, OwnedValue>, key: &str) -> String {
     props
         .get(key)
@@ -175,28 +173,23 @@ fn extract_u32(props: &HashMap<String, OwnedValue>, key: &str) -> u32 {
 /// Resolve the actual modem path for monitoring.
 /// First tries the configured path directly. If it fails and a fingerprint is
 /// stored, scans all modems and matches by fingerprint exactly once.
-async fn get_stored_fingerprint(store: &MessageStore) -> Result<Option<String>> {
-    let store = store.clone();
-    Ok(tokio::task::spawn_blocking(move || store.get_meta(FINGERPRINT_META_KEY)).await??)
+async fn get_stored_fingerprint(store: &Store) -> Result<Option<String>> {
+    store.modem_fingerprint().await
 }
 
-async fn set_stored_fingerprint(store: &MessageStore, fingerprint: String) -> Result<()> {
-    let store = store.clone();
-    tokio::task::spawn_blocking(move || store.set_meta(FINGERPRINT_META_KEY, &fingerprint))
-        .await??;
-    Ok(())
+async fn set_stored_fingerprint(store: &Store, fingerprint: String) -> Result<()> {
+    store.set_modem_fingerprint(fingerprint).await
 }
 
-async fn backfill_dedupe_keys(store: &MessageStore) -> Result<()> {
-    let store = store.clone();
-    tokio::task::spawn_blocking(move || store.backfill_dedupe_keys()).await??;
+async fn backfill_dedupe_keys(store: &Store) -> Result<()> {
+    store.backfill_dedupe_keys().await?;
     Ok(())
 }
 
 async fn resolve_monitor_path(
     configured_path: &str,
     modem_service: &ModemService,
-    store: &MessageStore,
+    store: &Store,
 ) -> Result<Option<String>> {
     // Try configured path first
     let stored_fp = get_stored_fingerprint(store).await?;
@@ -444,7 +437,7 @@ pub async fn monitor_dbus_with_handler<F, Fut>(
     config: &AppConfig,
     on_received: F,
     modem_service: &ModemService,
-    store: &MessageStore,
+    store: &Store,
 ) -> Result<()>
 where
     F: Fn(ReceivedSms) -> Fut + Send + Clone + 'static,
@@ -705,9 +698,9 @@ mod tests {
 
     #[tokio::test]
     async fn enrolled_fingerprint_rejects_unrelated_modem_at_configured_path() {
-        let store = MessageStore::open_in_memory().unwrap();
+        let store = Store::open_in_memory().unwrap();
         let target = ModemService::compute_fingerprint("target");
-        store.set_meta(FINGERPRINT_META_KEY, &target).unwrap();
+        store.set_modem_fingerprint(target.clone()).await.unwrap();
         let service = ModemService::new_with_runner(IdentityRunner);
 
         let resolved =
@@ -720,15 +713,16 @@ mod tests {
             Some("/org/freedesktop/ModemManager1/Modem/1")
         );
         assert_eq!(
-            store.get_meta(FINGERPRINT_META_KEY).unwrap().as_deref(),
+            store.modem_fingerprint().await.unwrap().as_deref(),
             Some(target.as_str())
         );
     }
 
     #[tokio::test]
     async fn matching_enrolled_fingerprint_backfills_legacy_messages_before_monitoring() {
-        let store = MessageStore::open_in_memory().unwrap();
+        let store = Store::open_in_memory().unwrap();
         store
+            .sqlite()
             .insert_message(crate::storage::NewMessage {
                 direction: crate::message::MessageDirection::Inbound,
                 phone_number: "+1".to_string(),
@@ -743,7 +737,7 @@ mod tests {
             })
             .unwrap();
         let enrolled = ModemService::compute_fingerprint("other");
-        store.set_meta(FINGERPRINT_META_KEY, &enrolled).unwrap();
+        store.set_modem_fingerprint(enrolled.clone()).await.unwrap();
         let service = ModemService::new_with_runner(IdentityRunner);
 
         let resolved =
@@ -764,10 +758,11 @@ mod tests {
         );
         assert!(matches!(
             store
+                .sqlite()
                 .insert_inbound_message_with_deliveries(replay, &[])
                 .unwrap(),
             crate::storage::InboundInsertResult::Duplicate(_)
         ));
-        assert_eq!(store.count_messages().unwrap(), 1);
+        assert_eq!(store.sqlite().count_messages().unwrap(), 1);
     }
 }

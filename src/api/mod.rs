@@ -20,18 +20,31 @@ use serde::Serialize;
 
 use crate::config::AppConfig;
 use crate::events::EventBus;
-use crate::storage::MessageStore;
+use crate::messaging::Messaging;
+use crate::persistence::Store;
 
 #[derive(Clone)]
 pub struct ApiState {
     pub config: Arc<AppConfig>,
     pub config_path: PathBuf,
-    pub store: MessageStore,
+    pub store: Store,
     pub events: EventBus,
+    pub delivery_wakeup: crate::delivery::DeliveryWakeup,
     pub started_at: Instant,
     pub sessions: auth::SessionStore,
     pub modem: crate::modem::ModemService,
     pub sms_sender: Arc<dyn crate::dbus::SmsSender>,
+}
+
+impl ApiState {
+    pub fn messaging(&self) -> Messaging {
+        Messaging::new(
+            self.store.clone(),
+            self.events.clone(),
+            self.delivery_wakeup.clone(),
+            self.sms_sender.clone(),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -398,8 +411,9 @@ mod route_tests {
         ApiState {
             config: std::sync::Arc::new(cfg),
             config_path: std::path::PathBuf::from("/tmp/sms-relayed-test.toml"),
-            store: crate::storage::MessageStore::open_in_memory().unwrap(),
+            store: crate::persistence::Store::open_in_memory().unwrap(),
             events: crate::events::EventBus::new(),
+            delivery_wakeup: crate::delivery::DeliveryWakeup::new(),
             started_at: std::time::Instant::now(),
             sessions: SessionStore::default(),
             modem: crate::modem::ModemService::new_with_runner(ApiTestRunner),
@@ -537,8 +551,9 @@ mod route_tests {
         let state = ApiState {
             config: std::sync::Arc::new(cfg),
             config_path: std::path::PathBuf::from("/tmp/sms-relayed-test.toml"),
-            store: crate::storage::MessageStore::open_in_memory().unwrap(),
+            store: crate::persistence::Store::open_in_memory().unwrap(),
             events: crate::events::EventBus::new(),
+            delivery_wakeup: crate::delivery::DeliveryWakeup::new(),
             started_at: std::time::Instant::now(),
             sessions: SessionStore::default(),
             modem: crate::modem::ModemService::new_with_runner(ApiTestRunner),
@@ -586,6 +601,7 @@ mod route_tests {
         for n in 1..=6 {
             state
                 .store
+                .sqlite()
                 .record_forward_attempt(NewForwardAttemptSample {
                     profile_key: "bark.primary".to_string(),
                     delivery_id: None,
@@ -666,6 +682,7 @@ mod route_tests {
         // Actually insert a message with phone number and body
         let message = state
             .store
+            .sqlite()
             .insert_message(crate::storage::NewMessage::modem_inbound(
                 "+15551234567",
                 "secret code is 1234",
@@ -677,6 +694,7 @@ mod route_tests {
         // Record an attempt for that message's delivery
         state
             .store
+            .sqlite()
             .record_forward_attempt(NewForwardAttemptSample {
                 profile_key: "bark.primary".to_string(),
                 delivery_id: Some(message.id),
