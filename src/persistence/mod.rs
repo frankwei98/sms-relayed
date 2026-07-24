@@ -12,6 +12,13 @@ use anyhow::Result;
 use crate::message::{ConversationSummary, Message, MessageFilter, MessageSource, MessageStatus};
 use crate::storage::{ForwardAttemptSample, MessageStore, NewMessage};
 
+mod delivery;
+
+pub use delivery::{
+    ClaimedDelivery, CompleteDelivery, CompletionResult, DeliveryAttempt, DeliveryAttemptOutcome,
+    DeliveryClaim, DeliveryDisposition, DeliveryTime,
+};
+
 const MODEM_FINGERPRINT_META_KEY: &str = "modem_fingerprint";
 
 fn outbound_phase_to_str(phase: OutboundPhase) -> &'static str {
@@ -124,12 +131,6 @@ impl Store {
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         Ok(MessageStore::open_in_memory()?.into())
-    }
-
-    /// Transitional seam for the delivery worker. Phase three will move its
-    /// queue operations behind this module's async interface as well.
-    pub(crate) fn delivery_store(&self) -> MessageStore {
-        self.sqlite.clone()
     }
 
     #[cfg(test)]
@@ -389,8 +390,8 @@ impl Store {
         self.run(|sqlite| sqlite.backfill_dedupe_keys()).await
     }
 
-    pub async fn recover_expired_leases(&self, before: String) -> Result<usize> {
-        self.run(move |sqlite| sqlite.recover_expired_leases(&before))
+    pub async fn recover_expired_delivery_leases(&self) -> Result<usize> {
+        self.run(move |sqlite| sqlite.recover_expired_leases())
             .await
     }
 
@@ -440,11 +441,15 @@ where
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
 
     use crate::message::MessageFilter;
     use crate::storage::NewMessage;
 
-    use super::{produce_messages, Store};
+    use super::{
+        produce_messages, CompleteDelivery, CompletionResult, DeliveryAttempt,
+        DeliveryAttemptOutcome, DeliveryDisposition, Store,
+    };
 
     #[tokio::test]
     async fn open_initializes_storage_through_the_async_interface() {
@@ -458,6 +463,110 @@ mod tests {
         store.health_check().await.unwrap();
         drop(store);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn delivery_claim_exposes_typed_times_and_an_opaque_capability() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .sqlite()
+            .insert_message_with_deliveries(
+                NewMessage::inbound("+1", "typed delivery claim"),
+                &["bark.primary".to_string()],
+            )
+            .unwrap();
+
+        let claim = store
+            .claim_deliveries(1, Duration::from_secs(90))
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        assert_eq!(claim.profile_key, "bark.primary");
+        assert_eq!(claim.attempt_count, 0);
+        assert!(claim.next_attempt_at.is_none());
+        assert!(matches!(
+            claim.created_at,
+            super::DeliveryTime::Valid(created_at)
+                if created_at <= time::OffsetDateTime::now_utc()
+        ));
+        let _opaque_capability = claim.claim;
+    }
+
+    #[tokio::test]
+    async fn delivery_deadline_preserves_rfc3339_offset_and_precision() {
+        let store = Store::open_in_memory().unwrap();
+        let message = store
+            .sqlite()
+            .insert_message_with_deliveries(
+                NewMessage::inbound("+1", "precise delivery deadline"),
+                &["bark.primary".to_string()],
+            )
+            .unwrap();
+        store
+            .sqlite()
+            .set_delivery_retry_deadline(message.id, "2026-07-24T08:00:00.123456789+08:00")
+            .unwrap();
+
+        let due = store.next_delivery_due().await.unwrap().unwrap();
+
+        assert_eq!(due.unix_timestamp_nanos(), 1_784_851_200_123_456_789);
+    }
+
+    #[tokio::test]
+    async fn lost_delivery_claim_still_records_the_real_provider_attempt() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .sqlite()
+            .insert_message_with_deliveries(
+                NewMessage::inbound("+1", "lost delivery claim"),
+                &["bark.primary".to_string()],
+            )
+            .unwrap();
+        let stale = store
+            .claim_deliveries(1, Duration::ZERO)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let current = store
+            .claim_deliveries(1, Duration::from_secs(90))
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let now = time::OffsetDateTime::now_utc();
+
+        let result = store
+            .complete_delivery(CompleteDelivery {
+                claim: stale.claim,
+                disposition: DeliveryDisposition::Succeeded,
+                attempt: Some(DeliveryAttempt {
+                    started_at: now,
+                    completed_at: now + time::Duration::milliseconds(10),
+                    latency: Duration::from_millis(10),
+                    dispatch_delay: Duration::ZERO,
+                    outcome: DeliveryAttemptOutcome::Success,
+                    error_code: None,
+                }),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result, CompletionResult::OwnershipLost);
+        assert_eq!(
+            store
+                .forwarding_attempts("bark.primary".to_string(), 5)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store.sqlite().get_delivery(current.id).unwrap().state,
+            crate::storage::DeliveryState::InFlight
+        );
     }
 
     #[tokio::test]

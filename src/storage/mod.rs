@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 #[cfg(test)]
@@ -122,7 +123,7 @@ pub struct DeliveryCompletion<'a> {
     pub state: DeliveryState,
     pub error: Option<&'a str>,
     pub attempt_count: i64,
-    pub next_attempt_at: Option<&'a str>,
+    pub retry_after: Option<Duration>,
     pub lease_token: &'a str,
     pub sample: NewForwardAttemptSample,
 }
@@ -1488,7 +1489,7 @@ mod tests {
         }
 
         let claimed = store
-            .claim_due_deliveries(1, "2099-01-01T00:00:00Z")
+            .claim_due_deliveries(1, Duration::from_secs(90))
             .unwrap();
 
         assert_eq!(claimed[0].id, 2);
@@ -1519,7 +1520,7 @@ mod tests {
         }
 
         let claimed = store
-            .claim_due_deliveries(1, "2099-01-01T00:00:00Z")
+            .claim_due_deliveries(1, Duration::from_secs(90))
             .unwrap();
 
         assert_eq!(claimed.len(), 1);
@@ -1546,7 +1547,7 @@ mod tests {
         }
 
         let claimed = store
-            .claim_due_deliveries(1, "2099-01-01T00:00:00Z")
+            .claim_due_deliveries(1, Duration::from_secs(90))
             .unwrap();
 
         assert_eq!(claimed.len(), 1);
@@ -1563,7 +1564,7 @@ mod tests {
             )
             .unwrap();
         let delivery = store
-            .claim_due_deliveries(1, "2099-01-01T00:00:00Z")
+            .claim_due_deliveries(1, Duration::from_secs(90))
             .unwrap()
             .pop()
             .unwrap();
@@ -1573,15 +1574,18 @@ mod tests {
                 DeliveryState::RetryWait,
                 Some("http_timeout"),
                 1,
-                Some("2099-01-02T00:00:00Z"),
+                Some(Duration::from_secs(24 * 60 * 60)),
                 delivery.lease_token.as_deref().unwrap(),
             )
             .unwrap();
 
-        assert_eq!(
-            store.next_delivery_due_at().unwrap().as_deref(),
-            Some("2099-01-02T00:00:00Z")
-        );
+        let due = OffsetDateTime::parse(
+            store.next_delivery_due_at().unwrap().as_deref().unwrap(),
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        let delay = due - OffsetDateTime::now_utc();
+        assert!((86_390..=86_400).contains(&delay.whole_seconds()));
     }
 
     #[test]
@@ -1594,7 +1598,7 @@ mod tests {
             )
             .unwrap();
         let delivery = store
-            .claim_due_deliveries(1, "2099-01-01T00:00:00Z")
+            .claim_due_deliveries(1, Duration::from_secs(90))
             .unwrap()
             .pop()
             .unwrap();
@@ -1605,7 +1609,7 @@ mod tests {
                 state: DeliveryState::Succeeded,
                 error: None,
                 attempt_count: 1,
-                next_attempt_at: None,
+                retry_after: None,
                 lease_token: "wrong-lease-token",
                 sample: NewForwardAttemptSample {
                     profile_key: delivery.profile_key,
@@ -1975,13 +1979,13 @@ mod tests {
         assert_eq!(store.count_deliveries().unwrap(), 1);
 
         let first = store
-            .claim_due_deliveries(1, "2000-01-01T00:00:00Z")
+            .claim_due_deliveries(1, Duration::ZERO)
             .unwrap()
             .pop()
             .unwrap();
         let first_token = first.lease_token.unwrap();
         let second = store
-            .claim_due_deliveries(1, "2099-01-01T00:00:00Z")
+            .claim_due_deliveries(1, Duration::from_secs(90))
             .unwrap()
             .pop()
             .unwrap();
@@ -2085,7 +2089,7 @@ mod tests {
         }
 
         let all = store
-            .claim_due_deliveries(3, "2099-01-01T00:00:00Z")
+            .claim_due_deliveries(3, Duration::from_secs(90))
             .unwrap();
         assert_eq!(all.len(), 3);
         let d1 = &all[0];
@@ -2099,7 +2103,7 @@ mod tests {
                 state: DeliveryState::Succeeded,
                 error: None,
                 attempt_count: 1,
-                next_attempt_at: None,
+                retry_after: None,
                 lease_token: d1.lease_token.as_ref().unwrap(),
                 sample: NewForwardAttemptSample {
                     profile_key: d1.profile_key.clone(),
@@ -2122,7 +2126,7 @@ mod tests {
                 state: DeliveryState::PermanentFailed,
                 error: Some("shell_exit_nonzero"),
                 attempt_count: 1,
-                next_attempt_at: None,
+                retry_after: None,
                 lease_token: d2.lease_token.as_ref().unwrap(),
                 sample: NewForwardAttemptSample {
                     profile_key: d2.profile_key.clone(),
@@ -2153,7 +2157,7 @@ mod tests {
                 state: DeliveryState::RetryWait,
                 error: Some("http_timeout"),
                 attempt_count: 1,
-                next_attempt_at: Some("2099-01-02T00:00:00Z"),
+                retry_after: Some(Duration::from_secs(24 * 60 * 60)),
                 lease_token: d3.lease_token.as_ref().unwrap(),
                 sample: NewForwardAttemptSample {
                     profile_key: d3.profile_key.clone(),

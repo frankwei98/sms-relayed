@@ -1,7 +1,10 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
+use time::OffsetDateTime;
 
-use super::codecs::{now_string, outcome_to_str, row_to_attempt_sample};
+#[cfg(test)]
+use super::codecs::now_string;
+use super::codecs::{outcome_to_str, row_to_attempt_sample};
 use super::{DeliveryCompletion, ForwardAttemptSample, MessageStore, NewForwardAttemptSample};
 
 impl MessageStore {
@@ -68,13 +71,20 @@ impl MessageStore {
             state,
             error,
             attempt_count,
-            next_attempt_at,
+            retry_after,
             lease_token,
             sample,
         } = completion;
-        let now = now_string();
         let mut conn = self.conn.lock().unwrap();
         let transaction = conn.transaction()?;
+        let now_time = OffsetDateTime::now_utc();
+        let format = &time::format_description::well_known::Rfc3339;
+        let now = now_time.format(format)?;
+        let next_attempt_at = retry_after
+            .map(|delay| -> Result<String> {
+                Ok((now_time + time::Duration::try_from(delay)?).format(format)?)
+            })
+            .transpose()?;
         insert_forward_attempt_on(&transaction, &sample, &now)?;
         prune_forward_attempts_on(&transaction, &sample.profile_key)?;
         let changed = transaction.execute(
