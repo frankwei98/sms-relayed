@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use inquire::{Confirm, Text};
-use time::OffsetDateTime;
 
 use crate::api::auth::SessionStore;
 use crate::api::ApiState;
@@ -39,9 +38,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
     let modem_service = ModemService::new();
 
     // Recover expired delivery leases
-    let lease_timeout =
-        OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?;
-    let recovered = store.recover_expired_leases(lease_timeout).await?;
+    let recovered = store.recover_expired_delivery_leases().await?;
     if recovered > 0 {
         log::info!("recovered {} expired delivery leases", recovered);
     }
@@ -63,7 +60,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
     );
 
     let delivery_worker = run_delivery_worker(
-        store.delivery_store(),
+        store.clone(),
         config.clone(),
         client.clone(),
         Arc::new(shell_runner),

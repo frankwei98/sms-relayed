@@ -1,5 +1,8 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use time::OffsetDateTime;
 
 use super::codecs::{now_string, row_to_delivery};
 use super::{DeliveryRow, DeliveryState, MessageStore};
@@ -40,15 +43,34 @@ impl MessageStore {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub fn set_delivery_retry_deadline(
+        &self,
+        message_id: i64,
+        next_attempt_at: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE forward_deliveries
+             SET state = 'retry_wait', next_attempt_at = ?1
+             WHERE message_id = ?2",
+            params![next_attempt_at, message_id],
+        )?;
+        Ok(())
+    }
+
     pub fn claim_due_deliveries(
         &self,
         batch_size: u32,
-        lease_until: &str,
+        lease_for: Duration,
     ) -> Result<Vec<DeliveryRow>> {
-        let now = now_string();
-        let lease_token = uuid::Uuid::new_v4().to_string();
         let mut conn = self.conn.lock().unwrap();
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let lease_token = uuid::Uuid::new_v4().to_string();
+        let now_time = OffsetDateTime::now_utc();
+        let format = &time::format_description::well_known::Rfc3339;
+        let now = now_time.format(format)?;
+        let lease_until = (now_time + time::Duration::try_from(lease_for)?).format(format)?;
         transaction.execute(
             "UPDATE forward_deliveries
              SET state = 'retry_wait', lease_at = NULL, lease_token = NULL,
@@ -112,11 +134,18 @@ impl MessageStore {
         state: DeliveryState,
         error: Option<&str>,
         attempt_count: i64,
-        next_attempt_at: Option<&str>,
+        retry_after: Option<Duration>,
         lease_token: &str,
     ) -> Result<bool> {
-        let now = now_string();
         let conn = self.conn.lock().unwrap();
+        let now_time = OffsetDateTime::now_utc();
+        let format = &time::format_description::well_known::Rfc3339;
+        let now = now_time.format(format)?;
+        let next_attempt_at = retry_after
+            .map(|delay| -> Result<String> {
+                Ok((now_time + time::Duration::try_from(delay)?).format(format)?)
+            })
+            .transpose()?;
         let changed = conn.execute(
             "UPDATE forward_deliveries
              SET state = ?1, last_error = ?2, attempt_count = ?3, next_attempt_at = ?4,
@@ -135,14 +164,14 @@ impl MessageStore {
         Ok(changed == 1)
     }
 
-    pub fn recover_expired_leases(&self, before: &str) -> Result<usize> {
-        let now = now_string();
+    pub fn recover_expired_leases(&self) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
+        let now = now_string();
         let count = conn.execute(
             "UPDATE forward_deliveries SET state = 'retry_wait', lease_at = NULL, lease_token = NULL, next_attempt_at = ?1, updated_at = ?1
              WHERE state = 'in_flight' AND lease_at IS NOT NULL
                AND julianday(lease_at) < julianday(?2)",
-            params![now, before],
+            params![now, now],
         )?;
         Ok(count)
     }
