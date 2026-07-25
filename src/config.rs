@@ -441,6 +441,8 @@ impl AppConfig {
         #[cfg(not(unix))]
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
+        #[cfg(unix)]
+        secure_config_parent(parent)?;
 
         let content = toml::to_string_pretty(self)?;
         let file_name = path
@@ -632,6 +634,27 @@ impl AppConfig {
     }
 }
 
+#[cfg(unix)]
+fn secure_config_parent(parent: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !should_secure_config_parent(parent) {
+        return Ok(());
+    }
+    let canonical = fs::canonicalize(parent)
+        .with_context(|| format!("failed to resolve config directory {}", parent.display()))?;
+    if !should_secure_config_parent(&canonical) {
+        return Ok(());
+    }
+    fs::set_permissions(&canonical, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("failed to secure config directory {}", canonical.display()))
+}
+
+#[cfg(unix)]
+fn should_secure_config_parent(parent: &Path) -> bool {
+    parent.is_absolute() && parent.file_name().is_some_and(|name| name == "sms-relayed")
+}
+
 fn require(section: &str, name: &str, field: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         bail!("{}.{}.{} is required", section, name, field);
@@ -648,9 +671,12 @@ mod tests {
     fn save_secure_atomically_writes_a_private_config() {
         use std::os::unix::fs::PermissionsExt;
 
-        let directory =
+        let test_root =
             std::env::temp_dir().join(format!("sms-relayed-config-test-{}", uuid::Uuid::new_v4()));
+        let directory = test_root.join("sms-relayed");
+        fs::create_dir(&test_root).unwrap();
         fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
         let path = directory.join("config.toml");
         let mut cfg = AppConfig::default();
         cfg.api.password = "private".to_string();
@@ -662,12 +688,30 @@ mod tests {
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        assert_eq!(
+            fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         let names = fs::read_dir(&directory)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect::<Vec<_>>();
         assert_eq!(names, vec![std::ffi::OsString::from("config.toml")]);
-        fs::remove_dir_all(directory).unwrap();
+        fs::remove_dir_all(test_root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_or_relative_config_parents_are_not_secured() {
+        assert!(!should_secure_config_parent(Path::new(".")));
+        assert!(!should_secure_config_parent(Path::new("/")));
+        assert!(!should_secure_config_parent(
+            &fs::canonicalize(std::env::temp_dir()).unwrap()
+        ));
+        assert!(!should_secure_config_parent(
+            &std::env::temp_dir().join("shared")
+        ));
+        assert!(should_secure_config_parent(Path::new("/etc/sms-relayed")));
     }
 
     #[test]
