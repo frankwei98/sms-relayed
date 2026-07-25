@@ -7,6 +7,7 @@ mod delivery;
 mod events;
 mod export;
 mod forward;
+mod inbound;
 mod message;
 mod messaging;
 mod modem;

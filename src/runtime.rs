@@ -8,11 +8,12 @@ use inquire::{Confirm, Text};
 use crate::api::auth::SessionStore;
 use crate::api::ApiState;
 use crate::config::AppConfig;
-use crate::dbus::{self, ReceivedSms};
+use crate::dbus;
 use crate::delivery::{DeliverySettings, DeliveryWakeup, DeliveryWorker};
 use crate::events::EventBus;
+use crate::inbound::{self, InboundSettings, InboundWorker};
 use crate::message::MessageSource;
-use crate::messaging::{Messaging, ReceiveMessage, SendMessage, SendOutcome};
+use crate::messaging::{Messaging, SendMessage, SendOutcome};
 use crate::modem::ModemService;
 use crate::persistence::Store;
 use crate::runner::{build_http_client, RealProcessRunner};
@@ -21,6 +22,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
     let config = AppConfig::load(config_path)?;
     config.validate()?;
     let delivery_settings = DeliverySettings::from_app_config(&config);
+    let inbound_settings = InboundSettings::from_app_config(&config);
 
     let store = Store::open(Path::new(&config.api.database_path)).await?;
     let events = EventBus::new();
@@ -44,20 +46,11 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
         log::info!("recovered {} expired delivery leases", recovered);
     }
 
-    let messaging_inbound = messaging.clone();
-    let config_inbound = config.clone();
-
-    let dbus_modem = modem_service.clone();
-    let dbus_future = dbus::monitor_dbus_with_handler(
-        &config.app.modem_path,
-        &config,
-        move |sms| {
-            let messaging = messaging_inbound.clone();
-            let cfg = config_inbound.clone();
-            async move { process_inbound_sms(&messaging, sms, &cfg).await }
-        },
-        &dbus_modem,
-        &store,
+    let inbound_worker = InboundWorker::new(
+        store.clone(),
+        messaging.clone(),
+        modem_service.clone(),
+        inbound_settings,
     );
 
     let delivery_worker = DeliveryWorker::new(
@@ -89,7 +82,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
                 log::warn!("API server exited: {:?}", result);
                 result
             }
-            result = dbus_future => result,
+            result = inbound_worker.run() => result,
             _ = delivery_worker.run() => {
                 Err(anyhow::anyhow!("delivery worker exited unexpectedly"))
             }
@@ -102,7 +95,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
         }
     } else {
         tokio::select! {
-            result = dbus_future => result,
+            result = inbound_worker.run() => result,
             _ = delivery_worker.run() => {
                 Err(anyhow::anyhow!("delivery worker exited unexpectedly"))
             }
@@ -114,25 +107,6 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
             }
         }
     }
-}
-
-/// Process a received modem SMS: deduplicate, persist, and emit MessageCreated
-/// only for first-time insertions.
-async fn process_inbound_sms(
-    messaging: &Messaging,
-    sms: ReceivedSms,
-    cfg: &AppConfig,
-) -> Result<()> {
-    let profile_keys: Vec<String> = cfg
-        .enabled_profiles()
-        .unwrap_or_default()
-        .iter()
-        .map(|p| p.key())
-        .collect();
-    messaging
-        .receive(ReceiveMessage { sms, profile_keys })
-        .await?;
-    Ok(())
 }
 
 async fn run_retention_worker(store: Store, config: AppConfig) {
@@ -186,9 +160,10 @@ pub async fn send_interactive(config_path: &Path) -> Result<()> {
     let sms_sender = Arc::new(dbus::SystemSmsSender::connect().await?);
     let store = Store::open(Path::new(&config.api.database_path)).await?;
     let modem_service = ModemService::new();
-    let verified_path = dbus::resolve_monitor_path(&config.app.modem_path, &modem_service, &store)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("no verified modem identity available"))?;
+    let verified_path =
+        inbound::resolve_monitor_path(&config.app.modem_path, &modem_service, &store)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no verified modem identity available"))?;
     modem_service.set_verified_path(Some(verified_path));
     let messaging = Messaging::new(store, EventBus::new(), DeliveryWakeup::new(), sms_sender)
         .with_verified_modem(modem_service);
