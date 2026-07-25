@@ -652,7 +652,7 @@ fn secure_config_parent(parent: &Path) -> Result<()> {
 
 #[cfg(unix)]
 fn should_secure_config_parent(parent: &Path) -> bool {
-    parent.is_absolute() && parent.file_name().is_some_and(|name| name == "sms-relayed")
+    parent == Path::new("/etc/sms-relayed")
 }
 
 fn require(section: &str, name: &str, field: &str, value: &str) -> Result<()> {
@@ -668,7 +668,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn save_secure_atomically_writes_a_private_config() {
+    fn save_secure_atomically_writes_a_private_file_without_chmodding_custom_parent() {
         use std::os::unix::fs::PermissionsExt;
 
         let test_root =
@@ -690,7 +690,7 @@ mod tests {
         );
         assert_eq!(
             fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
-            0o700
+            0o755
         );
         let names = fs::read_dir(&directory)
             .unwrap()
@@ -711,6 +711,9 @@ mod tests {
         assert!(!should_secure_config_parent(
             &std::env::temp_dir().join("shared")
         ));
+        assert!(!should_secure_config_parent(Path::new(
+            "/srv/team/sms-relayed"
+        )));
         assert!(should_secure_config_parent(Path::new("/etc/sms-relayed")));
     }
 
