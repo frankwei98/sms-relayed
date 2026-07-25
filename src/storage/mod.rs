@@ -1645,6 +1645,51 @@ mod tests {
     }
 
     #[test]
+    fn malformed_retry_deadline_is_due_without_blocking_valid_deliveries() {
+        let store = memory_store();
+        for body in ["malformed deadline", "valid deadline"] {
+            store
+                .insert_message_with_deliveries(
+                    NewMessage::inbound("+1", body),
+                    &["bark.primary".to_string()],
+                )
+                .unwrap();
+        }
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE forward_deliveries
+                 SET state = 'retry_wait', next_attempt_at = 'not-rfc3339'
+                 WHERE id = 1",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE forward_deliveries
+                 SET state = 'retry_wait', next_attempt_at = '2000-01-01T00:00:00Z'
+                 WHERE id = 2",
+                [],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            store.next_delivery_due_at().unwrap().as_deref(),
+            Some("2000-01-01T00:00:00Z")
+        );
+        let claimed = store
+            .claim_due_deliveries(2, Duration::from_secs(90))
+            .unwrap();
+        assert_eq!(
+            claimed
+                .iter()
+                .map(|delivery| delivery.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
     fn forwarding_attempt_is_retained_when_delivery_lease_is_lost() {
         let store = memory_store();
         let message = store
@@ -2072,6 +2117,37 @@ mod tests {
             DeliveryState::Succeeded
         );
         assert_eq!(store.get_message(message.id).unwrap().body, "lease");
+    }
+
+    #[test]
+    fn recovers_lease_at_the_exact_expiry_boundary() {
+        let store = memory_store();
+        store
+            .insert_message_with_deliveries(
+                NewMessage::inbound("+1", "lease boundary"),
+                &["bark.primary".to_string()],
+            )
+            .unwrap();
+        let delivery = store
+            .claim_due_deliveries(1, Duration::from_secs(90))
+            .unwrap()
+            .pop()
+            .unwrap();
+        let boundary = "2026-07-25T12:00:00Z";
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE forward_deliveries SET lease_at = ?1 WHERE id = ?2",
+                params![boundary, delivery.id],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(store.recover_expired_leases_at(boundary).unwrap(), 1);
+        let recovered = store.get_delivery(delivery.id).unwrap();
+        assert_eq!(recovered.state, DeliveryState::RetryWait);
+        assert!(recovered.lease_at.is_none());
+        assert!(recovered.lease_token.is_none());
     }
 
     #[test]

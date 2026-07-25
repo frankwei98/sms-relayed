@@ -84,6 +84,7 @@ impl MessageStore {
              FROM forward_deliveries
              WHERE state IN ('pending', 'retry_wait')
                AND (next_attempt_at IS NULL
+                    OR julianday(next_attempt_at) IS NULL
                     OR julianday(next_attempt_at) <= julianday(?1))
              ORDER BY julianday(COALESCE(next_attempt_at, created_at)) ASC, id ASC
              LIMIT ?2",
@@ -119,6 +120,7 @@ impl MessageStore {
             "SELECT COALESCE(next_attempt_at, created_at)
              FROM forward_deliveries
              WHERE state IN ('pending', 'retry_wait')
+               AND julianday(COALESCE(next_attempt_at, created_at)) IS NOT NULL
              ORDER BY julianday(COALESCE(next_attempt_at, created_at)) ASC, id ASC
              LIMIT 1",
             [],
@@ -158,12 +160,16 @@ impl MessageStore {
     }
 
     pub fn recover_expired_leases(&self) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
         let now = now_string();
+        self.recover_expired_leases_at(&now)
+    }
+
+    pub(super) fn recover_expired_leases_at(&self, now: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
         let count = conn.execute(
             "UPDATE forward_deliveries SET state = 'retry_wait', lease_at = NULL, lease_token = NULL, next_attempt_at = ?1, updated_at = ?1
              WHERE state = 'in_flight' AND lease_at IS NOT NULL
-               AND julianday(lease_at) < julianday(?2)",
+               AND julianday(lease_at) <= julianday(?2)",
             params![now, now],
         )?;
         Ok(count)

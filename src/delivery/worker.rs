@@ -53,7 +53,6 @@ struct WorkerTestProbe {
     idle_waits: AtomicUsize,
     idle_wait_changed: tokio::sync::Notify,
     backoffs: AtomicUsize,
-    backoff_changed: tokio::sync::Notify,
 }
 
 #[cfg(test)]
@@ -65,15 +64,10 @@ impl WorkerTestProbe {
 
     fn record_backoff(&self) {
         self.backoffs.fetch_add(1, Ordering::SeqCst);
-        self.backoff_changed.notify_waiters();
     }
 
     async fn wait_for_idle_waits(&self, expected: usize) {
         wait_for_probe_count(&self.idle_waits, &self.idle_wait_changed, expected).await;
-    }
-
-    async fn wait_for_backoffs(&self, expected: usize) {
-        wait_for_probe_count(&self.backoffs, &self.backoff_changed, expected).await;
     }
 }
 
@@ -344,6 +338,12 @@ async fn process_delivery_inner(
     dispatcher: &dyn Dispatcher,
     row: ClaimedDelivery,
 ) -> Result<()> {
+    if matches!(row.next_attempt_at, Some(DeliveryTime::Invalid)) {
+        error!("delivery {}: invalid retry deadline", row.id);
+        process_no_sample_path(store, row.claim.clone(), "invalid_retry_deadline").await?;
+        return Ok(());
+    }
+
     let retry_after = compute_retry_delay(row.id, row.attempt_count + 1);
     let retry_at = OffsetDateTime::now_utc() + time::Duration::try_from(retry_after)?;
 
@@ -883,6 +883,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_retry_deadline_is_failed_before_forwarding() {
+        let store = memory_store().await;
+        let message_id = insert_delivery(
+            &store,
+            "malformed deadline",
+            vec!["bark.primary".to_string()],
+        )
+        .await;
+        store
+            .sqlite()
+            .set_delivery_retry_deadline(message_id, "not-rfc3339")
+            .unwrap();
+        let row = store
+            .claim_deliveries(1, Duration::from_secs(90))
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let delivery_id = row.id;
+        let dispatcher = ScriptedDispatcher::new([ScriptedAction::Success]);
+
+        process_delivery_inner(&store, &dispatcher, row)
+            .await
+            .unwrap();
+
+        assert!(dispatcher.requests().is_empty());
+        assert_stored_delivery(
+            &store,
+            delivery_id,
+            crate::storage::DeliveryState::PermanentFailed,
+            1,
+            Some("invalid_retry_deadline"),
+            false,
+        );
+    }
+
+    #[tokio::test]
     async fn recovered_first_attempt_measures_dispatch_from_original_creation() {
         let store = memory_store().await;
         let mut row = setup_claimed_delivery(&store, "bark.primary", 0).await;
@@ -1086,30 +1123,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deadline_query_error_backs_off_before_resuming_work() {
+    async fn malformed_deadline_does_not_backoff_or_block_valid_delivery() {
         let store = memory_store().await;
-        let message_id = insert_delivery(&store, "backoff", vec!["bark.primary".to_string()]).await;
-        let claimed = store
-            .claim_deliveries(1, Duration::from_secs(90))
-            .await
-            .unwrap()
-            .pop()
-            .unwrap();
-        store
-            .complete_delivery(CompleteDelivery {
-                claim: claimed.claim,
-                disposition: DeliveryDisposition::RetryAt {
-                    error_code: "http_timeout".to_string(),
-                    at: OffsetDateTime::now_utc(),
-                },
-                attempt: None,
-            })
-            .await
-            .unwrap();
+        let message_id =
+            insert_delivery(&store, "malformed", vec!["bark.primary".to_string()]).await;
         store
             .sqlite()
             .set_delivery_retry_deadline(message_id, "not-rfc3339")
             .unwrap();
+        insert_delivery(&store, "valid", vec!["bark.primary".to_string()]).await;
         let dispatcher = Arc::new(ScriptedDispatcher::new([ScriptedAction::Success]));
         let probe = Arc::new(WorkerTestProbe::default());
         let worker = scripted_worker(store.clone(), 1, dispatcher.clone(), DeliveryWakeup::new())
@@ -1120,23 +1142,11 @@ mod tests {
             })
             .with_test_probe(probe.clone());
         let worker = tokio::spawn(worker.run());
-        tokio::time::timeout(Duration::from_secs(1), probe.wait_for_backoffs(1))
-            .await
-            .expect("invalid delivery deadline should enter worker backoff");
 
-        store
-            .sqlite()
-            .set_delivery_retry_deadline(message_id, "2000-01-01T00:00:00Z")
-            .unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), dispatcher.wait_for_calls(1))
-                .await
-                .is_err(),
-            "persistence error must delay the next queue drain"
-        );
         tokio::time::timeout(Duration::from_secs(1), dispatcher.wait_for_calls(1))
             .await
-            .expect("worker should resume after persistence backoff");
+            .expect("valid delivery should run after malformed deadline is recovered");
+        assert_eq!(probe.backoffs.load(std::sync::atomic::Ordering::SeqCst), 0);
         worker.abort();
         let _ = worker.await;
     }
