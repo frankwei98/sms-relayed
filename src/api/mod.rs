@@ -543,6 +543,33 @@ mod route_tests {
     }
 
     #[tokio::test]
+    async fn modem_status_route_exposes_own_number() {
+        let state = test_state();
+        let token = state.sessions.create_session();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/modem/status")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["modem"]["own_number"], "+6581234567");
+    }
+
+    #[tokio::test]
     async fn reset_rejects_missing_confirmation() {
         let state = test_state();
         let token = state.sessions.create_session();

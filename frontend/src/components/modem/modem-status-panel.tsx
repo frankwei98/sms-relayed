@@ -1,5 +1,7 @@
 import { Power, PowerOff, RefreshCw, RotateCcw } from "lucide-react";
+import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
+import { PhoneNumberCopy } from "#/components/phone-number-copy";
 import { Button } from "#/components/ui/button";
 import {
 	Dialog,
@@ -117,6 +119,15 @@ export function ModemStatusPanel() {
 						<Field label="Enabled" value={formatBool(status.modem.enabled)} />
 						<Field label="State" value={status.modem.state ?? "unknown"} />
 						<Field label="SIM" value={status.modem.sim_state ?? "unknown"} />
+						<Field
+							label="Phone number"
+							value={status.modem.own_number ?? "not reported"}
+							action={
+								status.modem.own_number ? (
+									<PhoneNumberCopy phoneNumber={status.modem.own_number} />
+								) : null
+							}
+						/>
 						<Field
 							label="Operator"
 							value={status.modem.operator_name ?? "unknown"}
@@ -245,11 +256,22 @@ function StatusBadge({ value }: { value: ModemStatus["health"]["status"] }) {
 	);
 }
 
-function Field({ label, value }: { label: string; value: string }) {
+function Field({
+	label,
+	value,
+	action,
+}: {
+	label: string;
+	value: string;
+	action?: ReactNode;
+}) {
 	return (
 		<div className="rounded border p-3">
 			<div className="text-xs text-muted-foreground">{label}</div>
-			<div className="mt-1 break-all text-sm font-medium">{value}</div>
+			<div className="mt-1 flex items-center justify-between gap-2">
+				<div className="break-all text-sm font-medium">{value}</div>
+				{action}
+			</div>
 		</div>
 	);
 }
