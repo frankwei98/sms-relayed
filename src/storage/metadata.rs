@@ -40,7 +40,7 @@ pub(super) fn backfill_dedupe_keys_on(conn: &Connection) -> Result<usize> {
             [],
             |row| row.get(0),
         )
-        .ok();
+        .optional()?;
     let Some(fingerprint) = fingerprint else {
         return Ok(0);
     };
@@ -56,12 +56,12 @@ pub(super) fn backfill_dedupe_keys_on(conn: &Connection) -> Result<usize> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
 
+    let mut exists_statement =
+        conn.prepare("SELECT COUNT(*) > 0 FROM messages WHERE inbound_dedupe_key = ?1")?;
     let mut count = 0;
     for (id, phone, body, timestamp) in &rows {
         let dedupe_key = compute_inbound_dedupe_key(&fingerprint, timestamp, phone, body);
-        let exists: bool = conn
-            .prepare("SELECT COUNT(*) > 0 FROM messages WHERE inbound_dedupe_key = ?1")?
-            .query_row(params![dedupe_key], |row| row.get(0))?;
+        let exists: bool = exists_statement.query_row(params![dedupe_key], |row| row.get(0))?;
         if !exists {
             conn.execute(
                 "UPDATE messages SET inbound_dedupe_key = ?1 WHERE id = ?2",
@@ -71,4 +71,32 @@ pub(super) fn backfill_dedupe_keys_on(conn: &Connection) -> Result<usize> {
         }
     }
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backfill_without_modem_fingerprint_is_a_no_op() {
+        let store = MessageStore::open_in_memory().unwrap();
+
+        assert_eq!(store.backfill_dedupe_keys().unwrap(), 0);
+    }
+
+    #[test]
+    fn backfill_propagates_modem_fingerprint_query_errors() {
+        let store = MessageStore::open_in_memory().unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute("DROP TABLE meta", []).unwrap();
+        }
+
+        let error = store.backfill_dedupe_keys().unwrap_err();
+
+        assert!(
+            error.to_string().contains("no such table: meta"),
+            "expected the fingerprint query error, got: {error:#}"
+        );
+    }
 }
