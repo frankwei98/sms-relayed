@@ -71,9 +71,12 @@ mod tests {
         )
         .await;
 
-        assert_eq!(
-            response.headers().get(header::CONTENT_TYPE).unwrap(),
-            "text/html"
-        );
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(content_type.split(';').next(), Some("text/html"));
     }
 }
