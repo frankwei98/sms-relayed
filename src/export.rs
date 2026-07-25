@@ -84,7 +84,7 @@ fn encode_csv_row(message: Message) -> anyhow::Result<Vec<u8>> {
 fn neutralize_spreadsheet_formula(field: &mut String) {
     if matches!(
         field.as_bytes().first(),
-        Some(b'=' | b'+' | b'-' | b'@' | b'\t' | b'\r')
+        Some(b'=' | b'+' | b'-' | b'@' | b'\t' | b'\r' | b'\n')
     ) {
         field.insert(0, '\'');
     }
@@ -122,7 +122,7 @@ mod tests {
             read_at: Some("\t=1+1".to_string()),
             error: Some("@SUM(A1:A2)".to_string()),
             created_at: "\r=1+1".to_string(),
-            updated_at: "2026-07-25T12:00:00Z".to_string(),
+            updated_at: "\n=1+1".to_string(),
         })
         .unwrap();
 
@@ -140,6 +140,6 @@ mod tests {
         assert_eq!(&record[7], "'\t=1+1");
         assert_eq!(&record[8], "'@SUM(A1:A2)");
         assert_eq!(&record[9], "'\r=1+1");
-        assert_eq!(&record[10], "2026-07-25T12:00:00Z");
+        assert_eq!(&record[10], "'\n=1+1");
     }
 }
