@@ -13,6 +13,10 @@ use super::{
     MM_SMS_INTERFACE,
 };
 
+const DBUS_METHOD_TIMEOUT: Duration = Duration::from_secs(15);
+const DBUS_SEND_TIMEOUT: Duration = Duration::from_secs(30);
+const DBUS_PROPERTIES_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedSms {
     pub modem_sms_path: String,
@@ -118,7 +122,7 @@ impl SmsSender for SystemSmsSender {
                 Err(error) => return SendAttemptOutcome::NotAttempted(error),
             };
             let outcome = send_prepared_sms(&connection, modem_sms_path).await;
-            if !matches!(outcome, SendAttemptOutcome::Accepted) {
+            if should_discard_send_connection(&outcome) {
                 self.connection.discard_if_current(&connection).await;
             }
             outcome
@@ -173,7 +177,7 @@ pub async fn create_sms(
         "Create",
         &create_args,
     );
-    let reply = tokio::time::timeout(Duration::from_secs(15), call)
+    let reply = tokio::time::timeout(DBUS_METHOD_TIMEOUT, call)
         .await
         .map_err(|_| anyhow::anyhow!("dbus Create timeout"))??;
 
@@ -194,10 +198,10 @@ pub async fn send_prepared_sms(
         "Send",
         &(),
     );
-    match tokio::time::timeout(Duration::from_secs(30), send_call).await {
+    match tokio::time::timeout(DBUS_SEND_TIMEOUT, send_call).await {
         Err(_) => SendAttemptOutcome::Unknown(anyhow::anyhow!("dbus Send timeout")),
         Ok(Ok(_)) => {
-            println!("短信已发送");
+            log::info!("outbound SMS accepted by modem; path={modem_sms_path}");
             SendAttemptOutcome::Accepted
         }
         Ok(Err(error)) if is_explicit_send_rejection(&error) => {
@@ -205,6 +209,10 @@ pub async fn send_prepared_sms(
         }
         Ok(Err(error)) => SendAttemptOutcome::Unknown(error.into()),
     }
+}
+
+fn should_discard_send_connection(outcome: &SendAttemptOutcome) -> bool {
+    matches!(outcome, SendAttemptOutcome::Unknown(_))
 }
 
 fn is_explicit_send_rejection(error: &zbus::Error) -> bool {
@@ -245,7 +253,7 @@ pub async fn get_sms_snapshot(
             "List",
             &(),
         );
-        let list_reply = tokio::time::timeout(Duration::from_secs(5), list_call)
+        let list_reply = tokio::time::timeout(DBUS_PROPERTIES_TIMEOUT, list_call)
             .await
             .map_err(|_| anyhow::anyhow!("dbus SMS list timeout"))??;
         let paths: Vec<zbus::zvariant::OwnedObjectPath> = list_reply.body().deserialize()?;
@@ -264,7 +272,7 @@ pub async fn get_sms_snapshot(
         "GetAll",
         &(MM_SMS_INTERFACE,),
     );
-    let reply = tokio::time::timeout(Duration::from_secs(5), call)
+    let reply = tokio::time::timeout(DBUS_PROPERTIES_TIMEOUT, call)
         .await
         .map_err(|_| anyhow::anyhow!("dbus SMS state timeout"))?;
     let reply = match reply {
@@ -349,6 +357,12 @@ mod tests {
         ));
         assert!(is_explicit_send_rejection_name(
             "org.freedesktop.DBus.Error.AccessDenied"
+        ));
+        assert!(should_discard_send_connection(
+            &SendAttemptOutcome::Unknown(anyhow::anyhow!("transport failed"))
+        ));
+        assert!(!should_discard_send_connection(
+            &SendAttemptOutcome::Rejected(anyhow::anyhow!("modem rejected"))
         ));
     }
 
