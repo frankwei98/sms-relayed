@@ -18,6 +18,9 @@ use super::{
     NewMessage,
 };
 
+const MESSAGE_COLUMNS: &str =
+    "id, direction, phone_number, body, timestamp, status, source, modem_sms_path, read_at, error, created_at, updated_at";
+
 fn operation_timestamps(after: Duration) -> Result<(String, String)> {
     let now = OffsetDateTime::now_utc();
     let deadline = now + time::Duration::try_from(after)?;
@@ -572,11 +575,12 @@ impl MessageStore {
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         if let Some(key) = dedupe_key {
-            if let Ok(existing) = transaction.query_row(
-                "SELECT * FROM messages WHERE inbound_dedupe_key = ?1",
-                params![key],
-                row_to_message,
-            ) {
+            let query =
+                format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE inbound_dedupe_key = ?1");
+            if let Some(existing) = transaction
+                .query_row(&query, params![key], row_to_message)
+                .optional()?
+            {
                 return Ok(InboundInsertResult::Duplicate(existing));
             }
         }
@@ -600,13 +604,10 @@ fn map_get(conn: &Connection, id: i64) -> Result<Message> {
 }
 
 fn map_find(conn: &Connection, id: i64) -> Result<Option<Message>> {
-    conn.query_row(
-        "SELECT * FROM messages WHERE id = ?1",
-        params![id],
-        row_to_message,
-    )
-    .optional()
-    .map_err(Into::into)
+    let query = format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE id = ?1");
+    conn.query_row(&query, params![id], row_to_message)
+        .optional()
+        .map_err(Into::into)
 }
 
 fn insert_message_on(conn: &Connection, input: NewMessage) -> Result<Message> {
@@ -663,7 +664,7 @@ pub(super) fn build_message_query(
     apply_limit: bool,
 ) -> Result<(String, Vec<Value>)> {
     let limit = filter.limit.unwrap_or(10).min(500);
-    let mut sql = "SELECT * FROM messages WHERE 1=1".to_string();
+    let mut sql = format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE 1=1");
     let mut values = Vec::new();
     match cursor {
         Some(ResolvedMessageCursor::Timeline { sort_key, id }) => {
@@ -738,4 +739,57 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::{MessageDirection, MessageSource};
+
+    #[test]
+    fn inbound_dedupe_propagates_existing_message_decode_errors() {
+        let store = MessageStore::open_in_memory().unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.pragma_update(None, "ignore_check_constraints", "ON")
+                .unwrap();
+            conn.execute("DROP TRIGGER messages_validate_domain_insert", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO messages (
+                    direction, phone_number, body, timestamp, status, source,
+                    created_at, updated_at, inbound_dedupe_key
+                 ) VALUES ('sideways', '+15550000000', 'existing', '2026-01-01T00:00:00Z',
+                           'received', 'modem', '2026-01-01T00:00:00Z',
+                           '2026-01-01T00:00:00Z', 'dedupe-key')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let error = store
+            .insert_inbound_message_with_deliveries(
+                NewMessage {
+                    direction: MessageDirection::Inbound,
+                    phone_number: "+15550000000".to_string(),
+                    body: "replayed".to_string(),
+                    timestamp: "2026-01-01T00:00:00Z".to_string(),
+                    status: MessageStatus::Received,
+                    source: MessageSource::Modem,
+                    modem_sms_path: None,
+                    read_at: None,
+                    error: None,
+                    inbound_dedupe_key: Some("dedupe-key".to_string()),
+                },
+                &[],
+            )
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("unknown message direction: sideways"),
+            "expected the existing row decode error, got: {error:#}"
+        );
+    }
 }
