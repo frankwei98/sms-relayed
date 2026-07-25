@@ -20,20 +20,29 @@ export function PhoneNumberCopy({ phoneNumber }: { phoneNumber: string }) {
 	);
 
 	return (
-		<Button
-			type="button"
-			size="sm"
-			variant="ghost"
-			aria-label="Copy phone number"
-			onClick={copy}
-		>
-			{result === "copied" ? <Check /> : <Copy />}
-			{result === "copied"
-				? "Copied"
-				: result === "failed"
-					? "Copy failed"
-					: "Copy"}
-		</Button>
+		<>
+			<Button
+				type="button"
+				size="sm"
+				variant="ghost"
+				aria-label="Copy phone number"
+				onClick={copy}
+			>
+				{result === "copied" ? <Check /> : <Copy />}
+				{result === "copied"
+					? "Copied"
+					: result === "failed"
+						? "Copy failed"
+						: "Copy"}
+			</Button>
+			<output className="sr-only" aria-live="polite">
+				{result === "copied"
+					? "Phone number copied"
+					: result === "failed"
+						? "Phone number copy failed"
+						: ""}
+			</output>
+		</>
 	);
 }
 

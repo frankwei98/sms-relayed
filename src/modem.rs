@@ -297,9 +297,18 @@ pub fn parse_modem_text(
                 "SIM" => status.modem.sim_state = Some(value.trim().to_string()),
                 _ => status.modem.state = Some(value.trim().to_string()),
             }
-        } else if let Some(value) = right.strip_prefix("own:") {
+        } else if let Some(value) = right
+            .split_once(':')
+            .and_then(|(label, value)| (label.trim() == "own").then_some(value))
+        {
             status.modem.own_number = split_csv(value)
                 .into_iter()
+                .map(|value| {
+                    value
+                        .trim_matches(|character| matches!(character, '\'' | '"'))
+                        .trim()
+                        .to_string()
+                })
                 .find(|value| is_reported_value(value));
         } else if let Some(value) = right.strip_prefix("operator name:") {
             status.modem.operator_name = Some(value.trim().to_string());
@@ -1311,7 +1320,7 @@ mod tests {
 
     #[test]
     fn exposes_first_own_number_from_text_fallback() {
-        let raw = format!("  General | path: {PATH}\n  Numbers | own:  +6581234567, +6587654321\n");
+        let raw = format!("  General | path: {PATH}\n  Numbers  |           own : '+6581234567'\n");
 
         let status = parse_modem_text(PATH, Some("0".to_string()), &raw).unwrap();
 
