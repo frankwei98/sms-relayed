@@ -5,11 +5,18 @@ import { Button } from "#/components/ui/button";
 export function PhoneNumberCopy({ phoneNumber }: { phoneNumber: string }) {
 	const [result, setResult] = useState<"idle" | "copied" | "failed">("idle");
 	const resetTimer = useRef<number | undefined>(undefined);
+	const latestRequest = useRef(0);
 
 	async function copy() {
-		setResult((await copyText(phoneNumber)) ? "copied" : "failed");
+		const request = ++latestRequest.current;
+		const nextResult = (await copyText(phoneNumber)) ? "copied" : "failed";
+		if (request !== latestRequest.current) return;
+
+		setResult(nextResult);
 		window.clearTimeout(resetTimer.current);
-		resetTimer.current = window.setTimeout(() => setResult("idle"), 2000);
+		resetTimer.current = window.setTimeout(() => {
+			if (request === latestRequest.current) setResult("idle");
+		}, 2000);
 	}
 
 	useEffect(
