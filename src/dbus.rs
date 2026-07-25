@@ -3,18 +3,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use futures_util::StreamExt;
 use log::{error, info, warn};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use zbus::zvariant::{OwnedValue, Value};
-use zbus::Connection;
 
 use crate::config::AppConfig;
 use crate::modem::ModemService;
 use crate::persistence::Store;
 
 mod connection;
+mod inbound;
 mod outbound;
+
+#[allow(unused_imports)]
+pub(crate) use inbound::{
+    InboundEvent, InboundSms, InboundSmsProperties, InboundSubscription, SystemInboundSource,
+};
 
 // Preserve the existing `crate::dbus` facade, including raw helpers with no in-crate caller.
 #[allow(unused_imports)]
@@ -81,7 +85,6 @@ const DBUS_INTERFACE: &str = "org.freedesktop.DBus";
 const OBJECT_MANAGER_INTERFACE: &str = "org.freedesktop.DBus.ObjectManager";
 const MM_DESTINATION: &str = "org.freedesktop.ModemManager1";
 
-const DBUS_METHOD_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_INBOUND_TASKS: usize = 16;
 
 fn extract_string(props: &HashMap<String, OwnedValue>, key: &str) -> String {
@@ -174,32 +177,8 @@ where
     F: Fn(ReceivedSms) -> Fut + Send + Clone + 'static,
     Fut: std::future::Future<Output = Result<()>> + Send + 'static,
 {
-    let connection = Connection::system().await?;
-
-    let match_rule = format!(
-        "type='signal',path='{}',interface='{}'",
-        actual_path, MM_MESSAGING_INTERFACE
-    );
-    let add_args = (&match_rule,);
-    let call = connection.call_method(
-        Some("org.freedesktop.DBus"),
-        "/org/freedesktop/DBus",
-        Some("org.freedesktop.DBus"),
-        "AddMatch",
-        &add_args,
-    );
-    tokio::time::timeout(DBUS_METHOD_TIMEOUT, call).await??;
-
-    let owner_rule = format!(
-        "type='signal',interface='{}',member='NameOwnerChanged',arg0='{}'",
-        DBUS_INTERFACE, MM_DESTINATION
-    );
-    add_match_rule(&connection, &owner_rule).await?;
-    let removed_rule = format!(
-        "type='signal',interface='{}',member='InterfacesRemoved'",
-        OBJECT_MANAGER_INTERFACE
-    );
-    add_match_rule(&connection, &removed_rule).await?;
+    let source = SystemInboundSource::new();
+    let mut subscription = source.subscribe(actual_path).await?;
 
     info!("SMS monitor ready on {}", actual_path);
 
@@ -210,74 +189,24 @@ where
         .map(|s| StorageType::from_config(s))
         .collect();
 
-    let mut stream = zbus::MessageStream::from(connection.clone());
-    while let Some(msg) = stream.next().await {
-        let msg = msg?;
-        let header = msg.header();
-
-        let interface = header
-            .interface()
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-        let member = header.member().map(|s| s.to_string()).unwrap_or_default();
-
-        if interface == DBUS_INTERFACE && member == "NameOwnerChanged" {
-            if let Ok((name, old_owner, new_owner)) =
-                msg.body().deserialize::<(String, String, String)>()
-            {
-                if modem_owner_changed(&name, &old_owner, &new_owner) {
-                    return Err(anyhow::anyhow!("ModemManager owner changed"));
-                }
-            }
-        }
-
-        if interface == OBJECT_MANAGER_INTERFACE && member == "InterfacesRemoved" {
-            if let Ok((removed_path, _interfaces)) = msg
-                .body()
-                .deserialize::<(zbus::zvariant::ObjectPath, Vec<String>)>()
-            {
-                if removed_path.as_str() == actual_path {
-                    return Err(anyhow::anyhow!("monitored modem object removed"));
-                }
-            }
-        }
-
-        if interface == MM_MESSAGING_INTERFACE && member.as_str() == "Added" {
-            if let Ok(body) = msg
-                .body()
-                .deserialize::<(zbus::zvariant::ObjectPath, bool)>()
-            {
-                let sms_path = body.0.to_string();
-                let is_received = body.1;
-                if is_received {
-                    info!("SmsPath:\n{}", sms_path);
-                    let permit = inbound_limit
-                        .clone()
-                        .acquire_owned()
-                        .await
-                        .map_err(|_| anyhow::anyhow!("inbound task limiter closed"))?;
-                    let task_connection = connection.clone();
-                    let task_storage_filters = ignored_storage.clone();
-                    let task_handler = on_received.clone();
-                    spawn_inbound_task(permit, async move {
-                        handle_incoming_sms(
-                            &task_connection,
-                            &sms_path,
-                            &task_storage_filters,
-                            task_handler,
-                        )
-                        .await
-                    });
-                }
-            }
-        }
+    loop {
+        let InboundEvent::Added(sms) = subscription.next().await?;
+        info!("SmsPath:\n{}", sms.path());
+        let permit = inbound_limit
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow::anyhow!("inbound task limiter closed"))?;
+        let task_storage_filters = ignored_storage.clone();
+        let task_handler = on_received.clone();
+        spawn_inbound_task(permit, async move {
+            handle_incoming_sms(sms, &task_storage_filters, task_handler).await
+        });
     }
-    Err(anyhow::anyhow!("ModemManager signal stream ended"))
 }
 
 async fn handle_incoming_sms<F, Fut>(
-    connection: &Connection,
-    sms_path: &str,
+    sms: InboundSms,
     storage_filters: &[StorageType],
     on_received: F,
 ) -> Result<()>
@@ -287,34 +216,19 @@ where
 {
     let mut retries = 0;
     loop {
-        let call = connection.call_method(
-            Some(MM_DESTINATION),
-            sms_path,
-            Some(DBUS_PROPERTIES_INTERFACE),
-            "GetAll",
-            &(MM_SMS_INTERFACE,),
-        );
-        let reply = tokio::time::timeout(Duration::from_secs(5), call)
-            .await
-            .map_err(|_| anyhow::anyhow!("dbus getAll timeout"))??;
+        let properties = sms.properties().await?;
 
-        let props: HashMap<String, OwnedValue> = reply.body().deserialize()?;
-        let telnum = extract_string(&props, "Number");
-        let smscontent = extract_string(&props, "Text");
-        let smsdate = extract_string(&props, "Timestamp");
-        let storage = extract_u32(&props, "Storage");
-
-        if should_ignore_storage(storage, storage_filters) {
+        if should_ignore_storage(properties.storage, storage_filters) {
             warn!("已过滤不转发");
             return Ok(());
         }
 
-        if !smscontent.is_empty() {
+        if !properties.body.is_empty() {
             let received = ReceivedSms {
-                phone_number: telnum,
-                body: smscontent,
-                timestamp: smsdate,
-                modem_sms_path: sms_path.to_string(),
+                phone_number: properties.phone_number,
+                body: properties.body,
+                timestamp: properties.timestamp,
+                modem_sms_path: sms.path().to_string(),
             };
             let mut delay = Duration::from_millis(100);
             loop {
@@ -355,23 +269,6 @@ fn spawn_inbound_task(
             crate::monitoring::capture_failure("dbus", "dbus.inbound_processing_failed");
         }
     })
-}
-
-async fn add_match_rule(connection: &Connection, rule: &str) -> Result<()> {
-    let args = (rule,);
-    let call = connection.call_method(
-        Some("org.freedesktop.DBus"),
-        "/org/freedesktop/DBus",
-        Some("org.freedesktop.DBus"),
-        "AddMatch",
-        &args,
-    );
-    tokio::time::timeout(DBUS_METHOD_TIMEOUT, call).await??;
-    Ok(())
-}
-
-fn modem_owner_changed(name: &str, old_owner: &str, new_owner: &str) -> bool {
-    name == MM_DESTINATION && old_owner != new_owner
 }
 
 pub async fn monitor_dbus_with_handler<F, Fut>(
@@ -496,13 +393,6 @@ mod tests {
                 })
             })
         }
-    }
-
-    #[test]
-    fn owner_change_requires_reconnect_only_for_modem_manager() {
-        assert!(modem_owner_changed(MM_DESTINATION, ":1.1", ":1.2"));
-        assert!(!modem_owner_changed(MM_DESTINATION, ":1.1", ":1.1"));
-        assert!(!modem_owner_changed("org.example.Other", ":1.1", ":1.2"));
     }
 
     #[tokio::test]
