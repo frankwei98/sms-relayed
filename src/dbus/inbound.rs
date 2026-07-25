@@ -1,11 +1,9 @@
 use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use futures_util::StreamExt;
+use futures_util::{future::BoxFuture, StreamExt};
 use zbus::names::OwnedUniqueName;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 use zbus::{Connection, Message, MessageStream};
@@ -17,8 +15,6 @@ use super::{
 
 const DBUS_METHOD_TIMEOUT: Duration = Duration::from_secs(10);
 const DBUS_PROPERTIES_TIMEOUT: Duration = Duration::from_secs(5);
-
-type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InboundSmsProperties {
