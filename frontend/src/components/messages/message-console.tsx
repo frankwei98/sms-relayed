@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { PhoneNumberCopy } from "#/components/phone-number-copy";
 import { Badge } from "#/components/ui/badge";
 import { Button } from "#/components/ui/button";
 import { Checkbox } from "#/components/ui/checkbox";
@@ -50,6 +51,7 @@ import {
 import { Textarea } from "#/components/ui/textarea";
 import { apiFetch, type ConversationSummary, type Message } from "#/lib/api";
 import { subscribeEvents } from "#/lib/events";
+import { fetchModemStatus } from "#/lib/modem-api";
 import { cn } from "#/lib/utils";
 
 dayjs.extend(relativeTime);
@@ -116,6 +118,7 @@ export function MessageConsole() {
 	const [sending, setSending] = useState(false);
 	const [hasOlderMessages, setHasOlderMessages] = useState(false);
 	const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
+	const [ownNumber, setOwnNumber] = useState<string | null>(null);
 	const markingReadPhonesRef = useRef<Set<string>>(new Set());
 	const loadedMessageCountRef = useRef(0);
 	const messageWindowGenerationRef = useRef(0);
@@ -294,6 +297,12 @@ export function MessageConsole() {
 	useEffect(() => {
 		loadConversations();
 	}, [loadConversations]);
+
+	useEffect(() => {
+		fetchModemStatus()
+			.then((status) => setOwnNumber(status.modem.own_number))
+			.catch(() => {});
+	}, []);
 
 	useEffect(() => {
 		loadMessages();
@@ -537,6 +546,7 @@ export function MessageConsole() {
 					)}
 				>
 					<ConversationListHeader
+						ownNumber={ownNumber}
 						query={q}
 						onQueryChange={setQ}
 						onNewMessage={startNewMessage}
@@ -596,11 +606,13 @@ export function MessageConsole() {
 }
 
 function ConversationListHeader({
+	ownNumber,
 	query,
 	onQueryChange,
 	onNewMessage,
 	filters,
 }: {
+	ownNumber: string | null;
 	query: string;
 	onQueryChange: (value: string) => void;
 	onNewMessage: () => void;
@@ -616,6 +628,12 @@ function ConversationListHeader({
 					<h2 className="font-heading text-2xl font-semibold tracking-normal">
 						Messages
 					</h2>
+					{ownNumber ? (
+						<div className="flex items-center gap-1 text-sm text-muted-foreground">
+							<span>SIM {ownNumber}</span>
+							<PhoneNumberCopy phoneNumber={ownNumber} />
+						</div>
+					) : null}
 				</div>
 				<div className="flex items-center gap-2">
 					{filters}

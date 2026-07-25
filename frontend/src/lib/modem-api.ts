@@ -23,6 +23,7 @@ export type ModemStatus = {
 		enabled: boolean | null;
 		state: string | null;
 		sim_state: string | null;
+		own_number: string | null;
 		operator_name: string | null;
 		signal_quality: number | null;
 		access_technologies: string[];

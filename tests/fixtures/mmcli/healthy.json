@@ -4,6 +4,7 @@
       "dbus-path": "/org/freedesktop/ModemManager1/Modem/0",
       "state": "registered",
       "power-state": "on",
+      "own-numbers": ["+6581234567"],
       "access-technologies": ["lte"],
       "signal-quality": { "value": 78, "recent": true }
     },

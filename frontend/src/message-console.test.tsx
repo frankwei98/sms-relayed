@@ -47,6 +47,49 @@ afterEach(() => {
 	mocks.handlers = {};
 });
 
+describe("MessageConsole SIM phone number", () => {
+	test("shows the reported number with a copy action", async () => {
+		mocks.apiFetch.mockImplementation((input: string) => {
+			if (input === "/api/modem/status") {
+				return Promise.resolve({
+					modem: { own_number: "+6581234567" },
+				});
+			}
+			if (input === "/api/conversations") return Promise.resolve([]);
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+
+		expect(await screen.findByText("SIM +6581234567")).toBeTruthy();
+		expect(
+			screen.getByRole("button", { name: "Copy phone number" }),
+		).toBeTruthy();
+		expect(
+			mocks.apiFetch.mock.calls.filter(
+				([input]) => input === "/api/modem/status",
+			),
+		).toHaveLength(1);
+	});
+
+	test("keeps messages usable when modem status cannot be read", async () => {
+		mocks.apiFetch.mockImplementation((input: string) => {
+			if (input === "/api/modem/status") {
+				return Promise.reject(new Error("modem unavailable"));
+			}
+			if (input === "/api/conversations") return Promise.resolve([]);
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+
+		expect(await screen.findByText("No conversations")).toBeTruthy();
+		expect(
+			screen.queryByRole("button", { name: "Copy phone number" }),
+		).toBeNull();
+	});
+});
+
 describe("MessageConsole refresh fallback", () => {
 	test("periodically reloads conversations when SSE events are missed", async () => {
 		vi.useFakeTimers();

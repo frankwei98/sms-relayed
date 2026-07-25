@@ -45,6 +45,7 @@ pub struct ModemDetails {
     pub enabled: Option<bool>,
     pub state: Option<String>,
     pub sim_state: Option<String>,
+    pub own_number: Option<String>,
     pub operator_name: Option<String>,
     pub signal_quality: Option<u8>,
     pub access_technologies: Vec<String>,
@@ -125,6 +126,7 @@ fn base_status(configured_path: &str, id: Option<String>) -> ModemStatus {
             enabled: None,
             state: None,
             sim_state: None,
+            own_number: None,
             operator_name: None,
             signal_quality: None,
             access_technologies: Vec::new(),
@@ -164,6 +166,9 @@ pub fn parse_modem_json(
         .as_deref()
         .map(|s| !matches!(s, "disabled" | "failed" | "locked" | "unavailable"));
     status.modem.sim_state = get_str(modem, &["sim", "state"]);
+    status.modem.own_number = modem
+        .pointer("/generic/own-numbers")
+        .and_then(first_non_empty_string);
     status.modem.operator_name = get_str(modem, &["3gpp", "operator-name"]);
     status.modem.signal_quality = modem
         .pointer("/generic/signal-quality/value")
@@ -292,6 +297,10 @@ pub fn parse_modem_text(
                 "SIM" => status.modem.sim_state = Some(value.trim().to_string()),
                 _ => status.modem.state = Some(value.trim().to_string()),
             }
+        } else if let Some(value) = right.strip_prefix("own:") {
+            status.modem.own_number = split_csv(value)
+                .into_iter()
+                .find(|value| is_reported_value(value));
         } else if let Some(value) = right.strip_prefix("operator name:") {
             status.modem.operator_name = Some(value.trim().to_string());
         } else if let Some(value) = right.strip_prefix("supported storages:") {
@@ -421,6 +430,21 @@ fn json_u8(value: &Value) -> Option<u8> {
         .as_str()
         .and_then(|s| s.parse::<u64>().ok())
         .and_then(|n| u8::try_from(n.min(100)).ok())
+}
+
+fn first_non_empty_string(value: &Value) -> Option<String> {
+    value.as_array()?.iter().find_map(|item| {
+        let value = item.as_str()?.trim();
+        is_reported_value(value).then(|| value.to_string())
+    })
+}
+
+fn is_reported_value(value: &str) -> bool {
+    !value.is_empty()
+        && !matches!(
+            value.to_ascii_lowercase().as_str(),
+            "--" | "unknown" | "none"
+        )
 }
 
 fn storage_values(value: &Value) -> Vec<String> {
@@ -1190,6 +1214,52 @@ mod tests {
     }
 
     #[test]
+    fn exposes_first_non_empty_own_number_from_json() {
+        let raw = r#"{
+          "modem": {
+            "generic": {
+              "dbus-path": "/org/freedesktop/ModemManager1/Modem/0",
+              "state": "registered",
+              "own-numbers": ["  ", " +6581234567 ", "+6587654321"]
+            },
+            "sim": {
+              "state": "ready"
+            },
+            "messaging": {
+              "supported-storages": ["sm"]
+            }
+          }
+        }"#;
+
+        let status = parse_modem_json(PATH, Some("0".to_string()), raw).unwrap();
+
+        assert_eq!(status.modem.own_number.as_deref(), Some("+6581234567"));
+    }
+
+    #[test]
+    fn skips_unreported_own_number_values_from_json() {
+        let raw = r#"{
+          "modem": {
+            "generic": {
+              "dbus-path": "/org/freedesktop/ModemManager1/Modem/0",
+              "state": "registered",
+              "own-numbers": ["--", "unknown", "none", " +6581234567 "]
+            },
+            "sim": {
+              "state": "ready"
+            },
+            "messaging": {
+              "supported-storages": ["sm"]
+            }
+          }
+        }"#;
+
+        let status = parse_modem_json(PATH, Some("0".to_string()), raw).unwrap();
+
+        assert_eq!(status.modem.own_number.as_deref(), Some("+6581234567"));
+    }
+
+    #[test]
     fn classifies_sim_missing_as_degraded() {
         let raw = include_str!("../tests/fixtures/mmcli/sim-missing.json");
         let status = parse_modem_json(PATH, Some("0".to_string()), raw).unwrap();
@@ -1237,6 +1307,15 @@ mod tests {
             .health
             .reasons
             .contains(&"text_fallback_limited".to_string()));
+    }
+
+    #[test]
+    fn exposes_first_own_number_from_text_fallback() {
+        let raw = format!("  General | path: {PATH}\n  Numbers | own:  +6581234567, +6587654321\n");
+
+        let status = parse_modem_text(PATH, Some("0".to_string()), &raw).unwrap();
+
+        assert_eq!(status.modem.own_number.as_deref(), Some("+6581234567"));
     }
 
     #[test]
