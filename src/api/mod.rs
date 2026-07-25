@@ -184,7 +184,7 @@ pub fn router(state: ApiState) -> Router {
 pub async fn serve(state: ApiState) -> anyhow::Result<()> {
     let bind = state.config.api.bind.as_str();
     let port = state.config.api.port;
-    let addr = listener_address(bind, port);
+    let addr = primary_listener_address(bind, port, state.config.api.enable_ipv6);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     let app = router(state.clone());
     log::info!("web api listening on {}", addr);
@@ -221,6 +221,14 @@ fn listener_address(bind: &str, port: u16) -> String {
         format!("[{}]:{}", bind.trim_matches(['[', ']']), port)
     } else {
         format!("{bind}:{port}")
+    }
+}
+
+fn primary_listener_address(bind: &str, port: u16, enable_ipv6: bool) -> String {
+    if enable_ipv6 && bind.eq_ignore_ascii_case("localhost") {
+        listener_address("127.0.0.1", port)
+    } else {
+        listener_address(bind, port)
     }
 }
 
@@ -298,7 +306,7 @@ impl From<rusqlite::Error> for ApiError {
 mod tests {
     use super::auth::SessionStore;
     use super::config::{check_config_payload, CheckConfigPayload};
-    use super::{ipv6_companion_address, listener_address};
+    use super::{ipv6_companion_address, listener_address, primary_listener_address};
     use crate::config::AppConfig;
 
     #[test]
@@ -306,6 +314,26 @@ mod tests {
         assert_eq!(listener_address("::", 8080), "[::]:8080");
         assert_eq!(listener_address("[::1]", 8080), "[::1]:8080");
         assert_eq!(listener_address("0.0.0.0", 8080), "0.0.0.0:8080");
+    }
+
+    #[test]
+    fn localhost_with_ipv6_enabled_uses_an_ipv4_primary_listener() {
+        assert_eq!(
+            primary_listener_address("localhost", 8080, true),
+            "127.0.0.1:8080"
+        );
+        assert_eq!(
+            primary_listener_address("LOCALHOST", 8080, true),
+            "127.0.0.1:8080"
+        );
+        assert_eq!(
+            primary_listener_address("localhost", 8080, false),
+            "localhost:8080"
+        );
+        assert_eq!(
+            primary_listener_address("0.0.0.0", 8080, true),
+            "0.0.0.0:8080"
+        );
     }
 
     #[test]
