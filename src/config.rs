@@ -652,7 +652,9 @@ fn secure_config_parent(parent: &Path) -> Result<()> {
 
 #[cfg(unix)]
 fn should_secure_config_parent(parent: &Path) -> bool {
-    parent == Path::new("/etc/sms-relayed")
+    Path::new(crate::cli::DEFAULT_CONFIG_PATH)
+        .parent()
+        .is_some_and(|default_parent| parent == default_parent)
 }
 
 fn require(section: &str, name: &str, field: &str, value: &str) -> Result<()> {
