@@ -20,13 +20,12 @@ impl MessageStore {
     #[allow(dead_code)]
     pub fn run_retention(&self, max_age_days: u64, batch_size: u32) -> Result<usize> {
         let cutoff = (OffsetDateTime::now_utc() - time::Duration::days(max_age_days as i64))
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap_or_default();
+            .format(&time::format_description::well_known::Rfc3339)?;
         let mut conn = self.conn.lock().unwrap();
         let transaction = conn.transaction()?;
         let mut statement = transaction.prepare(
             "SELECT m.id FROM messages m
-             WHERE julianday(m.timestamp) < julianday(?1)
+             WHERE COALESCE(julianday(m.timestamp), julianday(m.created_at)) < julianday(?1)
                AND m.status IN ('received', 'sent', 'failed')
                AND NOT EXISTS (
                    SELECT 1 FROM forward_deliveries d
@@ -55,5 +54,43 @@ impl MessageStore {
         )?;
         transaction.commit()?;
         Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::NewMessage;
+
+    #[test]
+    fn retention_uses_created_at_for_malformed_timestamps_and_preserves_active_deliveries() {
+        let store = MessageStore::open_in_memory().unwrap();
+
+        let mut deletable = NewMessage::inbound("+15550000001", "deletable");
+        deletable.timestamp = "not-a-timestamp".to_string();
+        let deletable = store.insert_message(deletable).unwrap();
+
+        let mut protected = NewMessage::inbound("+15550000002", "protected");
+        protected.timestamp = "also-not-a-timestamp".to_string();
+        let protected = store.insert_message(protected).unwrap();
+        store
+            .insert_deliveries(protected.id, &["bark.primary".to_string()])
+            .unwrap();
+
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE messages
+                 SET created_at = '2020-01-01T00:00:00Z',
+                     updated_at = '2020-01-01T00:00:00Z'
+                 WHERE id IN (?1, ?2)",
+                params![deletable.id, protected.id],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(store.run_retention(1, 100).unwrap(), 1);
+        assert!(store.get_message_optional(deletable.id).unwrap().is_none());
+        assert!(store.get_message_optional(protected.id).unwrap().is_some());
     }
 }
