@@ -9,7 +9,7 @@ use crate::api::auth::SessionStore;
 use crate::api::ApiState;
 use crate::config::AppConfig;
 use crate::dbus::{self, ReceivedSms};
-use crate::delivery::{run_delivery_worker, DeliveryWakeup};
+use crate::delivery::{DeliverySettings, DeliveryWakeup, DeliveryWorker};
 use crate::events::EventBus;
 use crate::message::MessageSource;
 use crate::messaging::{Messaging, ReceiveMessage, SendMessage, SendOutcome};
@@ -20,6 +20,7 @@ use crate::runner::{build_http_client, RealProcessRunner};
 pub async fn run_forwarding(config_path: &Path) -> Result<()> {
     let config = AppConfig::load(config_path)?;
     config.validate()?;
+    let delivery_settings = DeliverySettings::from_app_config(&config);
 
     let store = Store::open(Path::new(&config.api.database_path)).await?;
     let events = EventBus::new();
@@ -35,7 +36,6 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
     .with_verified_modem(modem_service.clone());
 
     let client = Arc::new(build_http_client(&config.http));
-    let shell_timeout = Duration::from_secs(config.http.shell_timeout_secs);
     let shell_runner = RealProcessRunner;
 
     // Recover expired delivery leases
@@ -60,14 +60,14 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
         &store,
     );
 
-    let delivery_worker = run_delivery_worker(
+    let delivery_worker = DeliveryWorker::new(
         store.clone(),
+        delivery_settings,
         config.clone(),
         client.clone(),
         Arc::new(shell_runner),
-        shell_timeout,
         delivery_wakeup.clone(),
-    );
+    )?;
     let retention_worker = run_retention_worker(store.clone(), config.clone());
     let outbound_worker = messaging.run_outbound_worker();
 
@@ -90,7 +90,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
                 result
             }
             result = dbus_future => result,
-            _ = delivery_worker => {
+            _ = delivery_worker.run() => {
                 Err(anyhow::anyhow!("delivery worker exited unexpectedly"))
             }
             _ = retention_worker => {
@@ -103,7 +103,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
     } else {
         tokio::select! {
             result = dbus_future => result,
-            _ = delivery_worker => {
+            _ = delivery_worker.run() => {
                 Err(anyhow::anyhow!("delivery worker exited unexpectedly"))
             }
             _ = retention_worker => {
