@@ -38,6 +38,7 @@ describe("PhoneNumberCopy", () => {
 			expect(writeText).toHaveBeenCalledWith("+6581234567");
 		});
 		expect(await screen.findByText("Copied")).toBeTruthy();
+		expect(screen.getByRole("status").textContent).toBe("Phone number copied");
 	});
 
 	test("falls back to document copy when the Clipboard API is unavailable", async () => {
@@ -88,5 +89,8 @@ describe("PhoneNumberCopy", () => {
 		fireEvent.click(screen.getByRole("button", { name: "Copy phone number" }));
 
 		expect(await screen.findByText("Copy failed")).toBeTruthy();
+		expect(screen.getByRole("status").textContent).toBe(
+			"Phone number copy failed",
+		);
 	});
 });
