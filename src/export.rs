@@ -62,7 +62,7 @@ fn encode_json_row(message: Message, first: &mut bool) -> anyhow::Result<Vec<u8>
 }
 
 fn encode_csv_row(message: Message) -> anyhow::Result<Vec<u8>> {
-    csv_record_bytes(&[
+    let mut fields = [
         message.id.to_string(),
         enum_json(&message.direction)?,
         message.phone_number,
@@ -74,7 +74,20 @@ fn encode_csv_row(message: Message) -> anyhow::Result<Vec<u8>> {
         message.error.unwrap_or_default(),
         message.created_at,
         message.updated_at,
-    ])
+    ];
+    for field in &mut fields {
+        neutralize_spreadsheet_formula(field);
+    }
+    csv_record_bytes(&fields)
+}
+
+fn neutralize_spreadsheet_formula(field: &mut String) {
+    if matches!(
+        field.as_bytes().first(),
+        Some(b'=' | b'+' | b'-' | b'@' | b'\t' | b'\r')
+    ) {
+        field.insert(0, '\'');
+    }
 }
 
 fn csv_record_bytes<S: AsRef<str>>(fields: &[S]) -> anyhow::Result<Vec<u8>> {
@@ -88,4 +101,45 @@ fn csv_record_bytes<S: AsRef<str>>(fields: &[S]) -> anyhow::Result<Vec<u8>> {
 fn enum_json<T: serde::Serialize>(value: &T) -> anyhow::Result<String> {
     let encoded = serde_json::to_string(value)?;
     Ok(encoded.trim_matches('"').to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::{MessageDirection, MessageSource, MessageStatus};
+
+    #[test]
+    fn csv_export_neutralizes_spreadsheet_formula_prefixes() {
+        let row = encode_csv_row(Message {
+            id: 42,
+            direction: MessageDirection::Inbound,
+            phone_number: "=1+1".to_string(),
+            body: "+SUM(A1:A2)".to_string(),
+            timestamp: "-1+1".to_string(),
+            status: MessageStatus::Received,
+            source: MessageSource::Modem,
+            modem_sms_path: None,
+            read_at: Some("\t=1+1".to_string()),
+            error: Some("@SUM(A1:A2)".to_string()),
+            created_at: "\r=1+1".to_string(),
+            updated_at: "2026-07-25T12:00:00Z".to_string(),
+        })
+        .unwrap();
+
+        let record = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .from_reader(row.as_slice())
+            .records()
+            .next()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(&record[2], "'=1+1");
+        assert_eq!(&record[3], "'+SUM(A1:A2)");
+        assert_eq!(&record[4], "'-1+1");
+        assert_eq!(&record[7], "'\t=1+1");
+        assert_eq!(&record[8], "'@SUM(A1:A2)");
+        assert_eq!(&record[9], "'\r=1+1");
+        assert_eq!(&record[10], "2026-07-25T12:00:00Z");
+    }
 }
