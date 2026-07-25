@@ -2,9 +2,10 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::dbus::{ModemSmsState, ReceivedSms, SendAttemptOutcome, SmsSender, SmsSnapshot};
+use crate::dbus::{ModemSmsState, SendAttemptOutcome, SmsSender, SmsSnapshot};
 use crate::delivery::DeliveryWakeup;
 use crate::events::{AppEvent, EventBus};
+use crate::inbound::ReceivedSms;
 use crate::message::{ConversationSummary, Message, MessageFilter, MessageSource, MessageStatus};
 use crate::persistence::{
     CreateOutboundOutcome, InboundMessage, InboundOutcome, OutboundClaim, OutboundPhase,
@@ -1757,7 +1758,7 @@ mod tests {
         let wakeup = DeliveryWakeup::new();
         let messaging = Messaging::new(store.clone(), events, wakeup.clone(), test_sms_sender());
         let request = ReceiveMessage {
-            sms: crate::dbus::ReceivedSms {
+            sms: crate::inbound::ReceivedSms {
                 phone_number: "+15550000000".to_string(),
                 body: "one inbound message".to_string(),
                 timestamp: "2026-07-24T00:00:00Z".to_string(),
@@ -1810,7 +1811,7 @@ mod tests {
 
         messaging
             .receive(ReceiveMessage {
-                sms: crate::dbus::ReceivedSms {
+                sms: crate::inbound::ReceivedSms {
                     phone_number: "+15550000000".to_string(),
                     body: "store only".to_string(),
                     timestamp: "2026-07-24T00:01:00Z".to_string(),
@@ -1842,7 +1843,7 @@ mod tests {
 
         let result = messaging
             .receive(ReceiveMessage {
-                sms: crate::dbus::ReceivedSms {
+                sms: crate::inbound::ReceivedSms {
                     phone_number: "+15550000000".to_string(),
                     body: "wait for enrollment".to_string(),
                     timestamp: "2026-07-24T00:02:00Z".to_string(),
