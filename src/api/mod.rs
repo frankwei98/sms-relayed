@@ -418,7 +418,6 @@ mod tests {
 mod route_tests {
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -464,12 +463,40 @@ mod route_tests {
 
     #[derive(Clone, Default)]
     struct RecordingServiceRestarter {
-        calls: Arc<AtomicUsize>,
+        completed: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+    }
+
+    impl RecordingServiceRestarter {
+        fn with_completion_signal() -> (Self, tokio::sync::mpsc::UnboundedReceiver<()>) {
+            let (completed, receiver) = tokio::sync::mpsc::unbounded_channel();
+            (
+                Self {
+                    completed: Some(completed),
+                },
+                receiver,
+            )
+        }
     }
 
     impl service::ServiceRestarter for RecordingServiceRestarter {
         fn restart(&self) {
-            self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(completed) = &self.completed {
+                let _ = completed.send(());
+            }
+        }
+    }
+
+    async fn expect_restart_completed(restarts: &mut tokio::sync::mpsc::UnboundedReceiver<()>) {
+        tokio::time::timeout(Duration::from_secs(2), restarts.recv())
+            .await
+            .expect("restart should complete")
+            .expect("restart completion channel should remain open");
+    }
+
+    async fn expect_no_restart(restarts: &mut tokio::sync::mpsc::UnboundedReceiver<()>) {
+        match tokio::time::timeout(Duration::from_millis(750), restarts.recv()).await {
+            Ok(Some(())) => panic!("restart should not have been scheduled"),
+            Ok(None) | Err(_) => {}
         }
     }
 
@@ -557,12 +584,39 @@ mod route_tests {
     }
 
     #[tokio::test]
+    async fn service_control_coalesces_pending_restarts_and_accepts_another_after_completion() {
+        let mut state = test_state();
+        let (restarter, mut restarts) = RecordingServiceRestarter::with_completion_signal();
+        state.service_control = service::ServiceControl::new(restarter);
+
+        assert!(service::schedule_restart(&state));
+        assert!(!service::schedule_restart(&state));
+
+        expect_restart_completed(&mut restarts).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), restarts.recv())
+                .await
+                .is_err(),
+            "a duplicate restart was not coalesced"
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !service::schedule_restart(&state) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("restart scheduling should become available after completion");
+        expect_restart_completed(&mut restarts).await;
+    }
+
+    #[tokio::test]
     async fn changing_the_api_password_schedules_restart_and_invalidates_sessions() {
         let mut state = test_state();
         let (config_path, base_revision) = write_config_file(&state.config, "password-change");
         state.config_path = config_path.clone();
-        let restarter = RecordingServiceRestarter::default();
-        state.service_control = service::ServiceControl::new(restarter.clone());
+        let (restarter, mut restarts) = RecordingServiceRestarter::with_completion_signal();
+        state.service_control = service::ServiceControl::new(restarter);
         let token = state.sessions.create_session().await.unwrap();
         let sessions = state.sessions.clone();
         let mut updated_config = (*state.config).clone();
@@ -596,8 +650,7 @@ mod route_tests {
         assert_eq!(body["restart_scheduled"], true);
         assert_eq!(body["session_invalidated"], true);
         assert!(!sessions.is_valid(&token).await.unwrap());
-        tokio::time::sleep(Duration::from_millis(600)).await;
-        assert_eq!(restarter.calls.load(Ordering::SeqCst), 1);
+        expect_restart_completed(&mut restarts).await;
 
         let _ = std::fs::remove_file(config_path);
     }
@@ -608,8 +661,8 @@ mod route_tests {
         let (config_path, base_revision) =
             write_config_file(&state.config, "password-parent-sync-failure");
         state.config_path = config_path.clone();
-        let restarter = RecordingServiceRestarter::default();
-        state.service_control = service::ServiceControl::new(restarter.clone());
+        let (restarter, mut restarts) = RecordingServiceRestarter::with_completion_signal();
+        state.service_control = service::ServiceControl::new(restarter);
         let token = state.sessions.create_session().await.unwrap();
         let sessions = state.sessions.clone();
         let mut updated_config = (*state.config).clone();
@@ -640,8 +693,7 @@ mod route_tests {
             std::fs::read_to_string(&config_path).unwrap(),
             candidate_toml
         );
-        tokio::time::sleep(Duration::from_millis(600)).await;
-        assert_eq!(restarter.calls.load(Ordering::SeqCst), 1);
+        expect_restart_completed(&mut restarts).await;
 
         let _ = std::fs::remove_file(config_path);
     }
@@ -653,8 +705,8 @@ mod route_tests {
             write_config_file(&state.config, "password-invalidation-failure");
         state.config_path = config_path.clone();
         let original = std::fs::read_to_string(&config_path).unwrap();
-        let restarter = RecordingServiceRestarter::default();
-        state.service_control = service::ServiceControl::new(restarter.clone());
+        let (restarter, mut restarts) = RecordingServiceRestarter::with_completion_signal();
+        state.service_control = service::ServiceControl::new(restarter);
         let token = state.sessions.create_session().await.unwrap();
         state.sessions.fail_next_invalidate_all();
         let mut updated_config = (*state.config).clone();
@@ -683,8 +735,7 @@ mod route_tests {
         assert_eq!(saved, original);
         assert_eq!(crate::config::config_revision(&saved), base_revision);
         assert!(config_temporary_files(&config_path).is_empty());
-        tokio::time::sleep(Duration::from_millis(600)).await;
-        assert_eq!(restarter.calls.load(Ordering::SeqCst), 0);
+        expect_no_restart(&mut restarts).await;
 
         let _ = std::fs::remove_file(config_path);
     }
@@ -696,8 +747,8 @@ mod route_tests {
             write_config_file(&state.config, "password-prepare-failure");
         state.config_path = config_path.clone();
         let original = std::fs::read_to_string(&config_path).unwrap();
-        let restarter = RecordingServiceRestarter::default();
-        state.service_control = service::ServiceControl::new(restarter.clone());
+        let (restarter, mut restarts) = RecordingServiceRestarter::with_completion_signal();
+        state.service_control = service::ServiceControl::new(restarter);
         let token = state.sessions.create_session().await.unwrap();
         let sessions = state.sessions.clone();
         crate::config::fail_next_prepare_config_write_for(&config_path);
@@ -728,8 +779,58 @@ mod route_tests {
         assert_eq!(saved, original);
         assert_eq!(crate::config::config_revision(&saved), base_revision);
         assert!(config_temporary_files(&config_path).is_empty());
-        tokio::time::sleep(Duration::from_millis(600)).await;
-        assert_eq!(restarter.calls.load(Ordering::SeqCst), 0);
+        expect_no_restart(&mut restarts).await;
+
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
+    async fn password_change_commit_failure_invalidates_sessions_and_returns_internal_error() {
+        let mut state = test_state();
+        let (config_path, base_revision) =
+            write_config_file(&state.config, "password-commit-failure");
+        state.config_path = config_path.clone();
+        let original = std::fs::read_to_string(&config_path).unwrap();
+        let (restarter, mut restarts) = RecordingServiceRestarter::with_completion_signal();
+        state.service_control = service::ServiceControl::new(restarter);
+        let token = state.sessions.create_session().await.unwrap();
+        let sessions = state.sessions.clone();
+        crate::config::fail_next_config_commit_for(&config_path);
+        let mut updated_config = (*state.config).clone();
+        updated_config.api.password = "new-password".to_string();
+        let candidate_revision =
+            crate::config::config_revision(&updated_config.canonical_toml().unwrap());
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/config?restart_after_save=true")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .header("content-type", "application/json")
+                    .header("if-match", base_revision.clone())
+                    .header("x-config-candidate-revision", candidate_revision)
+                    .body(Body::from(serde_json::to_vec(&updated_config).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["error"]["code"], "internal_error");
+        assert!(!sessions.is_valid(&token).await.unwrap());
+        let saved = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(saved, original);
+        assert_eq!(crate::config::config_revision(&saved), base_revision);
+        assert!(config_temporary_files(&config_path).is_empty());
+        expect_no_restart(&mut restarts).await;
 
         let _ = std::fs::remove_file(config_path);
     }

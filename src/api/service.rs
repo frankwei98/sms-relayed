@@ -1,4 +1,5 @@
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,23 +29,36 @@ pub trait ServiceRestarter: Send + Sync {
 #[derive(Clone)]
 pub struct ServiceControl {
     restarter: Arc<dyn ServiceRestarter>,
+    restart_pending: Arc<AtomicBool>,
 }
 
 impl ServiceControl {
     pub fn new(restarter: impl ServiceRestarter + 'static) -> Self {
         Self {
             restarter: Arc::new(restarter),
+            restart_pending: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    fn schedule(&self) {
+    fn schedule(&self) -> bool {
+        if self
+            .restart_pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+
         let restarter = self.restarter.clone();
+        let restart_pending = self.restart_pending.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(500)).await;
             if let Err(error) = tokio::task::spawn_blocking(move || restarter.restart()).await {
                 log::warn!("service restart task failed: {}", error);
             }
+            restart_pending.store(false, Ordering::Release);
         });
+        true
     }
 }
 
@@ -86,9 +100,12 @@ pub fn routes() -> Router<ApiState> {
         .route("/api/service/restart", post(restart))
 }
 
-pub fn schedule_restart(state: &ApiState) {
-    state.events.send(AppEvent::ServiceRestartScheduled);
-    state.service_control.schedule();
+pub fn schedule_restart(state: &ApiState) -> bool {
+    let scheduled = state.service_control.schedule();
+    if scheduled {
+        state.events.send(AppEvent::ServiceRestartScheduled);
+    }
+    scheduled
 }
 
 async fn status(State(state): State<ApiState>) -> ApiResult<Json<StatusResponse>> {

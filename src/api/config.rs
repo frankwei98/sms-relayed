@@ -213,8 +213,8 @@ async fn save_config(
         }
         tokio::task::spawn_blocking(move || prepared.commit())
             .await
-            .map_err(|error| ApiError::internal(error.to_string()))?
-            .map_err(|error| ApiError::internal(error.to_string()))?;
+            .map_err(|error| config_commit_error(error, password_changed))?
+            .map_err(|error| config_commit_error(error, password_changed))?;
     }
 
     let restart_scheduled = options.restart_after_save;
@@ -236,6 +236,15 @@ async fn save_config(
         Some(requires_restart),
     )?;
     Ok(response)
+}
+
+fn config_commit_error(error: impl std::fmt::Display, sessions_invalidated: bool) -> ApiError {
+    if sessions_invalidated {
+        log::error!(
+            "configuration commit failed after sessions were invalidated for an API password change; authentication state may require operator attention"
+        );
+    }
+    ApiError::internal(error.to_string())
 }
 
 fn load_config_document_sync(path: &Path) -> anyhow::Result<ConfigDocument> {

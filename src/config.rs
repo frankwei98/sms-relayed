@@ -436,6 +436,10 @@ pub(crate) struct PreparedConfigWrite {
 
 impl PreparedConfigWrite {
     pub(crate) fn commit(mut self) -> Result<()> {
+        #[cfg(test)]
+        if should_fail_config_commit(&self.destination) {
+            bail!("injected config commit failure");
+        }
         let temporary = self
             .temporary
             .as_ref()
@@ -472,12 +476,20 @@ static PREPARE_CONFIG_WRITE_FAILURE_PATH: std::sync::Mutex<Option<PathBuf>> =
     std::sync::Mutex::new(None);
 
 #[cfg(test)]
+static CONFIG_COMMIT_FAILURE_PATH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
 static CONFIG_PARENT_SYNC_FAILURE_PATH: std::sync::Mutex<Option<PathBuf>> =
     std::sync::Mutex::new(None);
 
 #[cfg(test)]
 pub(crate) fn fail_next_prepare_config_write_for(path: &Path) {
     *PREPARE_CONFIG_WRITE_FAILURE_PATH.lock().unwrap() = Some(path.to_path_buf());
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_config_commit_for(path: &Path) {
+    *CONFIG_COMMIT_FAILURE_PATH.lock().unwrap() = Some(path.to_path_buf());
 }
 
 #[cfg(test)]
@@ -488,6 +500,17 @@ pub(crate) fn fail_next_config_parent_sync_for(path: &Path) {
 #[cfg(test)]
 fn should_fail_prepare_config_write(path: &Path) -> bool {
     let mut failure_path = PREPARE_CONFIG_WRITE_FAILURE_PATH.lock().unwrap();
+    if failure_path.as_deref() == Some(path) {
+        failure_path.take();
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
+fn should_fail_config_commit(path: &Path) -> bool {
+    let mut failure_path = CONFIG_COMMIT_FAILURE_PATH.lock().unwrap();
     if failure_path.as_deref() == Some(path) {
         failure_path.take();
         true
