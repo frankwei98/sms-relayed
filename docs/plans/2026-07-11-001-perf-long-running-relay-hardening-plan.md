@@ -240,7 +240,7 @@ sequenceDiagram
 
 - **Goal:** Ensure HTTP, shell, D-Bus method, and `mmcli` work cannot wait forever or leave processes behind.
 - **Requirements:** R3, R6, and containment groundwork for R2.
-- **Files:** `src/forward/mod.rs`, `src/forward/bark.rs`, `src/forward/dingtalk.rs`, `src/forward/telegram.rs`, `src/forward/wecom.rs`, `src/forward/shell.rs`, `src/modem.rs`, `src/dbus.rs`, `src/config.rs`, `README.md`.
+- **Files:** `src/forward/mod.rs`, `src/forward/bark.rs`, `src/forward/dingtalk.rs`, `src/forward/lark.rs`, `src/forward/telegram.rs`, `src/forward/wecom.rs`, `src/forward/shell.rs`, `src/modem.rs`, `src/dbus.rs`, `src/config.rs`, `README.md`.
 - **Patterns:** Reuse Tokio timeouts, `reqwest::ClientBuilder`, the existing typed config/default/validation conventions, and the `MmcliRunner` abstraction.
 - **Approach:** Construct one shared HTTP client with connect and request deadlines; add validated defaults without breaking existing config files. Ensure shell and `mmcli` children are killed and reaped on timeout. Apply finite zbus method deadlines or explicit timeout wrappers at the method-call boundary, while allowing the long-lived signal stream itself to wait normally.
 - **Test scenarios:**
