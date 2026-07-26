@@ -11,6 +11,7 @@ import {
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ConfigEditor } from "#/components/config/config-editor";
+import { ConfigSectionEditor } from "#/components/config/config-section-editors";
 import type { ConfigSection } from "#/components/config/config-sections";
 import { AuthContext } from "#/lib/auth";
 import type { AppConfig } from "#/lib/config-model";
@@ -200,6 +201,46 @@ function EditorHarness({
 	);
 }
 
+function ResettableFieldsHarness() {
+	const [config, setConfig] = useState(() => structuredClone(baseConfig));
+
+	function updatePath(path: string, value: unknown) {
+		setConfig((current) => {
+			const next = structuredClone(current);
+			const keys = path.split(".");
+			let target = next as unknown as Record<string, unknown>;
+			for (const key of keys.slice(0, -1)) {
+				target = target[key] as Record<string, unknown>;
+			}
+			target[keys.at(-1) as string] = value;
+			return next;
+		});
+	}
+
+	return (
+		<>
+			<button
+				type="button"
+				onClick={() => setConfig(structuredClone(baseConfig))}
+			>
+				Reset
+			</button>
+			<ConfigSectionEditor
+				section="sms"
+				config={config}
+				onConfigChange={setConfig}
+				onPathChange={updatePath}
+			/>
+			<ConfigSectionEditor
+				section="forwarding"
+				config={config}
+				onConfigChange={setConfig}
+				onPathChange={updatePath}
+			/>
+		</>
+	);
+}
+
 beforeEach(() => {
 	routerMocks.navigate.mockReset();
 	routerMocks.shouldBlockFn.mockReset();
@@ -275,6 +316,23 @@ describe("ConfigEditor workspace", () => {
 			(JSON.parse(checkRequest?.init?.body as string) as AppConfig).delivery
 				.concurrency,
 		).toBe(4);
+	});
+
+	test("reset refreshes mounted array and number input text", () => {
+		render(<ResettableFieldsHarness />);
+
+		const keywords = screen.getByLabelText("Code keywords") as HTMLInputElement;
+		const concurrency = screen.getByLabelText(
+			"Concurrent deliveries",
+		) as HTMLInputElement;
+		fireEvent.change(keywords, { target: { value: "code, otp" } });
+		fireEvent.change(concurrency, { target: { value: "4" } });
+		expect(keywords.value).toBe("code, otp");
+		expect(concurrency.value).toBe("4");
+
+		fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+		expect(keywords.value).toBe("code");
+		expect(concurrency.value).toBe("2");
 	});
 
 	test("preserves one draft across categories and submits the complete candidate", async () => {
