@@ -1,9 +1,45 @@
 use anyhow::Result;
+use pbkdf2::pbkdf2_hmac;
 use rusqlite::{params, OptionalExtension};
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
+use uuid::Uuid;
 
 use super::MessageStore;
 
+const PASSWORD_HASH_ROUNDS: u32 = 100_000;
+
 impl MessageStore {
+    pub fn synchronize_auth_password(&self, password: &str) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let existing: Option<(Vec<u8>, Vec<u8>)> = tx
+            .query_row(
+                "SELECT salt, verifier FROM auth_credential_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let password_matches = existing.as_ref().is_some_and(|(salt, verifier)| {
+            let candidate = password_verifier(password, salt);
+            candidate.as_slice().ct_eq(verifier.as_slice()).into()
+        });
+        if !password_matches {
+            let salt = Uuid::new_v4().into_bytes();
+            let verifier = password_verifier(password, &salt);
+            tx.execute(
+                "INSERT INTO auth_credential_state (singleton, salt, verifier)
+                 VALUES (1, ?1, ?2)
+                 ON CONFLICT(singleton) DO UPDATE
+                 SET salt = excluded.salt, verifier = excluded.verifier",
+                params![salt.as_slice(), verifier.as_slice()],
+            )?;
+            tx.execute("DELETE FROM auth_sessions", [])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn create_auth_session(
         &self,
         token_hash: &[u8],
@@ -91,4 +127,15 @@ impl MessageStore {
             conn.query_row("SELECT COUNT(*) FROM auth_sessions", [], |row| row.get(0))?;
         Ok(count as usize)
     }
+}
+
+fn password_verifier(password: &str, salt: &[u8]) -> [u8; 32] {
+    let mut verifier = [0_u8; 32];
+    pbkdf2_hmac::<Sha256>(
+        password.as_bytes(),
+        salt,
+        PASSWORD_HASH_ROUNDS,
+        &mut verifier,
+    );
+    verifier
 }

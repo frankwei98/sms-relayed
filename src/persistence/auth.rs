@@ -3,6 +3,11 @@ use anyhow::Result;
 use super::Store;
 
 impl Store {
+    pub async fn synchronize_auth_password(&self, password: String) -> Result<()> {
+        self.run(move |sqlite| sqlite.synchronize_auth_password(&password))
+            .await
+    }
+
     pub async fn create_auth_session(
         &self,
         token_hash: Vec<u8>,
