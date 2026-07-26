@@ -1204,6 +1204,12 @@ function outcomePresentation(outcome: ForwardAttemptOutcome): {
 				inlineClassName: "text-red-700 dark:text-red-300",
 			};
 	}
+	return {
+		label: "Unknown outcome",
+		Icon: CircleDashed,
+		badgeClassName: "bg-muted/50 text-muted-foreground",
+		inlineClassName: "text-muted-foreground",
+	};
 }
 
 function attemptKey(sample: ForwardAttemptSample, index: number) {

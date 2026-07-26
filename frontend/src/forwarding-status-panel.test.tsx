@@ -58,6 +58,11 @@ const legacySample = {
 	dispatch_delay_ms: undefined,
 };
 
+const unknownOutcomeSample = {
+	...successSample,
+	outcome: "future_outcome" as ForwardAttemptSample["outcome"],
+};
+
 type TestSample = Omit<ForwardAttemptSample, "dispatch_delay_ms"> & {
 	dispatch_delay_ms?: number | null;
 };
@@ -321,6 +326,23 @@ describe("ForwardingStatusPanel", () => {
 				screen.getAllByText("Dispatch — · Request 950ms").length,
 			).toBeGreaterThan(0);
 		});
+	});
+
+	test("renders a neutral fallback when a newer response has an unknown outcome", async () => {
+		mocks.apiFetch.mockResolvedValue(
+			forwardingResponse([
+				configuredProfile("future.profile", {
+					samples: [unknownOutcomeSample],
+				}),
+			]),
+		);
+
+		render(<ControlledPanel initialProfile="future.profile" />);
+
+		await waitFor(() => {
+			expect(screen.getAllByText("Unknown outcome").length).toBeGreaterThan(0);
+		});
+		expect(document.body.textContent).toContain("Latest: Unknown outcome");
 	});
 
 	test("renders zero metrics and the empty snapshot state when there are no profiles", async () => {
