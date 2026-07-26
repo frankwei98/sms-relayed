@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -8,15 +10,19 @@ use crate::storage::ForwardAttemptOutcome;
 
 use super::{ApiResult, ApiState};
 
+const SAMPLE_LIMIT: u32 = 5;
+
 #[derive(Serialize)]
 struct ForwardingResponse {
     generated_at: String,
+    sample_limit: u32,
     profiles: Vec<ProfileStatus>,
 }
 
 #[derive(Serialize)]
 struct ProfileStatus {
     profile_key: String,
+    configured: bool,
     enabled: bool,
     samples: Vec<SampleView>,
 }
@@ -38,35 +44,41 @@ pub fn routes() -> Router<ApiState> {
 }
 
 async fn forwarding_attempts(State(state): State<ApiState>) -> ApiResult<Json<ForwardingResponse>> {
-    let config_profiles = state.config.enabled_profiles()?;
+    let configured_keys = state.config.configured_profile_keys();
+    let configured: HashSet<&str> = configured_keys.iter().map(String::as_str).collect();
+    let enabled: HashSet<&str> = state
+        .config
+        .forward
+        .enabled
+        .iter()
+        .map(String::as_str)
+        .collect();
 
-    let mut profiles: Vec<ProfileStatus> = Vec::new();
-    let mut seen_keys = std::collections::HashSet::new();
+    let mut profiles = Vec::new();
+    let mut seen_keys = HashSet::new();
 
-    for profile in &config_profiles {
-        let key = profile.key();
-        seen_keys.insert(key.clone());
-        let samples = load_samples(&state, &key).await?;
-        profiles.push(ProfileStatus {
-            profile_key: key,
-            enabled: true,
-            samples,
-        });
+    for key in &state.config.forward.enabled {
+        if configured.contains(key.as_str()) && seen_keys.insert(key.clone()) {
+            profiles.push(profile_status(&state, key.clone(), true, true).await?);
+        }
     }
 
-    let all_keys = state
+    for key in configured_keys {
+        if seen_keys.insert(key.clone()) {
+            profiles.push(
+                profile_status(&state, key.clone(), true, enabled.contains(key.as_str())).await?,
+            );
+        }
+    }
+
+    let stored_keys = state
         .store
         .forwarding_profiles()
         .await
         .map_err(|error| super::ApiError::internal(error.to_string()))?;
-    for key in all_keys {
+    for key in stored_keys {
         if seen_keys.insert(key.clone()) {
-            let samples = load_samples(&state, &key).await?;
-            profiles.push(ProfileStatus {
-                profile_key: key,
-                enabled: false,
-                samples,
-            });
+            profiles.push(profile_status(&state, key, false, false).await?);
         }
     }
 
@@ -76,15 +88,31 @@ async fn forwarding_attempts(State(state): State<ApiState>) -> ApiResult<Json<Fo
 
     Ok(Json(ForwardingResponse {
         generated_at,
+        sample_limit: SAMPLE_LIMIT,
         profiles,
     }))
+}
+
+async fn profile_status(
+    state: &ApiState,
+    profile_key: String,
+    configured: bool,
+    enabled: bool,
+) -> ApiResult<ProfileStatus> {
+    let samples = load_samples(state, &profile_key).await?;
+    Ok(ProfileStatus {
+        profile_key,
+        configured,
+        enabled,
+        samples,
+    })
 }
 
 async fn load_samples(state: &ApiState, profile_key: &str) -> ApiResult<Vec<SampleView>> {
     let profile_key = profile_key.to_string();
     let samples = state
         .store
-        .forwarding_attempts(profile_key, 5)
+        .forwarding_attempts(profile_key, SAMPLE_LIMIT)
         .await
         .map_err(|error| super::ApiError::internal(error.to_string()))?;
     Ok(samples

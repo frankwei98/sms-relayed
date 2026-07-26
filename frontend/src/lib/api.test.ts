@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { apiFetch } from "./api";
+import { ApiRequestError, apiFetch, apiRequest } from "./api";
 
 const mocks = vi.hoisted(() => ({ captureFailure: vi.fn() }));
 
@@ -76,6 +76,46 @@ describe("apiFetch monitoring", () => {
 		);
 		expect(mocks.captureFailure).toHaveBeenCalledWith("api.request_failed", {
 			status: "network_error",
+		});
+	});
+
+	it("preserves status and backend error code", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn().mockResolvedValue(
+				new Response(
+					JSON.stringify({
+						error: { code: "config_changed", message: "reload first" },
+					}),
+					{ status: 412, headers: { "Content-Type": "application/json" } },
+				),
+			),
+		);
+
+		const error = await apiFetch("/api/config").catch((caught) => caught);
+		expect(error).toBeInstanceOf(ApiRequestError);
+		expect((error as ApiRequestError).status).toBe(412);
+		expect((error as ApiRequestError).code).toBe("config_changed");
+	});
+
+	it("returns response metadata and merges caller headers", async () => {
+		const fetchMock = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ value: 1 }), {
+				status: 200,
+				headers: { ETag: '"revision"' },
+			}),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const result = await apiRequest<{ value: number }>("/api/config", {
+			headers: { "If-Match": "base" },
+		});
+
+		expect(result.data).toEqual({ value: 1 });
+		expect(result.response.headers.get("etag")).toBe('"revision"');
+		expect(fetchMock.mock.calls[0][1].headers).toEqual({
+			"Content-Type": "application/json",
+			"If-Match": "base",
 		});
 	});
 });

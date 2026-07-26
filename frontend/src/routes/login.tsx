@@ -5,12 +5,20 @@ import { Input } from "#/components/ui/input";
 import { type AuthState, apiFetch } from "#/lib/api";
 import { useAuth } from "#/lib/auth";
 
+type LoginSearch = {
+	notice?: string;
+};
+
 export const Route = createFileRoute("/login")({
+	validateSearch: (search: Record<string, unknown>): LoginSearch => ({
+		notice: typeof search.notice === "string" ? search.notice : undefined,
+	}),
 	component: LoginPage,
 });
 
 function LoginPage() {
 	const navigate = useNavigate();
+	const { notice } = Route.useSearch();
 	const { setAuth } = useAuth();
 	const [password, setPassword] = useState("");
 	const [error, setError] = useState("");
@@ -33,13 +41,18 @@ function LoginPage() {
 	}
 
 	return (
-		<div className="flex min-h-screen items-center justify-center">
+		<div className="flex min-h-dvh items-center justify-center p-4">
 			<form
 				onSubmit={handleSubmit}
 				className="mx-auto w-full max-w-sm space-y-4 rounded-lg border p-6"
 			>
 				<h1 className="text-xl font-semibold">SMS Relayed</h1>
-				{error && <p className="text-sm text-red-500">{error}</p>}
+				{notice ? (
+					<p className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
+						{notice}
+					</p>
+				) : null}
+				{error ? <p className="text-sm text-destructive">{error}</p> : null}
 				<Input
 					type="password"
 					placeholder="Password"

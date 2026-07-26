@@ -27,6 +27,7 @@ use crate::persistence::Store;
 pub struct ApiState {
     pub config: Arc<AppConfig>,
     pub config_path: PathBuf,
+    pub config_save_lock: Arc<tokio::sync::Mutex<()>>,
     pub store: Store,
     pub events: EventBus,
     pub delivery_wakeup: crate::delivery::DeliveryWakeup,
@@ -34,6 +35,7 @@ pub struct ApiState {
     pub sessions: auth::SessionStore,
     pub modem: crate::modem::ModemService,
     pub sms_sender: Arc<dyn crate::dbus::SmsSender>,
+    pub service_control: service::ServiceControl,
 }
 
 impl ApiState {
@@ -416,6 +418,8 @@ mod tests {
 mod route_tests {
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use axum::body::Body;
@@ -458,6 +462,17 @@ mod route_tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct RecordingServiceRestarter {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl service::ServiceRestarter for RecordingServiceRestarter {
+        fn restart(&self) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     fn test_state() -> ApiState {
         let mut cfg = AppConfig::default();
         cfg.api.enabled = true;
@@ -465,6 +480,7 @@ mod route_tests {
         ApiState {
             config: std::sync::Arc::new(cfg),
             config_path: std::path::PathBuf::from("/tmp/sms-relayed-test.toml"),
+            config_save_lock: Arc::new(tokio::sync::Mutex::new(())),
             store: crate::persistence::Store::open_in_memory().unwrap(),
             events: crate::events::EventBus::new(),
             delivery_wakeup: crate::delivery::DeliveryWakeup::new(),
@@ -472,7 +488,32 @@ mod route_tests {
             sessions: SessionStore::default(),
             modem: crate::modem::ModemService::new_with_runner(ApiTestRunner),
             sms_sender: test_sms_sender(),
+            service_control: service::ServiceControl::default(),
         }
+    }
+
+    fn write_config_file(config: &AppConfig, prefix: &str) -> (std::path::PathBuf, String) {
+        let path = std::env::temp_dir().join(format!(
+            "sms-relayed-{prefix}-{}.toml",
+            uuid::Uuid::new_v4()
+        ));
+        let content = config.canonical_toml().unwrap();
+        std::fs::write(&path, &content).unwrap();
+        let revision = crate::config::config_revision(&content);
+        (path, revision)
+    }
+
+    fn config_temporary_files(path: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let parent = path.parent().unwrap();
+        let prefix = format!(".{}.", path.file_name().unwrap().to_string_lossy());
+        std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.unwrap().path();
+                let name = path.file_name()?.to_string_lossy();
+                (name.starts_with(&prefix) && name.ends_with(".tmp")).then_some(path)
+            })
+            .collect()
     }
 
     fn login_request(password: &str, peer: std::net::SocketAddr) -> Request<Body> {
@@ -516,17 +557,284 @@ mod route_tests {
     }
 
     #[tokio::test]
-    async fn changing_the_api_password_permanently_invalidates_existing_sessions() {
+    async fn changing_the_api_password_schedules_restart_and_invalidates_sessions() {
         let mut state = test_state();
-        let config_path = std::env::temp_dir().join(format!(
-            "sms-relayed-password-change-{}.toml",
-            uuid::Uuid::new_v4()
-        ));
+        let (config_path, base_revision) = write_config_file(&state.config, "password-change");
         state.config_path = config_path.clone();
+        let restarter = RecordingServiceRestarter::default();
+        state.service_control = service::ServiceControl::new(restarter.clone());
         let token = state.sessions.create_session().await.unwrap();
         let sessions = state.sessions.clone();
         let mut updated_config = (*state.config).clone();
         updated_config.api.password = "new-password".to_string();
+        let candidate_revision =
+            crate::config::config_revision(&updated_config.canonical_toml().unwrap());
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/config?restart_after_save=true")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .header("content-type", "application/json")
+                    .header("if-match", base_revision.clone())
+                    .header("x-config-candidate-revision", candidate_revision)
+                    .body(Body::from(serde_json::to_vec(&updated_config).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["restart_scheduled"], true);
+        assert_eq!(body["session_invalidated"], true);
+        assert!(!sessions.is_valid(&token).await.unwrap());
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(restarter.calls.load(Ordering::SeqCst), 1);
+
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
+    async fn password_change_succeeds_after_rename_when_parent_sync_fails() {
+        let mut state = test_state();
+        let (config_path, base_revision) =
+            write_config_file(&state.config, "password-parent-sync-failure");
+        state.config_path = config_path.clone();
+        let restarter = RecordingServiceRestarter::default();
+        state.service_control = service::ServiceControl::new(restarter.clone());
+        let token = state.sessions.create_session().await.unwrap();
+        let sessions = state.sessions.clone();
+        let mut updated_config = (*state.config).clone();
+        updated_config.api.password = "new-password".to_string();
+        let candidate_toml = updated_config.canonical_toml().unwrap();
+        let candidate_revision = crate::config::config_revision(&candidate_toml);
+        crate::config::fail_next_config_parent_sync_for(&config_path);
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/config?restart_after_save=true")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .header("content-type", "application/json")
+                    .header("if-match", base_revision)
+                    .header("x-config-candidate-revision", candidate_revision)
+                    .body(Body::from(serde_json::to_vec(&updated_config).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!sessions.is_valid(&token).await.unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            candidate_toml
+        );
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(restarter.calls.load(Ordering::SeqCst), 1);
+
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
+    async fn password_change_does_not_schedule_restart_when_session_invalidation_fails() {
+        let mut state = test_state();
+        let (config_path, base_revision) =
+            write_config_file(&state.config, "password-invalidation-failure");
+        state.config_path = config_path.clone();
+        let original = std::fs::read_to_string(&config_path).unwrap();
+        let restarter = RecordingServiceRestarter::default();
+        state.service_control = service::ServiceControl::new(restarter.clone());
+        let token = state.sessions.create_session().await.unwrap();
+        state.sessions.fail_next_invalidate_all();
+        let mut updated_config = (*state.config).clone();
+        updated_config.api.password = "new-password".to_string();
+        let candidate_revision =
+            crate::config::config_revision(&updated_config.canonical_toml().unwrap());
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/config?restart_after_save=true")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .header("content-type", "application/json")
+                    .header("if-match", base_revision.clone())
+                    .header("x-config-candidate-revision", candidate_revision)
+                    .body(Body::from(serde_json::to_vec(&updated_config).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let saved = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(saved, original);
+        assert_eq!(crate::config::config_revision(&saved), base_revision);
+        assert!(config_temporary_files(&config_path).is_empty());
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(restarter.calls.load(Ordering::SeqCst), 0);
+
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
+    async fn password_change_prepare_failure_preserves_session_file_and_restart_state() {
+        let mut state = test_state();
+        let (config_path, base_revision) =
+            write_config_file(&state.config, "password-prepare-failure");
+        state.config_path = config_path.clone();
+        let original = std::fs::read_to_string(&config_path).unwrap();
+        let restarter = RecordingServiceRestarter::default();
+        state.service_control = service::ServiceControl::new(restarter.clone());
+        let token = state.sessions.create_session().await.unwrap();
+        let sessions = state.sessions.clone();
+        crate::config::fail_next_prepare_config_write_for(&config_path);
+        let mut updated_config = (*state.config).clone();
+        updated_config.api.password = "new-password".to_string();
+        let candidate_revision =
+            crate::config::config_revision(&updated_config.canonical_toml().unwrap());
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/config?restart_after_save=true")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .header("content-type", "application/json")
+                    .header("if-match", base_revision.clone())
+                    .header("x-config-candidate-revision", candidate_revision)
+                    .body(Body::from(serde_json::to_vec(&updated_config).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(sessions.is_valid(&token).await.unwrap());
+        let saved = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(saved, original);
+        assert_eq!(crate::config::config_revision(&saved), base_revision);
+        assert!(config_temporary_files(&config_path).is_empty());
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(restarter.calls.load(Ordering::SeqCst), 0);
+
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
+    async fn config_get_reads_disk_and_reports_pending_restart() {
+        let mut state = test_state();
+        let mut disk_config = (*state.config).clone();
+        disk_config.app.device_name = "disk-device".to_string();
+        let (config_path, revision) = write_config_file(&disk_config, "config-get");
+        state.config_path = config_path.clone();
+        let token = state.sessions.create_session().await.unwrap();
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/config")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("etag").unwrap(),
+            format!("\"{revision}\"").as_str()
+        );
+        assert_eq!(
+            response.headers().get("x-config-restart-required").unwrap(),
+            "true"
+        );
+        assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["app"]["device_name"], "disk-device");
+
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
+    async fn config_preview_returns_validation_and_plaintext_toml_diff_without_writing() {
+        let mut state = test_state();
+        let (config_path, base_revision) = write_config_file(&state.config, "config-preview");
+        state.config_path = config_path.clone();
+        let token = state.sessions.create_session().await.unwrap();
+        let mut candidate = (*state.config).clone();
+        candidate.api.password = "new-visible-password".to_string();
+        candidate.app.device_name = "preview-device".to_string();
+        let original = std::fs::read_to_string(&config_path).unwrap();
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/config/preview")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .header("content-type", "application/json")
+                    .header("if-match", base_revision)
+                    .body(Body::from(serde_json::to_vec(&candidate).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["check"]["passed"], true);
+        assert_eq!(body["password_change_pending"], true);
+        let diff = body["diff"].as_str().unwrap();
+        assert!(diff.contains("secret"));
+        assert!(diff.contains("new-visible-password"));
+        assert!(diff.contains("preview-device"));
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
+
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
+    async fn config_save_rejects_a_stale_preview_without_writing() {
+        let mut state = test_state();
+        let (config_path, base_revision) = write_config_file(&state.config, "config-stale");
+        state.config_path = config_path.clone();
+        let token = state.sessions.create_session().await.unwrap();
+        let mut candidate = (*state.config).clone();
+        candidate.app.device_name = "candidate-device".to_string();
+        let candidate_revision =
+            crate::config::config_revision(&candidate.canonical_toml().unwrap());
+        let mut externally_changed = std::fs::read_to_string(&config_path).unwrap();
+        externally_changed.push_str("# externally changed\n");
+        std::fs::write(&config_path, &externally_changed).unwrap();
         let app = router(state);
 
         let response = app
@@ -536,14 +844,84 @@ mod route_tests {
                     .uri("/api/config")
                     .header("cookie", format!("sms-relayed-session={token}"))
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&updated_config).unwrap()))
+                    .header("if-match", base_revision)
+                    .header("x-config-candidate-revision", candidate_revision)
+                    .body(Body::from(serde_json::to_vec(&candidate).unwrap()))
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(!sessions.is_valid(&token).await.unwrap());
+        assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            externally_changed
+        );
+
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
+    async fn concurrent_config_saves_with_the_same_revision_allow_only_one_write() {
+        let mut state = test_state();
+        let (config_path, base_revision) = write_config_file(&state.config, "config-concurrent");
+        state.config_path = config_path.clone();
+        let token = state.sessions.create_session().await.unwrap();
+        let mut first_candidate = (*state.config).clone();
+        first_candidate.app.device_name = "first-candidate".to_string();
+        let first_toml = first_candidate.canonical_toml().unwrap();
+        let first_revision = crate::config::config_revision(&first_toml);
+        let mut second_candidate = (*state.config).clone();
+        second_candidate.app.device_name = "second-candidate".to_string();
+        let second_toml = second_candidate.canonical_toml().unwrap();
+        let second_revision = crate::config::config_revision(&second_toml);
+
+        let save_guard = state.config_save_lock.clone().lock_owned().await;
+        let app = router(state);
+        let first_request = Request::builder()
+            .method(Method::PUT)
+            .uri("/api/config")
+            .header("cookie", format!("sms-relayed-session={token}"))
+            .header("content-type", "application/json")
+            .header("if-match", base_revision.clone())
+            .header("x-config-candidate-revision", first_revision)
+            .body(Body::from(serde_json::to_vec(&first_candidate).unwrap()))
+            .unwrap();
+        let second_request = Request::builder()
+            .method(Method::PUT)
+            .uri("/api/config")
+            .header("cookie", format!("sms-relayed-session={token}"))
+            .header("content-type", "application/json")
+            .header("if-match", base_revision)
+            .header("x-config-candidate-revision", second_revision)
+            .body(Body::from(serde_json::to_vec(&second_candidate).unwrap()))
+            .unwrap();
+        let mut first_save = tokio::spawn(app.clone().oneshot(first_request));
+        let mut second_save = tokio::spawn(app.oneshot(second_request));
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut first_save)
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut second_save)
+                .await
+                .is_err()
+        );
+        drop(save_guard);
+
+        let first_status = first_save.await.unwrap().unwrap().status();
+        let second_status = second_save.await.unwrap().unwrap().status();
+        match (first_status, second_status) {
+            (StatusCode::OK, StatusCode::PRECONDITION_FAILED) => {
+                assert_eq!(std::fs::read_to_string(&config_path).unwrap(), first_toml);
+            }
+            (StatusCode::PRECONDITION_FAILED, StatusCode::OK) => {
+                assert_eq!(std::fs::read_to_string(&config_path).unwrap(), second_toml);
+            }
+            statuses => panic!("expected one successful save and one stale save, got {statuses:?}"),
+        }
 
         let _ = std::fs::remove_file(config_path);
     }
@@ -665,6 +1043,7 @@ mod route_tests {
         let state = ApiState {
             config: std::sync::Arc::new(cfg),
             config_path: std::path::PathBuf::from("/tmp/sms-relayed-test.toml"),
+            config_save_lock: Arc::new(tokio::sync::Mutex::new(())),
             store: crate::persistence::Store::open_in_memory().unwrap(),
             events: crate::events::EventBus::new(),
             delivery_wakeup: crate::delivery::DeliveryWakeup::new(),
@@ -672,6 +1051,7 @@ mod route_tests {
             sessions: SessionStore::default(),
             modem: crate::modem::ModemService::new_with_runner(ApiTestRunner),
             sms_sender: test_sms_sender(),
+            service_control: service::ServiceControl::default(),
         };
         let token = state.sessions.create_session().await.unwrap();
         (state, token)
@@ -699,12 +1079,81 @@ mod route_tests {
                 .unwrap(),
         )
         .unwrap();
+        assert_eq!(body["sample_limit"], 5);
         let profiles = body["profiles"].as_array().unwrap();
         assert_eq!(profiles.len(), 1);
         let p = &profiles[0];
         assert_eq!(p["profile_key"], "bark.primary");
+        assert_eq!(p["configured"], true);
         assert_eq!(p["enabled"], true);
         assert_eq!(p["samples"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn forwarding_includes_disabled_configured_and_historical_profiles_once() {
+        use crate::storage::{ForwardAttemptOutcome, NewForwardAttemptSample};
+
+        let (mut state, token) = test_state_with_profiles(&["bark.primary", "bark.primary"]).await;
+        Arc::get_mut(&mut state.config)
+            .unwrap()
+            .channels
+            .bark
+            .insert(
+                "disabled".to_string(),
+                crate::config::BarkConfig {
+                    server_url: "https://api.day.app".to_string(),
+                    key: "disabled-key".to_string(),
+                },
+            );
+        state
+            .store
+            .sqlite()
+            .record_forward_attempt(NewForwardAttemptSample {
+                profile_key: "telegram.removed".to_string(),
+                delivery_id: None,
+                attempt_number: 1,
+                started_at: "2026-07-12T17:00:00Z".to_string(),
+                completed_at: "2026-07-12T17:00:01Z".to_string(),
+                latency_ms: 100,
+                dispatch_delay_ms: 0,
+                outcome: ForwardAttemptOutcome::Success,
+                error_code: None,
+            })
+            .unwrap();
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/forwarding/attempts")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let profiles = body["profiles"].as_array().unwrap();
+        assert_eq!(profiles.len(), 3);
+        assert_eq!(profiles[0]["profile_key"], "bark.primary");
+        assert_eq!(profiles[0]["configured"], true);
+        assert_eq!(profiles[0]["enabled"], true);
+        assert_eq!(profiles[1]["profile_key"], "bark.disabled");
+        assert_eq!(profiles[1]["configured"], true);
+        assert_eq!(profiles[1]["enabled"], false);
+        assert_eq!(profiles[1]["samples"].as_array().unwrap().len(), 0);
+        assert_eq!(profiles[2]["profile_key"], "telegram.removed");
+        assert_eq!(profiles[2]["configured"], false);
+        assert_eq!(profiles[2]["enabled"], false);
+        assert_eq!(profiles[2]["samples"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -757,10 +1206,12 @@ mod route_tests {
                 .unwrap(),
         )
         .unwrap();
+        assert_eq!(body["sample_limit"], 5);
         let profiles = body["profiles"].as_array().unwrap();
         assert_eq!(profiles.len(), 1);
         let p = &profiles[0];
         assert_eq!(p["profile_key"], "bark.primary");
+        assert!(p["configured"].as_bool().unwrap());
         assert!(p["enabled"].as_bool().unwrap());
         let samples = p["samples"].as_array().unwrap();
         assert_eq!(samples.len(), 5, "must return at most 5 samples");

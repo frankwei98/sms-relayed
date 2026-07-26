@@ -10,6 +10,9 @@ export type AppConfig = {
 	forward: {
 		enabled: string[];
 	};
+	delivery: {
+		concurrency: number;
+	};
 	channels: {
 		bark: Record<string, { server_url: string; key: string }>;
 		telegram: Record<

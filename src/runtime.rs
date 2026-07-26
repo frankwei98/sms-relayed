@@ -68,6 +68,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
         let api_state = ApiState {
             config: Arc::new(config.clone()),
             config_path: config_path.to_path_buf(),
+            config_save_lock: Arc::new(tokio::sync::Mutex::new(())),
             store: store.clone(),
             events: events.clone(),
             delivery_wakeup: delivery_wakeup.clone(),
@@ -80,6 +81,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
             .await?,
             modem: modem_service,
             sms_sender: sms_sender.clone(),
+            service_control: crate::api::service::ServiceControl::default(),
         };
         tokio::select! {
             biased;

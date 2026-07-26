@@ -2,19 +2,36 @@ import { captureFailure } from "./monitoring";
 
 export type ApiErrorBody = { error: { code: string; message: string } };
 
-export async function apiFetch<T>(
+export class ApiRequestError extends Error {
+	readonly status: number;
+	readonly code: string;
+
+	constructor(status: number, code: string, message: string) {
+		super(message);
+		this.name = "ApiRequestError";
+		this.status = status;
+		this.code = code;
+	}
+}
+
+export type ApiResponse<T> = {
+	data: T;
+	response: Response;
+};
+
+export async function apiRequest<T>(
 	input: RequestInfo | URL,
 	init?: RequestInit,
-): Promise<T> {
+): Promise<ApiResponse<T>> {
 	let response: Response;
 	try {
 		response = await fetch(input, {
 			credentials: "include",
+			...init,
 			headers: {
 				"Content-Type": "application/json",
 				...(init?.headers ?? {}),
 			},
-			...init,
 		});
 	} catch (error) {
 		captureFailure("api.request_failed", { status: "network_error" });
@@ -29,15 +46,24 @@ export async function apiFetch<T>(
 		const body = (await response
 			.json()
 			.catch(() => null)) as ApiErrorBody | null;
-		throw new Error(
+		throw new ApiRequestError(
+			response.status,
+			body?.error.code ?? "request_failed",
 			body?.error.message ?? `Request failed: ${response.status}`,
 		);
 	}
 	const body = await response.text();
-	if (body.trim().length === 0) {
-		return undefined as T;
-	}
-	return JSON.parse(body) as T;
+	return {
+		data: body.trim().length === 0 ? (undefined as T) : (JSON.parse(body) as T),
+		response,
+	};
+}
+
+export async function apiFetch<T>(
+	input: RequestInfo | URL,
+	init?: RequestInit,
+): Promise<T> {
+	return (await apiRequest<T>(input, init)).data;
 }
 
 export type AuthState = { authenticated: boolean };
@@ -85,11 +111,13 @@ export type ForwardAttemptSample = {
 
 export type ProfileStatus = {
 	profile_key: string;
+	configured: boolean;
 	enabled: boolean;
 	samples: ForwardAttemptSample[];
 };
 
 export type ForwardingResponse = {
 	generated_at: string;
+	sample_limit: number;
 	profiles: ProfileStatus[];
 };
