@@ -407,6 +407,11 @@ impl MessageStore {
             );
             CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at
                 ON auth_sessions(expires_at);
+            CREATE TABLE IF NOT EXISTS auth_credential_state (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                salt BLOB NOT NULL,
+                verifier BLOB NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS forward_deliveries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,

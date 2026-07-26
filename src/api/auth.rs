@@ -45,7 +45,14 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
-    pub fn new(store: Store, password: &str) -> Self {
+    pub async fn open(store: Store, password: &str) -> anyhow::Result<Self> {
+        store
+            .synchronize_auth_password(password.to_string())
+            .await?;
+        Ok(Self::new(store, password))
+    }
+
+    fn new(store: Store, password: &str) -> Self {
         Self {
             store,
             password: Arc::from(password),
@@ -351,21 +358,25 @@ mod tests {
             "sms-relayed-session-restart-{}.sqlite",
             Uuid::new_v4()
         ));
-        let sessions = SessionStore::new(
+        let sessions = SessionStore::open(
             crate::persistence::Store::open(&database_path)
                 .await
                 .unwrap(),
             "same-password",
-        );
+        )
+        .await
+        .unwrap();
         let token = sessions.create_session().await.unwrap();
         drop(sessions);
 
-        let restarted_sessions = SessionStore::new(
+        let restarted_sessions = SessionStore::open(
             crate::persistence::Store::open(&database_path)
                 .await
                 .unwrap(),
             "same-password",
-        );
+        )
+        .await
+        .unwrap();
 
         assert!(restarted_sessions.is_valid(&token).await.unwrap());
 
@@ -382,12 +393,23 @@ mod tests {
     #[tokio::test]
     async fn changing_the_api_password_invalidates_existing_sessions() {
         let store = crate::persistence::Store::open_in_memory().unwrap();
-        let sessions = SessionStore::new(store.clone(), "old-password");
+        let sessions = SessionStore::open(store.clone(), "old-password")
+            .await
+            .unwrap();
         let token = sessions.create_session().await.unwrap();
 
-        let sessions_after_password_change = SessionStore::new(store, "new-password");
+        let sessions_after_password_change = SessionStore::open(store.clone(), "new-password")
+            .await
+            .unwrap();
 
         assert!(!sessions_after_password_change
+            .is_valid(&token)
+            .await
+            .unwrap());
+
+        let sessions_after_password_reuse =
+            SessionStore::open(store, "old-password").await.unwrap();
+        assert!(!sessions_after_password_reuse
             .is_valid(&token)
             .await
             .unwrap());
