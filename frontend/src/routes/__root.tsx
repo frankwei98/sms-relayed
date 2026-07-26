@@ -53,27 +53,51 @@ function RootComponent() {
 		);
 	}
 
-	const mainClassName =
-		location.pathname === "/"
-			? "flex-1 overflow-hidden p-0 md:p-4"
-			: "flex-1 overflow-auto p-6";
+	const isWorkspace = ["/", "/forwarding", "/config"].includes(
+		location.pathname,
+	);
+	const mainClassName = isWorkspace
+		? "min-h-0 flex-1 overflow-hidden p-0 md:p-4"
+		: "flex-1 overflow-auto p-4 md:p-6";
 
 	return (
 		<AuthContext.Provider value={{ auth, setAuth }}>
-			<div className="flex h-screen flex-col">
-				<header className="flex items-center gap-4 border-b px-6 py-3">
-					<h1 className="text-lg font-semibold">SMS Relayed</h1>
-					<nav className="flex gap-4">
-						<Link to="/" className="text-sm hover:underline">
+			<div className="flex h-dvh flex-col">
+				<header className="flex shrink-0 items-center gap-3 border-b px-3 py-2 md:px-6 md:py-3">
+					<h1 className="shrink-0 text-base font-semibold md:text-lg">
+						SMS Relayed
+					</h1>
+					<nav
+						className="flex min-w-0 flex-1 gap-1 overflow-x-auto"
+						aria-label="Primary"
+					>
+						<Link
+							to="/"
+							activeOptions={{ exact: true }}
+							className="shrink-0 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+							activeProps={{ className: "bg-accent text-accent-foreground" }}
+						>
 							SMS
 						</Link>
-						<Link to="/modem" className="text-sm hover:underline">
+						<Link
+							to="/modem"
+							className="shrink-0 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+							activeProps={{ className: "bg-accent text-accent-foreground" }}
+						>
 							Modem
 						</Link>
-						<Link to="/forwarding" className="text-sm hover:underline">
+						<Link
+							to="/forwarding"
+							className="shrink-0 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+							activeProps={{ className: "bg-accent text-accent-foreground" }}
+						>
 							Forwarding
 						</Link>
-						<Link to="/config" className="text-sm hover:underline">
+						<Link
+							to="/config"
+							className="shrink-0 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+							activeProps={{ className: "bg-accent text-accent-foreground" }}
+						>
 							Config
 						</Link>
 					</nav>

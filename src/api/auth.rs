@@ -3,6 +3,8 @@ use std::fs;
 use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant};
 
@@ -46,6 +48,8 @@ pub struct SessionStore {
     store: Store,
     password: Arc<str>,
     login_failures: Arc<Mutex<HashMap<IpAddr, LoginFailures>>>,
+    #[cfg(test)]
+    invalidate_all_failure: Arc<AtomicBool>,
 }
 
 impl SessionStore {
@@ -65,6 +69,8 @@ impl SessionStore {
             store,
             password: Arc::from(password),
             login_failures: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            invalidate_all_failure: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -100,7 +106,16 @@ impl SessionStore {
     }
 
     pub async fn invalidate_all(&self) -> anyhow::Result<()> {
+        #[cfg(test)]
+        if self.invalidate_all_failure.swap(false, Ordering::SeqCst) {
+            anyhow::bail!("injected session invalidation failure");
+        }
         self.store.delete_all_auth_sessions().await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_invalidate_all(&self) {
+        self.invalidate_all_failure.store(true, Ordering::SeqCst);
     }
 
     fn authenticate(&self, peer: IpAddr, password: &str, expected_password: &str) -> LoginResult {

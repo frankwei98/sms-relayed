@@ -1,17 +1,21 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, test, vi } from "vitest";
 import {
-	ChannelEditor,
-	normalizeForwardEnabled,
-} from "#/components/config/channel-editor";
+	cleanup,
+	fireEvent,
+	render,
+	screen,
+	within,
+} from "@testing-library/react";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { ChannelEditor } from "#/components/config/channel-editor";
 import type { AppConfig } from "#/lib/config-model";
 
 const config: AppConfig = {
 	app: { device_name: "router", modem_path: "/modem/0" },
 	sms: { ignore_storage: [], code_keywords: [] },
 	forward: { enabled: ["telegram.alerts", "bark.missing"] },
+	delivery: { concurrency: 2 },
 	channels: {
 		bark: {
 			primary: { server_url: "https://api.day.app", key: "secret" },
@@ -47,12 +51,6 @@ const config: AppConfig = {
 afterEach(cleanup);
 
 describe("ChannelEditor forwarding controls", () => {
-	test("drops enabled refs that do not match an existing profile", () => {
-		expect(normalizeForwardEnabled(config).forward.enabled).toEqual([
-			"telegram.alerts",
-		]);
-	});
-
 	test("aggregates profile switches into forward.enabled", () => {
 		const onUpdate = vi.fn();
 		const view = render(<ChannelEditor config={config} onUpdate={onUpdate} />);
@@ -66,6 +64,7 @@ describe("ChannelEditor forwarding controls", () => {
 		const enabledConfig = onUpdate.mock.calls[0][0] as AppConfig;
 		expect(enabledConfig.forward.enabled).toEqual([
 			"telegram.alerts",
+			"bark.missing",
 			"bark.primary",
 		]);
 
@@ -77,6 +76,96 @@ describe("ChannelEditor forwarding controls", () => {
 		);
 
 		const disabledConfig = onUpdate.mock.calls[1][0] as AppConfig;
-		expect(disabledConfig.forward.enabled).toEqual(["bark.primary"]);
+		expect(disabledConfig.forward.enabled).toEqual([
+			"bark.missing",
+			"bark.primary",
+		]);
+	});
+
+	test("shows missing profile refs and removes only the selected ref", () => {
+		const configWithMissingRefs: AppConfig = {
+			...config,
+			forward: {
+				...config.forward,
+				enabled: [
+					"telegram.alerts",
+					"bark.missing",
+					"shell.ghost",
+					"bark.missing",
+				],
+			},
+		};
+		const onUpdate = vi.fn();
+		render(
+			<ChannelEditor config={configWithMissingRefs} onUpdate={onUpdate} />,
+		);
+
+		const warning = screen.getByRole("region", {
+			name: "Missing forwarding profiles",
+		});
+		expect(within(warning).getAllByText("bark.missing")).toHaveLength(1);
+		expect(within(warning).getByText("shell.ghost")).toBeTruthy();
+
+		fireEvent.click(
+			within(warning).getByRole("button", {
+				name: "Remove missing forwarding reference bark.missing",
+			}),
+		);
+
+		expect(onUpdate).toHaveBeenCalledWith({
+			...configWithMissingRefs,
+			forward: {
+				...configWithMissingRefs.forward,
+				enabled: ["telegram.alerts", "shell.ghost"],
+			},
+		});
+	});
+
+	test("does not overwrite a duplicate profile name", () => {
+		const onUpdate = vi.fn();
+		render(<ChannelEditor config={config} onUpdate={onUpdate} />);
+
+		fireEvent.change(screen.getByLabelText("Add bark profile"), {
+			target: { value: "primary" },
+		});
+
+		const add = screen.getAllByRole("button", { name: "Add" })[0];
+		expect((add as HTMLButtonElement).disabled).toBe(true);
+		expect(screen.getByText("That profile name already exists.")).toBeTruthy();
+		expect(onUpdate).not.toHaveBeenCalled();
+	});
+
+	test("keeps special characters in opaque profile names", () => {
+		const onUpdate = vi.fn();
+		render(<ChannelEditor config={config} onUpdate={onUpdate} />);
+
+		fireEvent.change(screen.getByLabelText("Add bark profile"), {
+			target: { value: "team/ops.v2" },
+		});
+		fireEvent.click(screen.getAllByRole("button", { name: "Add" })[0]);
+
+		const updated = onUpdate.mock.calls[0][0] as AppConfig;
+		expect(updated.channels.bark["team/ops.v2"]).toEqual({
+			server_url: "",
+			key: "",
+		});
+	});
+
+	test("confirms removal and only drops the matching enabled ref", () => {
+		const onUpdate = vi.fn();
+		render(<ChannelEditor config={config} onUpdate={onUpdate} />);
+
+		fireEvent.click(
+			screen.getByRole("button", { name: "Remove bark.primary" }),
+		);
+		expect(screen.getByText("Remove forwarding profile?")).toBeTruthy();
+		fireEvent.click(screen.getByRole("button", { name: "Remove profile" }));
+
+		const updated = onUpdate.mock.calls[0][0] as AppConfig;
+		expect(updated.channels.bark.primary).toBeUndefined();
+		expect(updated.forward.enabled).toEqual([
+			"telegram.alerts",
+			"bark.missing",
+		]);
 	});
 });

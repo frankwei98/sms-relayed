@@ -1,4 +1,5 @@
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::State;
@@ -20,10 +21,74 @@ struct StatusResponse {
     database_path: String,
 }
 
+pub trait ServiceRestarter: Send + Sync {
+    fn restart(&self);
+}
+
+#[derive(Clone)]
+pub struct ServiceControl {
+    restarter: Arc<dyn ServiceRestarter>,
+}
+
+impl ServiceControl {
+    pub fn new(restarter: impl ServiceRestarter + 'static) -> Self {
+        Self {
+            restarter: Arc::new(restarter),
+        }
+    }
+
+    fn schedule(&self) {
+        let restarter = self.restarter.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if let Err(error) = tokio::task::spawn_blocking(move || restarter.restart()).await {
+                log::warn!("service restart task failed: {}", error);
+            }
+        });
+    }
+}
+
+impl Default for ServiceControl {
+    fn default() -> Self {
+        Self::new(SystemServiceRestarter)
+    }
+}
+
+struct SystemServiceRestarter;
+
+impl ServiceRestarter for SystemServiceRestarter {
+    fn restart(&self) {
+        let initd = "/etc/init.d/sms-relayed";
+        let result = if std::path::Path::new(initd).exists() {
+            Command::new(initd).arg("restart").status()
+        } else {
+            Command::new("systemctl")
+                .args(["restart", "sms-relayed"])
+                .status()
+        };
+        match result {
+            Ok(status) if status.success() => {
+                log::info!("service restart command completed successfully");
+            }
+            Ok(status) => {
+                log::warn!("service restart command exited with status {}", status);
+            }
+            Err(error) => {
+                log::warn!("failed to run service restart command: {}", error);
+            }
+        }
+    }
+}
+
 pub fn routes() -> Router<ApiState> {
     Router::new()
         .route("/api/status", get(status))
         .route("/api/service/restart", post(restart))
+}
+
+pub fn schedule_restart(state: &ApiState) {
+    state.events.send(AppEvent::ServiceRestartScheduled);
+    state.service_control.schedule();
 }
 
 async fn status(State(state): State<ApiState>) -> ApiResult<Json<StatusResponse>> {
@@ -37,34 +102,6 @@ async fn status(State(state): State<ApiState>) -> ApiResult<Json<StatusResponse>
 }
 
 async fn restart(State(state): State<ApiState>) -> ApiResult<StatusCode> {
-    state.events.send(AppEvent::ServiceRestartScheduled);
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        if let Err(error) = tokio::task::spawn_blocking(restart_service).await {
-            log::warn!("service restart task failed: {}", error);
-        }
-    });
+    schedule_restart(&state);
     Ok(StatusCode::ACCEPTED)
-}
-
-fn restart_service() {
-    let initd = "/etc/init.d/sms-relayed";
-    let result = if std::path::Path::new(initd).exists() {
-        Command::new(initd).arg("restart").status()
-    } else {
-        Command::new("systemctl")
-            .args(["restart", "sms-relayed"])
-            .status()
-    };
-    match result {
-        Ok(status) if status.success() => {
-            log::info!("service restart scheduled");
-        }
-        Ok(status) => {
-            log::warn!("service restart command exited with status {}", status);
-        }
-        Err(e) => {
-            log::warn!("failed to run service restart command: {}", e);
-        }
-    }
 }

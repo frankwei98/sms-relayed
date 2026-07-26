@@ -374,6 +374,7 @@ mod tests {
         let state = super::super::ApiState {
             config: std::sync::Arc::new(crate::config::AppConfig::default()),
             config_path: std::path::PathBuf::from("/tmp/not-used.toml"),
+            config_save_lock: Arc::new(tokio::sync::Mutex::new(())),
             store: store.clone().into(),
             events: crate::events::EventBus::new(),
             delivery_wakeup: crate::delivery::DeliveryWakeup::new(),
@@ -381,6 +382,7 @@ mod tests {
             sessions: super::super::auth::SessionStore::default(),
             modem,
             sms_sender: Arc::new(sender.clone()),
+            service_control: super::super::service::ServiceControl::default(),
         };
 
         let missing_key = send_message(
@@ -462,6 +464,7 @@ mod tests {
         let state = super::super::ApiState {
             config: std::sync::Arc::new(crate::config::AppConfig::default()),
             config_path: std::path::PathBuf::from("/tmp/not-used.toml"),
+            config_save_lock: Arc::new(tokio::sync::Mutex::new(())),
             store: store.into(),
             events: crate::events::EventBus::new(),
             delivery_wakeup: crate::delivery::DeliveryWakeup::new(),
@@ -469,6 +472,7 @@ mod tests {
             sessions: super::super::auth::SessionStore::default(),
             modem: crate::modem::ModemService::new(),
             sms_sender: super::super::test_sms_sender(),
+            service_control: super::super::service::ServiceControl::default(),
         };
         let app = routes().with_state(state);
 
@@ -531,6 +535,7 @@ mod tests {
         let state = super::super::ApiState {
             config: std::sync::Arc::new(crate::config::AppConfig::default()),
             config_path: std::path::PathBuf::from("/tmp/not-used.toml"),
+            config_save_lock: Arc::new(tokio::sync::Mutex::new(())),
             store: store.into(),
             events,
             delivery_wakeup: crate::delivery::DeliveryWakeup::new(),
@@ -538,6 +543,7 @@ mod tests {
             sessions: super::super::auth::SessionStore::default(),
             modem: crate::modem::ModemService::new(),
             sms_sender: super::super::test_sms_sender(),
+            service_control: super::super::service::ServiceControl::default(),
         };
 
         let response = mark_conversation_read(State(state), Path("+1".to_string()))

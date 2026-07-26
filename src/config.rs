@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
 // Typed TOML config (new P1 model)
@@ -422,6 +424,92 @@ fn redact(secret: &str) -> String {
     }
 }
 
+pub fn config_revision(content: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(content.as_bytes()))
+}
+
+pub(crate) struct PreparedConfigWrite {
+    temporary: Option<PathBuf>,
+    destination: PathBuf,
+    parent: PathBuf,
+}
+
+impl PreparedConfigWrite {
+    pub(crate) fn commit(mut self) -> Result<()> {
+        let temporary = self
+            .temporary
+            .as_ref()
+            .expect("prepared config write has a temporary file");
+        fs::rename(temporary, &self.destination).with_context(|| {
+            format!(
+                "failed to replace config {}",
+                self.destination.as_path().display()
+            )
+        })?;
+        self.temporary = None;
+        if let Err(error) = sync_config_parent(&self.destination, &self.parent) {
+            log::warn!(
+                "config {} was replaced but failed to sync parent directory {}: {}",
+                self.destination.display(),
+                self.parent.display(),
+                error
+            );
+        }
+        Ok(())
+    }
+}
+
+impl Drop for PreparedConfigWrite {
+    fn drop(&mut self) {
+        if let Some(temporary) = self.temporary.take() {
+            let _ = fs::remove_file(temporary);
+        }
+    }
+}
+
+#[cfg(test)]
+static PREPARE_CONFIG_WRITE_FAILURE_PATH: std::sync::Mutex<Option<PathBuf>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+static CONFIG_PARENT_SYNC_FAILURE_PATH: std::sync::Mutex<Option<PathBuf>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn fail_next_prepare_config_write_for(path: &Path) {
+    *PREPARE_CONFIG_WRITE_FAILURE_PATH.lock().unwrap() = Some(path.to_path_buf());
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_config_parent_sync_for(path: &Path) {
+    *CONFIG_PARENT_SYNC_FAILURE_PATH.lock().unwrap() = Some(path.to_path_buf());
+}
+
+#[cfg(test)]
+fn should_fail_prepare_config_write(path: &Path) -> bool {
+    let mut failure_path = PREPARE_CONFIG_WRITE_FAILURE_PATH.lock().unwrap();
+    if failure_path.as_deref() == Some(path) {
+        failure_path.take();
+        true
+    } else {
+        false
+    }
+}
+
+fn sync_config_parent(_destination: &Path, parent: &Path) -> Result<()> {
+    #[cfg(test)]
+    {
+        let mut failure_path = CONFIG_PARENT_SYNC_FAILURE_PATH.lock().unwrap();
+        if failure_path.as_deref() == Some(_destination) {
+            failure_path.take();
+            bail!("injected config parent sync failure");
+        }
+    }
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
 impl AppConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path)
@@ -430,7 +518,15 @@ impl AppConfig {
             .with_context(|| format!("failed to parse config {}", path.display()))
     }
 
+    pub fn canonical_toml(&self) -> Result<String> {
+        toml::to_string_pretty(self).context("failed to serialize config")
+    }
+
     pub fn save_secure(&self, path: &Path) -> Result<()> {
+        self.prepare_secure_write(path)?.commit()
+    }
+
+    pub(crate) fn prepare_secure_write(&self, path: &Path) -> Result<PreparedConfigWrite> {
         let parent = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -451,12 +547,17 @@ impl AppConfig {
         #[cfg(unix)]
         secure_config_parent(parent)?;
 
-        let content = toml::to_string_pretty(self)?;
+        let content = self.canonical_toml()?;
         let file_name = path
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("config.toml");
         let temporary = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
+
+        #[cfg(test)]
+        if should_fail_prepare_config_write(path) {
+            bail!("injected config prepare failure");
+        }
 
         let result = (|| -> Result<()> {
             let mut options = fs::OpenOptions::new();
@@ -471,18 +572,18 @@ impl AppConfig {
                 .with_context(|| format!("failed to write config {}", path.display()))?;
             file.write_all(content.as_bytes())?;
             file.sync_all()?;
-            drop(file);
-            fs::rename(&temporary, path)
-                .with_context(|| format!("failed to replace config {}", path.display()))?;
-            #[cfg(unix)]
-            fs::File::open(parent)?.sync_all()?;
             Ok(())
         })();
 
-        if result.is_err() {
+        if let Err(error) = result {
             let _ = fs::remove_file(&temporary);
+            return Err(error);
         }
-        result
+        Ok(PreparedConfigWrite {
+            temporary: Some(temporary),
+            destination: path.to_path_buf(),
+            parent: parent.to_path_buf(),
+        })
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -529,6 +630,37 @@ impl AppConfig {
             bail!("enabled retention requires positive max_age_days and batch_size");
         }
         Ok(())
+    }
+
+    pub fn configured_profile_keys(&self) -> Vec<String> {
+        let mut keys = Vec::new();
+        keys.extend(self.channels.bark.keys().map(|name| format!("bark.{name}")));
+        keys.extend(
+            self.channels
+                .telegram
+                .keys()
+                .map(|name| format!("telegram.{name}")),
+        );
+        keys.extend(
+            self.channels
+                .wecom
+                .keys()
+                .map(|name| format!("wecom.{name}")),
+        );
+        keys.extend(
+            self.channels
+                .dingtalk
+                .keys()
+                .map(|name| format!("dingtalk.{name}")),
+        );
+        keys.extend(self.channels.lark.keys().map(|name| format!("lark.{name}")));
+        keys.extend(
+            self.channels
+                .shell
+                .keys()
+                .map(|name| format!("shell.{name}")),
+        );
+        keys
     }
 
     pub fn enabled_profiles(&self) -> Result<Vec<ChannelProfile>> {
