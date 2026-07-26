@@ -2,6 +2,8 @@ import {
 	type ComponentProps,
 	cloneElement,
 	type ReactElement,
+	useEffect,
+	useRef,
 	useState,
 } from "react";
 import { ChannelEditor } from "#/components/config/channel-editor";
@@ -85,7 +87,15 @@ type ArrayInputProps = Omit<
 };
 
 function ArrayInput({ value, onValueChange, ...props }: ArrayInputProps) {
-	const [text, setText] = useState(() => value.join(", "));
+	const canonicalValue = value.join(", ");
+	const [text, setText] = useState(() => canonicalValue);
+	const lastValue = useRef(canonicalValue);
+
+	useEffect(() => {
+		if (canonicalValue === lastValue.current) return;
+		lastValue.current = canonicalValue;
+		setText(canonicalValue);
+	}, [canonicalValue]);
 
 	return (
 		<Input
@@ -93,10 +103,12 @@ function ArrayInput({ value, onValueChange, ...props }: ArrayInputProps) {
 			value={text}
 			onChange={(event) => {
 				const next = event.target.value;
+				const parsed = arrayInput(next);
 				setText(next);
-				onValueChange(arrayInput(next));
+				lastValue.current = parsed.join(", ");
+				onValueChange(parsed);
 			}}
-			onBlur={() => setText(value.join(", "))}
+			onBlur={() => setText(canonicalValue)}
 		/>
 	);
 }
@@ -111,6 +123,13 @@ type NumberInputProps = Omit<
 
 function NumberInput({ value, onValueChange, ...props }: NumberInputProps) {
 	const [text, setText] = useState(() => String(value));
+	const lastValue = useRef(value);
+
+	useEffect(() => {
+		if (value === lastValue.current) return;
+		lastValue.current = value;
+		setText(String(value));
+	}, [value]);
 
 	return (
 		<Input
@@ -122,7 +141,10 @@ function NumberInput({ value, onValueChange, ...props }: NumberInputProps) {
 				setText(next);
 				if (next === "") return;
 				const parsed = Number(next);
-				if (Number.isFinite(parsed)) onValueChange(parsed);
+				if (Number.isFinite(parsed)) {
+					lastValue.current = parsed;
+					onValueChange(parsed);
+				}
 			}}
 			onBlur={() => setText(String(value))}
 		/>

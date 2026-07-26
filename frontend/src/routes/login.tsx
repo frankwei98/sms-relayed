@@ -10,7 +10,7 @@ type LoginSearch = {
 };
 
 function isLoginNotice(value: unknown): value is LoginNotice {
-	return typeof value === "string" && value in LOGIN_NOTICES;
+	return typeof value === "string" && Object.hasOwn(LOGIN_NOTICES, value);
 }
 
 export const Route = createFileRoute("/login")({

@@ -44,6 +44,10 @@ describe("Login notice", () => {
 		).toEqual({});
 	});
 
+	test("rejects inherited object property names as notice codes", () => {
+		expect(Route.options.validateSearch({ notice: "toString" })).toEqual({});
+	});
+
 	test("renders the controlled post-save notice code", async () => {
 		routerMocks.search = { notice: "config_saved_restart_scheduled" };
 		render(
