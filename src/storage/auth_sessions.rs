@@ -6,8 +6,8 @@ use super::MessageStore;
 impl MessageStore {
     pub fn create_auth_session(
         &self,
-        token: &str,
-        credential_hash: &[u8],
+        token_hash: &[u8],
+        credential_proof: &[u8],
         expires_at: i64,
         now: i64,
         max_sessions: usize,
@@ -24,18 +24,18 @@ impl MessageStore {
         if sessions_to_evict > 0 {
             tx.execute(
                 "DELETE FROM auth_sessions
-                 WHERE token IN (
-                     SELECT token FROM auth_sessions
-                     ORDER BY expires_at ASC
+                 WHERE token_hash IN (
+                     SELECT token_hash FROM auth_sessions
+                     ORDER BY expires_at ASC, rowid ASC
                      LIMIT ?1
                  )",
                 params![sessions_to_evict],
             )?;
         }
         tx.execute(
-            "INSERT INTO auth_sessions (token, credential_hash, expires_at)
+            "INSERT INTO auth_sessions (token_hash, credential_proof, expires_at)
              VALUES (?1, ?2, ?3)",
-            params![token, credential_hash, expires_at],
+            params![token_hash, credential_proof, expires_at],
         )?;
         tx.commit()?;
         Ok(())
@@ -43,15 +43,15 @@ impl MessageStore {
 
     pub fn auth_session_is_valid(
         &self,
-        token: &str,
-        credential_hash: &[u8],
+        token_hash: &[u8],
+        credential_proof: &[u8],
         now: i64,
     ) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT 1 FROM auth_sessions
-             WHERE token = ?1 AND credential_hash = ?2 AND expires_at > ?3",
-            params![token, credential_hash, now],
+             WHERE token_hash = ?1 AND credential_proof = ?2 AND expires_at > ?3",
+            params![token_hash, credential_proof, now],
             |_| Ok(()),
         )
         .optional()
@@ -59,18 +59,27 @@ impl MessageStore {
         .map_err(Into::into)
     }
 
-    pub fn delete_auth_session(&self, token: &str) -> Result<()> {
+    pub fn delete_auth_session(&self, token_hash: &[u8]) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM auth_sessions WHERE token = ?1", params![token])?;
+        conn.execute(
+            "DELETE FROM auth_sessions WHERE token_hash = ?1",
+            params![token_hash],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_all_auth_sessions(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM auth_sessions", [])?;
         Ok(())
     }
 
     #[cfg(test)]
-    pub fn expire_auth_session(&self, token: &str) -> Result<()> {
+    pub fn expire_auth_session(&self, token_hash: &[u8]) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE auth_sessions SET expires_at = 0 WHERE token = ?1",
-            params![token],
+            "UPDATE auth_sessions SET expires_at = 0 WHERE token_hash = ?1",
+            params![token_hash],
         )?;
         Ok(())
     }

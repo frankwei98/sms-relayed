@@ -7,6 +7,7 @@ use axum::extract::{ConnectInfo, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -39,7 +40,7 @@ enum LoginResult {
 #[derive(Clone)]
 pub struct SessionStore {
     store: Store,
-    credential_hash: [u8; 32],
+    password: Arc<str>,
     login_failures: Arc<Mutex<HashMap<IpAddr, LoginFailures>>>,
 }
 
@@ -47,7 +48,7 @@ impl SessionStore {
     pub fn new(store: Store, password: &str) -> Self {
         Self {
             store,
-            credential_hash: Sha256::digest(password.as_bytes()).into(),
+            password: Arc::from(password),
             login_failures: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -57,8 +58,8 @@ impl SessionStore {
         let expires = OffsetDateTime::now_utc() + Duration::days(SESSION_DAYS);
         self.store
             .create_auth_session(
-                token.clone(),
-                self.credential_hash.to_vec(),
+                token_hash(&token).to_vec(),
+                credential_proof(&token, &self.password).to_vec(),
                 expires.unix_timestamp(),
                 OffsetDateTime::now_utc().unix_timestamp(),
                 MAX_SESSIONS,
@@ -70,15 +71,21 @@ impl SessionStore {
     pub async fn is_valid(&self, token: &str) -> anyhow::Result<bool> {
         self.store
             .auth_session_is_valid(
-                token.to_string(),
-                self.credential_hash.to_vec(),
+                token_hash(token).to_vec(),
+                credential_proof(token, &self.password).to_vec(),
                 OffsetDateTime::now_utc().unix_timestamp(),
             )
             .await
     }
 
     pub async fn remove(&self, token: &str) -> anyhow::Result<()> {
-        self.store.delete_auth_session(token.to_string()).await
+        self.store
+            .delete_auth_session(token_hash(token).to_vec())
+            .await
+    }
+
+    pub async fn invalidate_all(&self) -> anyhow::Result<()> {
+        self.store.delete_all_auth_sessions().await
     }
 
     fn authenticate(&self, peer: IpAddr, password: &str, expected_password: &str) -> LoginResult {
@@ -150,13 +157,26 @@ impl SessionStore {
 
     #[cfg(test)]
     pub async fn expire_for_test(&self, token: &str) -> anyhow::Result<()> {
-        self.store.expire_auth_session(token.to_string()).await
+        self.store
+            .expire_auth_session(token_hash(token).to_vec())
+            .await
     }
 
     #[cfg(test)]
     pub async fn len(&self) -> anyhow::Result<usize> {
         self.store.auth_session_count().await
     }
+}
+
+fn token_hash(token: &str) -> [u8; 32] {
+    Sha256::digest(token.as_bytes()).into()
+}
+
+fn credential_proof(token: &str, password: &str) -> [u8; 32] {
+    let mut mac =
+        <Hmac<Sha256> as Mac>::new_from_slice(token.as_bytes()).expect("HMAC accepts any key size");
+    mac.update(password.as_bytes());
+    mac.finalize().into_bytes().into()
 }
 
 #[cfg(test)]
@@ -286,7 +306,7 @@ async fn me(
     Ok(Json(AuthResponse { authenticated }))
 }
 
-fn session_storage_error(error: anyhow::Error) -> ApiError {
+pub(super) fn session_storage_error(error: anyhow::Error) -> ApiError {
     log::error!("session storage operation failed: {error:#}");
     ApiError::internal("session storage unavailable")
 }
@@ -368,6 +388,21 @@ mod tests {
         let sessions_after_password_change = SessionStore::new(store, "new-password");
 
         assert!(!sessions_after_password_change
+            .is_valid(&token)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn invalidated_sessions_do_not_return_when_the_password_is_reused() {
+        let store = crate::persistence::Store::open_in_memory().unwrap();
+        let sessions = SessionStore::new(store.clone(), "reused-password");
+        let token = sessions.create_session().await.unwrap();
+
+        sessions.invalidate_all().await.unwrap();
+        let sessions_after_password_reuse = SessionStore::new(store, "reused-password");
+
+        assert!(!sessions_after_password_reuse
             .is_valid(&token)
             .await
             .unwrap());

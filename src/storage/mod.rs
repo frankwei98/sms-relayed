@@ -401,8 +401,8 @@ impl MessageStore {
                 value TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS auth_sessions (
-                token TEXT PRIMARY KEY,
-                credential_hash BLOB NOT NULL,
+                token_hash BLOB PRIMARY KEY,
+                credential_proof BLOB NOT NULL,
                 expires_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at

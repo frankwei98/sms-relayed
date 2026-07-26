@@ -55,11 +55,19 @@ async fn save_config(
     payload
         .validate()
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let password_changed = payload.api.password != state.config.api.password;
     let config_path = state.config_path.clone();
     tokio::task::spawn_blocking(move || payload.save_secure(&config_path))
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?
         .map_err(|error| ApiError::internal(error.to_string()))?;
+    if password_changed {
+        state
+            .sessions
+            .invalidate_all()
+            .await
+            .map_err(super::auth::session_storage_error)?;
+    }
     state.events.send(AppEvent::ConfigSaved);
     Ok(Json(ConfigSaveResponse {
         requires_restart: true,
