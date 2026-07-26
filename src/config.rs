@@ -178,6 +178,8 @@ pub struct ChannelsSection {
     #[serde(default)]
     pub dingtalk: BTreeMap<String, DingTalkConfig>,
     #[serde(default)]
+    pub lark: BTreeMap<String, LarkConfig>,
+    #[serde(default)]
     pub shell: BTreeMap<String, ShellConfig>,
 }
 
@@ -207,6 +209,13 @@ pub struct WeComConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct DingTalkConfig {
     pub access_token: String,
+    pub secret: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct LarkConfig {
+    pub webhook_url: String,
+    #[serde(default)]
     pub secret: String,
 }
 
@@ -250,6 +259,7 @@ pub enum ChannelType {
     Telegram,
     WeCom,
     DingTalk,
+    Lark,
     Shell,
 }
 
@@ -276,6 +286,10 @@ pub enum ChannelProfile {
     DingTalk {
         name: String,
         config: DingTalkConfig,
+    },
+    Lark {
+        name: String,
+        config: LarkConfig,
     },
     Shell {
         name: String,
@@ -321,6 +335,7 @@ impl ProfileRef {
             "telegram" => ChannelType::Telegram,
             "wecom" => ChannelType::WeCom,
             "dingtalk" => ChannelType::DingTalk,
+            "lark" => ChannelType::Lark,
             "shell" => ChannelType::Shell,
             other => bail!("unknown channel type: {}", other),
         };
@@ -341,6 +356,7 @@ impl ChannelProfile {
             ChannelProfile::Telegram { name, .. } => format!("telegram.{}", name),
             ChannelProfile::WeCom { name, .. } => format!("wecom.{}", name),
             ChannelProfile::DingTalk { name, .. } => format!("dingtalk.{}", name),
+            ChannelProfile::Lark { name, .. } => format!("lark.{}", name),
             ChannelProfile::Shell { name, .. } => format!("shell.{}", name),
         }
     }
@@ -371,6 +387,14 @@ impl ChannelProfile {
                     "dingtalk.{} access_token={} secret={}",
                     name,
                     redact(&config.access_token),
+                    redact(&config.secret)
+                )
+            }
+            ChannelProfile::Lark { name, config } => {
+                format!(
+                    "lark.{} webhook_url={} secret={}",
+                    name,
+                    redact(&config.webhook_url),
                     redact(&config.secret)
                 )
             }
@@ -593,6 +617,21 @@ impl AppConfig {
                     config: cfg.clone(),
                 })
             }
+            ChannelType::Lark => {
+                let cfg = self.channels.lark.get(&reference.name).ok_or_else(|| {
+                    anyhow::anyhow!("enabled profile lark.{} does not exist", reference.name)
+                })?;
+                require(
+                    "channels.lark",
+                    &reference.name,
+                    "webhook_url",
+                    &cfg.webhook_url,
+                )?;
+                Ok(ChannelProfile::Lark {
+                    name: reference.name.clone(),
+                    config: cfg.clone(),
+                })
+            }
             ChannelType::Shell => {
                 let cfg = self.channels.shell.get(&reference.name).ok_or_else(|| {
                     anyhow::anyhow!("enabled profile shell.{} does not exist", reference.name)
@@ -741,6 +780,45 @@ mod tests {
         let r = ProfileRef::parse("bark.personal").unwrap();
         assert_eq!(r.channel_type, ChannelType::Bark);
         assert_eq!(r.name, "personal");
+    }
+
+    #[test]
+    fn validates_lark_profile_and_redacts_webhook_credentials() {
+        let mut cfg = AppConfig::default();
+        cfg.channels.lark.insert(
+            "alerts".to_string(),
+            LarkConfig {
+                webhook_url: "https://open.larksuite.com/open-apis/bot/v2/hook/1234567890abcdef"
+                    .to_string(),
+                secret: "1234567890secret".to_string(),
+            },
+        );
+        cfg.forward.enabled = vec!["lark.alerts".to_string()];
+
+        assert!(cfg.validate().is_ok());
+        assert_eq!(
+            cfg.enabled_profiles().unwrap()[0].key(),
+            "lark.alerts".to_string()
+        );
+        let summary = cfg.redacted_summary();
+        assert!(!summary.contains("1234567890abcdef"));
+        assert!(!summary.contains("1234567890secret"));
+    }
+
+    #[test]
+    fn enabled_lark_profile_requires_a_webhook_url() {
+        let mut cfg = AppConfig::default();
+        cfg.channels.lark.insert(
+            "alerts".to_string(),
+            LarkConfig {
+                webhook_url: String::new(),
+                secret: String::new(),
+            },
+        );
+        cfg.forward.enabled = vec!["lark.alerts".to_string()];
+
+        let error = cfg.validate().unwrap_err().to_string();
+        assert!(error.contains("channels.lark.alerts.webhook_url"));
     }
 
     #[test]

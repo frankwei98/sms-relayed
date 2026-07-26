@@ -21,6 +21,7 @@ export type AppConfig = {
 			{ corp_id: string; agent_id: string; secret: string; to_user: string }
 		>;
 		dingtalk: Record<string, { access_token: string; secret: string }>;
+		lark: Record<string, { webhook_url: string; secret: string }>;
 		shell: Record<string, { path: string }>;
 	};
 	api: {

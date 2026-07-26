@@ -5,14 +5,19 @@ import type { AppConfig } from "#/lib/config-model";
 
 const CHANNEL_FIELDS: Record<
 	string,
-	{ key: string; label: string; defaultValue: string }[]
+	{ key: string; label: string; defaultValue: string; sensitive?: boolean }[]
 > = {
 	bark: [
 		{ key: "server_url", label: "Server URL", defaultValue: "" },
-		{ key: "key", label: "Key", defaultValue: "" },
+		{ key: "key", label: "Key", defaultValue: "", sensitive: true },
 	],
 	telegram: [
-		{ key: "bot_token", label: "Bot Token", defaultValue: "" },
+		{
+			key: "bot_token",
+			label: "Bot Token",
+			defaultValue: "",
+			sensitive: true,
+		},
 		{ key: "chat_id", label: "Chat ID", defaultValue: "" },
 		{
 			key: "api_base",
@@ -23,17 +28,43 @@ const CHANNEL_FIELDS: Record<
 	wecom: [
 		{ key: "corp_id", label: "Corp ID", defaultValue: "" },
 		{ key: "agent_id", label: "Agent ID", defaultValue: "" },
-		{ key: "secret", label: "Secret", defaultValue: "" },
+		{ key: "secret", label: "Secret", defaultValue: "", sensitive: true },
 		{ key: "to_user", label: "To User", defaultValue: "@all" },
 	],
 	dingtalk: [
-		{ key: "access_token", label: "Access Token", defaultValue: "" },
-		{ key: "secret", label: "Secret", defaultValue: "" },
+		{
+			key: "access_token",
+			label: "Access Token",
+			defaultValue: "",
+			sensitive: true,
+		},
+		{ key: "secret", label: "Secret", defaultValue: "", sensitive: true },
+	],
+	lark: [
+		{
+			key: "webhook_url",
+			label: "Webhook URL",
+			defaultValue: "",
+			sensitive: true,
+		},
+		{
+			key: "secret",
+			label: "Signing Secret",
+			defaultValue: "",
+			sensitive: true,
+		},
 	],
 	shell: [{ key: "path", label: "Path", defaultValue: "" }],
 };
 
-const CHANNELS = ["bark", "telegram", "wecom", "dingtalk", "shell"] as const;
+const CHANNELS = [
+	"bark",
+	"telegram",
+	"wecom",
+	"dingtalk",
+	"lark",
+	"shell",
+] as const;
 
 type Props = {
 	config: AppConfig;
@@ -139,14 +170,7 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 												)
 											}
 											className="h-7 flex-1 text-xs"
-											type={
-												field.key.includes("token") ||
-												field.key.includes("secret") ||
-												field.key.includes("key") ||
-												field.key === "password"
-													? "password"
-													: "text"
-											}
+											type={field.sensitive ? "password" : "text"}
 										/>
 									</div>
 								))}
