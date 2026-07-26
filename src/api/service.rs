@@ -60,6 +60,11 @@ impl ServiceControl {
         });
         true
     }
+
+    #[cfg(test)]
+    pub(crate) fn restart_pending(&self) -> bool {
+        self.restart_pending.load(Ordering::Acquire)
+    }
 }
 
 impl Default for ServiceControl {
