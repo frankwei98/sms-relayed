@@ -22,6 +22,18 @@ describe("apiFetch monitoring", () => {
 		expect(mocks.captureFailure).not.toHaveBeenCalled();
 	});
 
+	it("accepts a successful response with a whitespace-only body", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn().mockResolvedValue(new Response(" \n\t", { status: 202 })),
+		);
+
+		await expect(
+			apiFetch("/api/service/restart", { method: "POST" }),
+		).resolves.toBeUndefined();
+		expect(mocks.captureFailure).not.toHaveBeenCalled();
+	});
+
 	it("reports server errors without sending the request URL", async () => {
 		vi.stubGlobal(
 			"fetch",

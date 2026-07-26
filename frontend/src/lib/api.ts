@@ -34,7 +34,7 @@ export async function apiFetch<T>(
 		);
 	}
 	const body = await response.text();
-	if (body.length === 0) {
+	if (body.trim().length === 0) {
 		return undefined as T;
 	}
 	return JSON.parse(body) as T;
