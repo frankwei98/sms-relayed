@@ -12,6 +12,7 @@ use anyhow::Result;
 use crate::message::{ConversationSummary, Message, MessageFilter, MessageSource, MessageStatus};
 use crate::storage::{ForwardAttemptSample, MessageStore, NewMessage};
 
+mod auth;
 mod delivery;
 
 pub use delivery::{

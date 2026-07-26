@@ -165,8 +165,17 @@ pub fn router(state: ApiState) -> Router {
                 let sessions = sessions.clone();
                 async move {
                     let token = auth::session_token(req.headers());
-                    if !sessions.is_valid(&token) {
-                        return ApiError::unauthorized("authentication required").into_response();
+                    match sessions.is_valid(&token).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            return ApiError::unauthorized("authentication required")
+                                .into_response();
+                        }
+                        Err(error) => {
+                            log::error!("session validation failed: {error:#}");
+                            return ApiError::internal("session storage unavailable")
+                                .into_response();
+                        }
                     }
                     next.run(req).await
                 }
@@ -356,10 +365,10 @@ mod tests {
         assert!(ipv6_companion_address("api.internal", true).is_err());
     }
 
-    #[test]
-    fn login_cookie_uses_p2_session_contract() {
+    #[tokio::test]
+    async fn login_cookie_uses_p2_session_contract() {
         let sessions = SessionStore::default();
-        let cookie = sessions.login_cookie(false);
+        let cookie = sessions.login_cookie(false).await.unwrap();
 
         assert!(cookie.starts_with("sms-relayed-session="));
         assert!(cookie.contains("HttpOnly"));
@@ -369,21 +378,21 @@ mod tests {
         assert!(!cookie.contains("Secure"));
     }
 
-    #[test]
-    fn login_cookie_is_secure_when_request_is_https() {
+    #[tokio::test]
+    async fn login_cookie_is_secure_when_request_is_https() {
         let sessions = SessionStore::default();
-        let cookie = sessions.login_cookie(true);
+        let cookie = sessions.login_cookie(true).await.unwrap();
         assert!(cookie.contains("Secure"));
     }
 
-    #[test]
-    fn session_tokens_expire_after_seven_days() {
+    #[tokio::test]
+    async fn session_tokens_expire_after_seven_days() {
         let sessions = SessionStore::default();
-        let token = sessions.create_session();
-        assert!(sessions.is_valid(&token));
+        let token = sessions.create_session().await.unwrap();
+        assert!(sessions.is_valid(&token).await.unwrap());
 
-        sessions.expire_for_test(&token);
-        assert!(!sessions.is_valid(&token));
+        sessions.expire_for_test(&token).await.unwrap();
+        assert!(!sessions.is_valid(&token).await.unwrap());
     }
 
     #[test]
@@ -545,7 +554,7 @@ mod route_tests {
     #[tokio::test]
     async fn modem_status_route_exposes_own_number() {
         let state = test_state();
-        let token = state.sessions.create_session();
+        let token = state.sessions.create_session().await.unwrap();
         let app = router(state);
         let response = app
             .oneshot(
@@ -572,7 +581,7 @@ mod route_tests {
     #[tokio::test]
     async fn reset_rejects_missing_confirmation() {
         let state = test_state();
-        let token = state.sessions.create_session();
+        let token = state.sessions.create_session().await.unwrap();
         let app = router(state);
         let response = app
             .oneshot(
@@ -606,7 +615,7 @@ mod route_tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
-    fn test_state_with_profiles(enabled: &[&str]) -> (ApiState, String) {
+    async fn test_state_with_profiles(enabled: &[&str]) -> (ApiState, String) {
         let mut cfg = AppConfig::default();
         cfg.api.enabled = true;
         cfg.api.password = "secret".to_string();
@@ -633,13 +642,13 @@ mod route_tests {
             modem: crate::modem::ModemService::new_with_runner(ApiTestRunner),
             sms_sender: test_sms_sender(),
         };
-        let token = state.sessions.create_session();
+        let token = state.sessions.create_session().await.unwrap();
         (state, token)
     }
 
     #[tokio::test]
     async fn forwarding_enabled_profile_with_empty_samples_returns_empty_array() {
-        let (state, token) = test_state_with_profiles(&["bark.primary"]);
+        let (state, token) = test_state_with_profiles(&["bark.primary"]).await;
         let app = router(state);
         let response = app
             .oneshot(
@@ -670,7 +679,7 @@ mod route_tests {
     #[tokio::test]
     async fn forwarding_enabled_profile_returns_latest_five_samples_and_shape() {
         use crate::storage::{ForwardAttemptOutcome, NewForwardAttemptSample};
-        let (state, token) = test_state_with_profiles(&["bark.primary"]);
+        let (state, token) = test_state_with_profiles(&["bark.primary"]).await;
         // Insert 6 samples, newest with attempt 6
         for n in 1..=6 {
             state
@@ -752,7 +761,7 @@ mod route_tests {
     #[tokio::test]
     async fn forwarding_api_does_not_expose_sensitive_fields() {
         use crate::storage::{ForwardAttemptOutcome, NewForwardAttemptSample};
-        let (state, token) = test_state_with_profiles(&["bark.primary"]);
+        let (state, token) = test_state_with_profiles(&["bark.primary"]).await;
         // Actually insert a message with phone number and body
         let message = state
             .store
