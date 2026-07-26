@@ -172,9 +172,7 @@ pub fn router(state: ApiState) -> Router {
                                 .into_response();
                         }
                         Err(error) => {
-                            log::error!("session validation failed: {error:#}");
-                            return ApiError::internal("session storage unavailable")
-                                .into_response();
+                            return auth::session_storage_error(error).into_response();
                         }
                     }
                     next.run(req).await
@@ -515,6 +513,39 @@ mod route_tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn changing_the_api_password_permanently_invalidates_existing_sessions() {
+        let mut state = test_state();
+        let config_path = std::env::temp_dir().join(format!(
+            "sms-relayed-password-change-{}.toml",
+            uuid::Uuid::new_v4()
+        ));
+        state.config_path = config_path.clone();
+        let token = state.sessions.create_session().await.unwrap();
+        let sessions = state.sessions.clone();
+        let mut updated_config = (*state.config).clone();
+        updated_config.api.password = "new-password".to_string();
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/config")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&updated_config).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!sessions.is_valid(&token).await.unwrap());
+
+        let _ = std::fs::remove_file(config_path);
     }
 
     #[tokio::test]
