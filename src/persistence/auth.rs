@@ -3,8 +3,12 @@ use anyhow::Result;
 use super::Store;
 
 impl Store {
-    pub async fn synchronize_auth_password(&self, password: String) -> Result<()> {
-        self.run(move |sqlite| sqlite.synchronize_auth_password(&password))
+    pub async fn synchronize_auth_password(
+        &self,
+        password: String,
+        credential_secret: Vec<u8>,
+    ) -> Result<()> {
+        self.run(move |sqlite| sqlite.synchronize_auth_password(&password, &credential_secret))
             .await
     }
 
