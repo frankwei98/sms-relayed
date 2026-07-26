@@ -16,7 +16,6 @@ export type AppConfig = {
 			string,
 			{ bot_token: string; chat_id: string; api_base: string }
 		>;
-		pushplus: Record<string, { token: string }>;
 		wecom: Record<
 			string,
 			{ corp_id: string; agent_id: string; secret: string; to_user: string }

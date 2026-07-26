@@ -174,8 +174,6 @@ pub struct ChannelsSection {
     #[serde(default)]
     pub telegram: BTreeMap<String, TelegramConfig>,
     #[serde(default)]
-    pub pushplus: BTreeMap<String, PushPlusConfig>,
-    #[serde(default)]
     pub wecom: BTreeMap<String, WeComConfig>,
     #[serde(default)]
     pub dingtalk: BTreeMap<String, DingTalkConfig>,
@@ -195,11 +193,6 @@ pub struct TelegramConfig {
     pub chat_id: String,
     #[serde(default = "default_telegram_api_base")]
     pub api_base: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct PushPlusConfig {
-    pub token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -255,7 +248,6 @@ impl Default for WeComConfig {
 pub enum ChannelType {
     Bark,
     Telegram,
-    PushPlus,
     WeCom,
     DingTalk,
     Shell,
@@ -276,10 +268,6 @@ pub enum ChannelProfile {
     Telegram {
         name: String,
         config: TelegramConfig,
-    },
-    PushPlus {
-        name: String,
-        config: PushPlusConfig,
     },
     WeCom {
         name: String,
@@ -331,7 +319,6 @@ impl ProfileRef {
         let channel_type = match channel {
             "bark" => ChannelType::Bark,
             "telegram" => ChannelType::Telegram,
-            "pushplus" => ChannelType::PushPlus,
             "wecom" => ChannelType::WeCom,
             "dingtalk" => ChannelType::DingTalk,
             "shell" => ChannelType::Shell,
@@ -352,7 +339,6 @@ impl ChannelProfile {
         match self {
             ChannelProfile::Bark { name, .. } => format!("bark.{}", name),
             ChannelProfile::Telegram { name, .. } => format!("telegram.{}", name),
-            ChannelProfile::PushPlus { name, .. } => format!("pushplus.{}", name),
             ChannelProfile::WeCom { name, .. } => format!("wecom.{}", name),
             ChannelProfile::DingTalk { name, .. } => format!("dingtalk.{}", name),
             ChannelProfile::Shell { name, .. } => format!("shell.{}", name),
@@ -371,9 +357,6 @@ impl ChannelProfile {
                     redact(&config.bot_token),
                     config.chat_id
                 )
-            }
-            ChannelProfile::PushPlus { name, config } => {
-                format!("pushplus.{} token={}", name, redact(&config.token))
             }
             ChannelProfile::WeCom { name, config } => {
                 format!(
@@ -582,16 +565,6 @@ impl AppConfig {
                     config: cfg.clone(),
                 })
             }
-            ChannelType::PushPlus => {
-                let cfg = self.channels.pushplus.get(&reference.name).ok_or_else(|| {
-                    anyhow::anyhow!("enabled profile pushplus.{} does not exist", reference.name)
-                })?;
-                require("channels.pushplus", &reference.name, "token", &cfg.token)?;
-                Ok(ChannelProfile::PushPlus {
-                    name: reference.name.clone(),
-                    config: cfg.clone(),
-                })
-            }
             ChannelType::WeCom => {
                 let cfg = self.channels.wecom.get(&reference.name).ok_or_else(|| {
                     anyhow::anyhow!("enabled profile wecom.{} does not exist", reference.name)
@@ -768,6 +741,14 @@ mod tests {
         let r = ProfileRef::parse("bark.personal").unwrap();
         assert_eq!(r.channel_type, ChannelType::Bark);
         assert_eq!(r.name, "personal");
+    }
+
+    #[test]
+    fn rejects_removed_pushplus_profile_refs() {
+        let err = ProfileRef::parse("pushplus.default")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown channel type: pushplus"));
     }
 
     #[test]

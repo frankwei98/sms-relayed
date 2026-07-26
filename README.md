@@ -20,7 +20,7 @@ sms-relayed 适用于插有 SIM 卡的 OpenWrt 路由器、Debian 网关、随�
 ### 功能
 
 - 实时接收 ModemManager 的新短信，持久化到 SQLite，并避免重复入库。
-- 将短信转发到 Bark、Telegram、PushPlus、企业微信、钉钉或自定义 Shell 脚本。
+- 将短信转发到 Bark、Telegram、企业微信、钉钉或自定义 Shell 脚本。
 - 支持多个命名 profile，同一条短信可投递到多个渠道，并记录投递结果、重试和延迟。
 - 从常见验证码短信中提取 4–7 位字母数字验证码；Bark 通知可自动复制验证码。
 - 通过 CLI 或密码保护的 Web 控制台发送短信。
@@ -110,9 +110,6 @@ bot_token = "..."
 chat_id = "..."
 api_base = "https://api.telegram.org"
 
-[channels.pushplus.default]
-token = "..."
-
 [channels.wecom.default]
 corp_id = "..."
 agent_id = "..."
@@ -148,7 +145,7 @@ batch_size = 500
 配置说明：
 
 - `forward.enabled` 使用 `渠道类型.profile名称`，例如 `telegram.main`。同一渠道可定义多个 profile。
-- 支持的渠道类型为 `bark`、`telegram`、`pushplus`、`wecom`、`dingtalk` 和 `shell`。
+- 支持的渠道类型为 `bark`、`telegram`、`wecom`、`dingtalk` 和 `shell`。
 - Bark 使用 [API v2](https://github.com/Finb/bark-server/blob/master/docs/API_V2.md)：将 `server_url` 设为服务根地址，程序会向 `<server_url>/push` 发送 JSON 请求。
 - `delivery.concurrency` 控制同时执行的转发任务数，默认值为 `2`，有效范围为 `1` 到 `16`。
 - 新 delivery 在数据库事务提交后会立即唤醒 worker；worker 启动时扫描一次，并保留固定 30 秒安全扫描。重试按最近的 `next_attempt_at` 精确唤醒。
@@ -310,7 +307,7 @@ The project consists of a Rust backend and a React frontend embedded in the bina
 ### Features
 
 - Receive new messages from ModemManager, persist them in SQLite, and suppress duplicate inserts.
-- Forward messages to Bark, Telegram, PushPlus, WeCom, DingTalk, or a custom shell script.
+- Forward messages to Bark, Telegram, WeCom, DingTalk, or a custom shell script.
 - Configure multiple named profiles, deliver one message to multiple channels, and record outcomes, retries, and latency.
 - Extract 4–7 character alphanumeric codes from common verification messages; Bark can copy detected codes automatically.
 - Send SMS from the CLI or the password-protected web dashboard.
@@ -394,9 +391,6 @@ bot_token = "..."
 chat_id = "..."
 api_base = "https://api.telegram.org"
 
-[channels.pushplus.default]
-token = "..."
-
 [channels.wecom.default]
 corp_id = "..."
 agent_id = "..."
@@ -432,7 +426,7 @@ batch_size = 500
 Important rules:
 
 - `forward.enabled` contains `channel.profile` references such as `telegram.main`; multiple profiles of the same channel are supported.
-- Channel types are `bark`, `telegram`, `pushplus`, `wecom`, `dingtalk`, and `shell`.
+- Channel types are `bark`, `telegram`, `wecom`, `dingtalk`, and `shell`.
 - Bark uses [API v2](https://github.com/Finb/bark-server/blob/master/docs/API_V2.md): set `server_url` to the server root and sms-relayed sends JSON to `<server_url>/push`.
 - `delivery.concurrency` controls concurrent forwarding jobs. It defaults to `2` and accepts values from `1` through `16`.
 - A committed delivery wakes the worker immediately. The worker also scans on startup, keeps a fixed 30-second safety scan, and wakes precisely for the earliest `next_attempt_at` retry deadline.
