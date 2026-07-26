@@ -2,9 +2,8 @@
 
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { LoginForm } from "#/components/login-form";
 import { AuthContext } from "#/lib/auth";
-import { Route } from "#/routes/login";
+import { LoginPage, Route } from "#/routes/login";
 
 const routerMocks = vi.hoisted(() => ({
 	search: {} as { notice?: string },
@@ -54,7 +53,7 @@ describe("Login notice", () => {
 			<AuthContext.Provider
 				value={{ auth: { authenticated: false }, setAuth: vi.fn() }}
 			>
-				<LoginForm notice="config_saved_restart_scheduled" />
+				<LoginPage />
 			</AuthContext.Provider>,
 		);
 
