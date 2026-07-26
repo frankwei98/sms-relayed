@@ -130,8 +130,10 @@ describe("ChannelEditor forwarding controls", () => {
 		});
 
 		const add = screen.getAllByRole("button", { name: "Add" })[0];
+		const input = screen.getByLabelText("Add bark profile");
+		const error = screen.getByText("That profile name already exists.");
 		expect((add as HTMLButtonElement).disabled).toBe(true);
-		expect(screen.getByText("That profile name already exists.")).toBeTruthy();
+		expect(input.getAttribute("aria-describedby")).toBe(error.id);
 		expect(onUpdate).not.toHaveBeenCalled();
 	});
 
