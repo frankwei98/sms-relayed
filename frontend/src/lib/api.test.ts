@@ -98,6 +98,24 @@ describe("apiFetch monitoring", () => {
 		expect((error as ApiRequestError).code).toBe("config_changed");
 	});
 
+	it("uses status-aware fallbacks when an error response omits the error body", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn().mockResolvedValue(
+				new Response(JSON.stringify({}), {
+					status: 429,
+					headers: { "Content-Type": "application/json" },
+				}),
+			),
+		);
+
+		const error = await apiFetch("/api/config").catch((caught) => caught);
+		expect(error).toBeInstanceOf(ApiRequestError);
+		expect((error as ApiRequestError).status).toBe(429);
+		expect((error as ApiRequestError).code).toBe("request_failed");
+		expect((error as ApiRequestError).message).toBe("Request failed: 429");
+	});
+
 	it("returns response metadata and merges caller headers", async () => {
 		const fetchMock = vi.fn().mockResolvedValue(
 			new Response(JSON.stringify({ value: 1 }), {
@@ -108,14 +126,18 @@ describe("apiFetch monitoring", () => {
 		vi.stubGlobal("fetch", fetchMock);
 
 		const result = await apiRequest<{ value: number }>("/api/config", {
-			headers: { "If-Match": "base" },
+			headers: new Headers({
+				"Content-Type": "application/merge-patch+json",
+				"If-Match": "base",
+			}),
 		});
 
 		expect(result.data).toEqual({ value: 1 });
 		expect(result.response.headers.get("etag")).toBe('"revision"');
-		expect(fetchMock.mock.calls[0][1].headers).toEqual({
-			"Content-Type": "application/json",
-			"If-Match": "base",
-		});
+		const requestHeaders = new Headers(fetchMock.mock.calls[0][1].headers);
+		expect(requestHeaders.get("content-type")).toBe(
+			"application/merge-patch+json",
+		);
+		expect(requestHeaders.get("if-match")).toBe("base");
 	});
 });

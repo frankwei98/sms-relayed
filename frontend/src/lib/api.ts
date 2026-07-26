@@ -23,15 +23,16 @@ export async function apiRequest<T>(
 	input: RequestInfo | URL,
 	init?: RequestInit,
 ): Promise<ApiResponse<T>> {
+	const headers = new Headers(init?.headers);
+	if (!headers.has("Content-Type")) {
+		headers.set("Content-Type", "application/json");
+	}
 	let response: Response;
 	try {
 		response = await fetch(input, {
 			credentials: "include",
 			...init,
-			headers: {
-				"Content-Type": "application/json",
-				...(init?.headers ?? {}),
-			},
+			headers,
 		});
 	} catch (error) {
 		captureFailure("api.request_failed", { status: "network_error" });
@@ -48,8 +49,8 @@ export async function apiRequest<T>(
 			.catch(() => null)) as ApiErrorBody | null;
 		throw new ApiRequestError(
 			response.status,
-			body?.error.code ?? "request_failed",
-			body?.error.message ?? `Request failed: ${response.status}`,
+			body?.error?.code ?? "request_failed",
+			body?.error?.message ?? `Request failed: ${response.status}`,
 		);
 	}
 	const body = await response.text();
