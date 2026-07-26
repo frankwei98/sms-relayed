@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+#[cfg(test)]
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -16,6 +17,7 @@ use crate::message::{Message, MessageDirection, MessageSource, MessageStatus};
 use crate::message::{MessageCursor, MessageFilter};
 
 mod attempts;
+mod auth_sessions;
 mod codecs;
 mod deliveries;
 mod messages;
@@ -398,6 +400,13 @@ impl MessageStore {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                token TEXT PRIMARY KEY,
+                credential_hash BLOB NOT NULL,
+                expires_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at
+                ON auth_sessions(expires_at);
             CREATE TABLE IF NOT EXISTS forward_deliveries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,

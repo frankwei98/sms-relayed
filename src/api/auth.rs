@@ -13,6 +13,8 @@ use subtle::ConstantTimeEq;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
+use crate::persistence::Store;
+
 use super::{ApiError, ApiState};
 
 pub const SESSION_COOKIE: &str = "sms-relayed-session";
@@ -34,37 +36,49 @@ enum LoginResult {
     RateLimited,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SessionStore {
-    inner: Arc<Mutex<HashMap<String, OffsetDateTime>>>,
+    store: Store,
+    credential_hash: [u8; 32],
     login_failures: Arc<Mutex<HashMap<IpAddr, LoginFailures>>>,
 }
 
 impl SessionStore {
-    pub fn create_session(&self) -> String {
+    pub fn new(store: Store, password: &str) -> Self {
+        Self {
+            store,
+            credential_hash: Sha256::digest(password.as_bytes()).into(),
+            login_failures: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub async fn create_session(&self) -> anyhow::Result<String> {
         let token = Uuid::new_v4().to_string();
         let expires = OffsetDateTime::now_utc() + Duration::days(SESSION_DAYS);
-        let mut guard = self.inner.lock().unwrap();
-        // Prune expired before insert
-        prune_expired(&mut guard);
-        // Enforce capacity
-        if guard.len() >= MAX_SESSIONS {
-            evict_oldest(&mut guard);
-        }
-        guard.insert(token.clone(), expires);
-        token
+        self.store
+            .create_auth_session(
+                token.clone(),
+                self.credential_hash.to_vec(),
+                expires.unix_timestamp(),
+                OffsetDateTime::now_utc().unix_timestamp(),
+                MAX_SESSIONS,
+            )
+            .await?;
+        Ok(token)
     }
 
-    pub fn is_valid(&self, token: &str) -> bool {
-        let mut guard = self.inner.lock().unwrap();
-        prune_expired(&mut guard);
-        guard
-            .get(token)
-            .is_some_and(|expires| *expires > OffsetDateTime::now_utc())
+    pub async fn is_valid(&self, token: &str) -> anyhow::Result<bool> {
+        self.store
+            .auth_session_is_valid(
+                token.to_string(),
+                self.credential_hash.to_vec(),
+                OffsetDateTime::now_utc().unix_timestamp(),
+            )
+            .await
     }
 
-    pub fn remove(&self, token: &str) {
-        self.inner.lock().unwrap().remove(token);
+    pub async fn remove(&self, token: &str) -> anyhow::Result<()> {
+        self.store.delete_auth_session(token.to_string()).await
     }
 
     fn authenticate(&self, peer: IpAddr, password: &str, expected_password: &str) -> LoginResult {
@@ -107,9 +121,9 @@ impl SessionStore {
         LoginResult::Rejected
     }
 
-    pub fn login_cookie(&self, is_https: bool) -> String {
-        let token = self.create_session();
-        self.cookie_string(&token, is_https)
+    pub async fn login_cookie(&self, is_https: bool) -> anyhow::Result<String> {
+        let token = self.create_session().await?;
+        Ok(self.cookie_string(&token, is_https))
     }
 
     pub fn clear_cookie(&self, is_https: bool) -> String {
@@ -135,30 +149,20 @@ impl SessionStore {
     }
 
     #[cfg(test)]
-    pub fn expire_for_test(&self, token: &str) {
-        if let Some(expires) = self.inner.lock().unwrap().get_mut(token) {
-            *expires = OffsetDateTime::UNIX_EPOCH;
-        }
+    pub async fn expire_for_test(&self, token: &str) -> anyhow::Result<()> {
+        self.store.expire_auth_session(token.to_string()).await
     }
 
     #[cfg(test)]
-    pub fn len(&self) -> usize {
-        self.inner.lock().unwrap().len()
+    pub async fn len(&self) -> anyhow::Result<usize> {
+        self.store.auth_session_count().await
     }
 }
 
-fn prune_expired(sessions: &mut HashMap<String, OffsetDateTime>) {
-    let now = OffsetDateTime::now_utc();
-    sessions.retain(|_, expires| *expires > now);
-}
-
-fn evict_oldest(sessions: &mut HashMap<String, OffsetDateTime>) {
-    if let Some(oldest) = sessions
-        .iter()
-        .min_by_key(|(_, expires)| *expires)
-        .map(|(k, _)| k.clone())
-    {
-        sessions.remove(&oldest);
+#[cfg(test)]
+impl Default for SessionStore {
+    fn default() -> Self {
+        Self::new(Store::open_in_memory().unwrap(), "test-password")
     }
 }
 
@@ -227,7 +231,11 @@ async fn login(
         }
     }
     let mut hdrs = HeaderMap::new();
-    let cookie = state.sessions.login_cookie(forwarded_https(&headers));
+    let cookie = state
+        .sessions
+        .login_cookie(forwarded_https(&headers))
+        .await
+        .map_err(session_storage_error)?;
     hdrs.insert(
         header::SET_COOKIE,
         HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static("")),
@@ -244,45 +252,60 @@ async fn login(
 async fn logout(
     State(state): State<ApiState>,
     headers: HeaderMap,
-) -> (StatusCode, HeaderMap, Json<AuthResponse>) {
+) -> Result<(StatusCode, HeaderMap, Json<AuthResponse>), ApiError> {
     let token = session_token(&headers);
-    state.sessions.remove(&token);
+    state
+        .sessions
+        .remove(&token)
+        .await
+        .map_err(session_storage_error)?;
     let mut hdrs = HeaderMap::new();
     let cookie = state.sessions.clear_cookie(forwarded_https(&headers));
     hdrs.insert(
         header::SET_COOKIE,
         HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static("")),
     );
-    (
+    Ok((
         StatusCode::OK,
         hdrs,
         Json(AuthResponse {
             authenticated: false,
         }),
-    )
+    ))
 }
 
-async fn me(State(state): State<ApiState>, headers: HeaderMap) -> Json<AuthResponse> {
-    Json(AuthResponse {
-        authenticated: state.sessions.is_valid(&session_token(&headers)),
-    })
+async fn me(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<AuthResponse>, ApiError> {
+    let authenticated = state
+        .sessions
+        .is_valid(&session_token(&headers))
+        .await
+        .map_err(session_storage_error)?;
+    Ok(Json(AuthResponse { authenticated }))
+}
+
+fn session_storage_error(error: anyhow::Error) -> ApiError {
+    log::error!("session storage operation failed: {error:#}");
+    ApiError::internal("session storage unavailable")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn session_store_prunes_expired_and_enforces_capacity() {
+    #[tokio::test]
+    async fn session_store_prunes_expired_and_enforces_capacity() {
         let store = SessionStore::default();
         // Create more than MAX_SESSIONS tokens
         for i in 0..MAX_SESSIONS + 10 {
-            let token = store.create_session();
+            let token = store.create_session().await.unwrap();
             if i < MAX_SESSIONS {
-                assert!(store.is_valid(&token));
+                assert!(store.is_valid(&token).await.unwrap());
             }
         }
-        let len = store.len();
+        let len = store.len().await.unwrap();
         assert!(len <= MAX_SESSIONS, "len {} > max {}", len, MAX_SESSIONS);
     }
 
@@ -300,5 +323,53 @@ mod tests {
             "correct horse battery stapler",
             "correct horse battery staple"
         ));
+    }
+
+    #[tokio::test]
+    async fn session_remains_valid_after_store_is_reopened() {
+        let database_path = std::env::temp_dir().join(format!(
+            "sms-relayed-session-restart-{}.sqlite",
+            Uuid::new_v4()
+        ));
+        let sessions = SessionStore::new(
+            crate::persistence::Store::open(&database_path)
+                .await
+                .unwrap(),
+            "same-password",
+        );
+        let token = sessions.create_session().await.unwrap();
+        drop(sessions);
+
+        let restarted_sessions = SessionStore::new(
+            crate::persistence::Store::open(&database_path)
+                .await
+                .unwrap(),
+            "same-password",
+        );
+
+        assert!(restarted_sessions.is_valid(&token).await.unwrap());
+
+        drop(restarted_sessions);
+        for path in [
+            database_path.clone(),
+            database_path.with_extension("sqlite-shm"),
+            database_path.with_extension("sqlite-wal"),
+        ] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[tokio::test]
+    async fn changing_the_api_password_invalidates_existing_sessions() {
+        let store = crate::persistence::Store::open_in_memory().unwrap();
+        let sessions = SessionStore::new(store.clone(), "old-password");
+        let token = sessions.create_session().await.unwrap();
+
+        let sessions_after_password_change = SessionStore::new(store, "new-password");
+
+        assert!(!sessions_after_password_change
+            .is_valid(&token)
+            .await
+            .unwrap());
     }
 }
