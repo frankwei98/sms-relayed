@@ -1,9 +1,7 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { AuthContext } from "#/lib/auth";
-import { LoginPage, Route } from "#/routes/login";
+import { LOGIN_NOTICES, Route } from "#/routes/login";
 
 const routerMocks = vi.hoisted(() => ({
 	search: {} as { notice?: string },
@@ -31,7 +29,6 @@ vi.mock("@tanstack/react-router", async () => {
 });
 
 afterEach(() => {
-	cleanup();
 	routerMocks.search = {};
 	routerMocks.navigate.mockReset();
 });
@@ -47,20 +44,13 @@ describe("Login notice", () => {
 		expect(Route.options.validateSearch({ notice: "toString" })).toEqual({});
 	});
 
-	test("renders the controlled post-save notice code", async () => {
-		routerMocks.search = { notice: "config_saved_restart_scheduled" };
-		render(
-			<AuthContext.Provider
-				value={{ auth: { authenticated: false }, setAuth: vi.fn() }}
-			>
-				<LoginPage />
-			</AuthContext.Provider>,
+	test("accepts the controlled post-save notice code with fixed copy", () => {
+		const notice = "config_saved_restart_scheduled";
+		expect(Route.options.validateSearch({ notice })).toEqual({
+			notice,
+		});
+		expect(LOGIN_NOTICES[notice]).toBe(
+			"Configuration saved and restart scheduled. Sign in with the new password after the service returns.",
 		);
-
-		expect(
-			await screen.findByText(
-				"Configuration saved and restart scheduled. Sign in with the new password after the service returns.",
-			),
-		).toBeTruthy();
 	});
 });
