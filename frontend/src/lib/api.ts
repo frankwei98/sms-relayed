@@ -33,7 +33,11 @@ export async function apiFetch<T>(
 			body?.error.message ?? `Request failed: ${response.status}`,
 		);
 	}
-	return (await response.json()) as T;
+	const body = await response.text();
+	if (body.length === 0) {
+		return undefined as T;
+	}
+	return JSON.parse(body) as T;
 }
 
 export type AuthState = { authenticated: boolean };

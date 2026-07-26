@@ -10,6 +10,18 @@ describe("apiFetch monitoring", () => {
 		mocks.captureFailure.mockReset();
 	});
 
+	it("accepts a successful response with an empty body", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn().mockResolvedValue(new Response(null, { status: 202 })),
+		);
+
+		await expect(
+			apiFetch("/api/service/restart", { method: "POST" }),
+		).resolves.toBeUndefined();
+		expect(mocks.captureFailure).not.toHaveBeenCalled();
+	});
+
 	it("reports server errors without sending the request URL", async () => {
 		vi.stubGlobal(
 			"fetch",
