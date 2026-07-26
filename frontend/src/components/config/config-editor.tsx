@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
-import { ChannelEditor } from "#/components/config/channel-editor";
+import {
+	ChannelEditor,
+	normalizeForwardEnabled,
+} from "#/components/config/channel-editor";
 import { Button } from "#/components/ui/button";
 import { Input } from "#/components/ui/input";
 import { Switch } from "#/components/ui/switch";
@@ -13,7 +16,7 @@ export function ConfigEditor() {
 
 	useEffect(() => {
 		apiFetch<AppConfig>("/api/config")
-			.then(setConfig)
+			.then((loadedConfig) => setConfig(normalizeForwardEnabled(loadedConfig)))
 			.catch((e) => setResult(`Error: ${e.message}`))
 			.finally(() => setLoading(false));
 	}, []);
@@ -175,27 +178,12 @@ export function ConfigEditor() {
 			</section>
 
 			<section className="space-y-2">
-				<h3 className="font-medium">forward</h3>
-				<div className="flex items-start gap-2">
-					<span className="w-32 text-sm pt-1">enabled</span>
-					<Input
-						value={s("forward.enabled")}
-						onChange={(e) =>
-							update(
-								"forward.enabled",
-								e.target.value
-									.split(",")
-									.map((s) => s.trim())
-									.filter(Boolean),
-							)
-						}
-						className="h-8 flex-1"
-					/>
+				<div>
+					<h3 className="font-medium">forwarding profiles</h3>
+					<p className="text-xs text-muted-foreground">
+						Configure destinations and choose which profiles are active.
+					</p>
 				</div>
-			</section>
-
-			<section className="space-y-2">
-				<h3 className="font-medium">channels</h3>
 				<ChannelEditor config={config} onUpdate={setConfig} />
 			</section>
 
