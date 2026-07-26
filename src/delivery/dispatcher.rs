@@ -149,6 +149,18 @@ async fn forward_to_profile(
             )
             .await
         }
+        ChannelProfile::Lark { config: pc, .. } => {
+            crate::forward::lark::send(
+                client,
+                tel_number,
+                body,
+                timestamp,
+                &device_name,
+                pc,
+                config,
+            )
+            .await
+        }
         ChannelProfile::Shell { config: pc, .. } => {
             crate::forward::shell::send(
                 shell_runner,

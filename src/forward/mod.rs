@@ -1,5 +1,6 @@
 pub mod bark;
 pub mod dingtalk;
+pub mod lark;
 pub mod shell;
 pub mod telegram;
 pub mod wecom;

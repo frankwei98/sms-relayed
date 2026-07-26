@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use inquire::{Confirm, MultiSelect, Password, Select, Text};
 
 use crate::config::{
-    AppConfig, BarkConfig, DingTalkConfig, ShellConfig, TelegramConfig, WeComConfig,
+    AppConfig, BarkConfig, DingTalkConfig, LarkConfig, ShellConfig, TelegramConfig, WeComConfig,
 };
 
 const EXISTING_CONFIG_PROMPT: &str = "Existing config found";
@@ -84,7 +84,7 @@ pub fn run_setup_wizard(existing: Option<AppConfig>) -> Result<Option<AppConfig>
 
     let selected = MultiSelect::new(
         PUSH_CHANNELS_PROMPT,
-        vec!["Bark", "Telegram", "WeCom", "DingTalk", "Shell"],
+        vec!["Bark", "Telegram", "WeCom", "DingTalk", "Lark", "Shell"],
     )
     .prompt()?;
 
@@ -187,6 +187,22 @@ fn add_profiles_for_channel(cfg: &mut AppConfig, label: &str) -> Result<()> {
                 );
                 cfg.forward.enabled.push(format!("dingtalk.{}", name));
             }
+            "Lark" => {
+                let webhook_url = Password::new("Lark bot webhook URL")
+                    .without_confirmation()
+                    .prompt()?;
+                let secret = Password::new("Lark signing secret (optional)")
+                    .without_confirmation()
+                    .prompt()?;
+                cfg.channels.lark.insert(
+                    name.clone(),
+                    LarkConfig {
+                        webhook_url,
+                        secret,
+                    },
+                );
+                cfg.forward.enabled.push(format!("lark.{}", name));
+            }
             "Shell" => {
                 let path = Text::new("Shell script path").prompt()?;
                 cfg.channels
@@ -211,6 +227,7 @@ fn profile_count(cfg: &AppConfig, label: &str) -> usize {
         "Telegram" => cfg.channels.telegram.len(),
         "WeCom" => cfg.channels.wecom.len(),
         "DingTalk" => cfg.channels.dingtalk.len(),
+        "Lark" => cfg.channels.lark.len(),
         "Shell" => cfg.channels.shell.len(),
         _ => 0,
     }
