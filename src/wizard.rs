@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use inquire::{Confirm, MultiSelect, Password, Select, Text};
 
 use crate::config::{
-    AppConfig, BarkConfig, DingTalkConfig, PushPlusConfig, ShellConfig, TelegramConfig, WeComConfig,
+    AppConfig, BarkConfig, DingTalkConfig, ShellConfig, TelegramConfig, WeComConfig,
 };
 
 const EXISTING_CONFIG_PROMPT: &str = "Existing config found";
@@ -84,7 +84,7 @@ pub fn run_setup_wizard(existing: Option<AppConfig>) -> Result<Option<AppConfig>
 
     let selected = MultiSelect::new(
         PUSH_CHANNELS_PROMPT,
-        vec!["Bark", "Telegram", "PushPlus", "WeCom", "DingTalk", "Shell"],
+        vec!["Bark", "Telegram", "WeCom", "DingTalk", "Shell"],
     )
     .prompt()?;
 
@@ -154,15 +154,6 @@ fn add_profiles_for_channel(cfg: &mut AppConfig, label: &str) -> Result<()> {
                 );
                 cfg.forward.enabled.push(format!("telegram.{}", name));
             }
-            "PushPlus" => {
-                let token = Password::new("PushPlus token")
-                    .without_confirmation()
-                    .prompt()?;
-                cfg.channels
-                    .pushplus
-                    .insert(name.clone(), PushPlusConfig { token });
-                cfg.forward.enabled.push(format!("pushplus.{}", name));
-            }
             "WeCom" => {
                 let corp_id = Text::new("WeCom corp id").prompt()?;
                 let agent_id = Text::new("WeCom agent id").prompt()?;
@@ -218,7 +209,6 @@ fn profile_count(cfg: &AppConfig, label: &str) -> usize {
     match label {
         "Bark" => cfg.channels.bark.len(),
         "Telegram" => cfg.channels.telegram.len(),
-        "PushPlus" => cfg.channels.pushplus.len(),
         "WeCom" => cfg.channels.wecom.len(),
         "DingTalk" => cfg.channels.dingtalk.len(),
         "Shell" => cfg.channels.shell.len(),

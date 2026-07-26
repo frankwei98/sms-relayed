@@ -125,18 +125,6 @@ async fn forward_to_profile(
             )
             .await
         }
-        ChannelProfile::PushPlus { config: pc, .. } => {
-            crate::forward::pushplus::send(
-                client,
-                tel_number,
-                body,
-                timestamp,
-                &device_name,
-                pc,
-                config,
-            )
-            .await
-        }
         ChannelProfile::WeCom { config: pc, .. } => {
             crate::forward::wecom::send(
                 client,

@@ -20,7 +20,6 @@ const CHANNEL_FIELDS: Record<
 			defaultValue: "https://api.telegram.org",
 		},
 	],
-	pushplus: [{ key: "token", label: "Token", defaultValue: "" }],
 	wecom: [
 		{ key: "corp_id", label: "Corp ID", defaultValue: "" },
 		{ key: "agent_id", label: "Agent ID", defaultValue: "" },
@@ -33,6 +32,8 @@ const CHANNEL_FIELDS: Record<
 	],
 	shell: [{ key: "path", label: "Path", defaultValue: "" }],
 };
+
+const CHANNELS = ["bark", "telegram", "wecom", "dingtalk", "shell"] as const;
 
 type Props = {
 	config: AppConfig;
@@ -98,9 +99,7 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 
 	return (
 		<div className="space-y-4">
-			{(
-				["bark", "telegram", "pushplus", "wecom", "dingtalk", "shell"] as const
-			).map((channel) => {
+			{CHANNELS.map((channel) => {
 				const profiles = config.channels[channel] ?? {};
 				const names = Object.keys(profiles);
 				return (
