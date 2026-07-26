@@ -493,11 +493,14 @@ mod route_tests {
             .expect("restart completion channel should remain open");
     }
 
-    async fn expect_no_restart(restarts: &mut tokio::sync::mpsc::UnboundedReceiver<()>) {
-        match tokio::time::timeout(Duration::from_millis(750), restarts.recv()).await {
-            Ok(Some(())) => panic!("restart should not have been scheduled"),
-            Ok(None) | Err(_) => {}
-        }
+    async fn expect_restart_idle(service_control: &service::ServiceControl) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while service_control.restart_pending() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("restart scheduling should become idle after completion");
     }
 
     fn test_state() -> ApiState {
@@ -590,24 +593,17 @@ mod route_tests {
         state.service_control = service::ServiceControl::new(restarter);
 
         assert!(service::schedule_restart(&state));
+        assert!(state.service_control.restart_pending());
         assert!(!service::schedule_restart(&state));
+        assert!(state.service_control.restart_pending());
 
         expect_restart_completed(&mut restarts).await;
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), restarts.recv())
-                .await
-                .is_err(),
-            "a duplicate restart was not coalesced"
-        );
+        expect_restart_idle(&state.service_control).await;
+        assert!(!state.service_control.restart_pending());
 
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !service::schedule_restart(&state) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("restart scheduling should become available after completion");
+        assert!(service::schedule_restart(&state));
         expect_restart_completed(&mut restarts).await;
+        expect_restart_idle(&state.service_control).await;
     }
 
     #[tokio::test]
@@ -705,8 +701,8 @@ mod route_tests {
             write_config_file(&state.config, "password-invalidation-failure");
         state.config_path = config_path.clone();
         let original = std::fs::read_to_string(&config_path).unwrap();
-        let (restarter, mut restarts) = RecordingServiceRestarter::with_completion_signal();
-        state.service_control = service::ServiceControl::new(restarter);
+        state.service_control = service::ServiceControl::new(RecordingServiceRestarter::default());
+        let service_control = state.service_control.clone();
         let token = state.sessions.create_session().await.unwrap();
         state.sessions.fail_next_invalidate_all();
         let mut updated_config = (*state.config).clone();
@@ -735,7 +731,7 @@ mod route_tests {
         assert_eq!(saved, original);
         assert_eq!(crate::config::config_revision(&saved), base_revision);
         assert!(config_temporary_files(&config_path).is_empty());
-        expect_no_restart(&mut restarts).await;
+        assert!(!service_control.restart_pending());
 
         let _ = std::fs::remove_file(config_path);
     }
@@ -747,8 +743,8 @@ mod route_tests {
             write_config_file(&state.config, "password-prepare-failure");
         state.config_path = config_path.clone();
         let original = std::fs::read_to_string(&config_path).unwrap();
-        let (restarter, mut restarts) = RecordingServiceRestarter::with_completion_signal();
-        state.service_control = service::ServiceControl::new(restarter);
+        state.service_control = service::ServiceControl::new(RecordingServiceRestarter::default());
+        let service_control = state.service_control.clone();
         let token = state.sessions.create_session().await.unwrap();
         let sessions = state.sessions.clone();
         crate::config::fail_next_prepare_config_write_for(&config_path);
@@ -779,7 +775,7 @@ mod route_tests {
         assert_eq!(saved, original);
         assert_eq!(crate::config::config_revision(&saved), base_revision);
         assert!(config_temporary_files(&config_path).is_empty());
-        expect_no_restart(&mut restarts).await;
+        assert!(!service_control.restart_pending());
 
         let _ = std::fs::remove_file(config_path);
     }
@@ -791,8 +787,8 @@ mod route_tests {
             write_config_file(&state.config, "password-commit-failure");
         state.config_path = config_path.clone();
         let original = std::fs::read_to_string(&config_path).unwrap();
-        let (restarter, mut restarts) = RecordingServiceRestarter::with_completion_signal();
-        state.service_control = service::ServiceControl::new(restarter);
+        state.service_control = service::ServiceControl::new(RecordingServiceRestarter::default());
+        let service_control = state.service_control.clone();
         let token = state.sessions.create_session().await.unwrap();
         let sessions = state.sessions.clone();
         crate::config::fail_next_config_commit_for(&config_path);
@@ -830,7 +826,7 @@ mod route_tests {
         assert_eq!(saved, original);
         assert_eq!(crate::config::config_revision(&saved), base_revision);
         assert!(config_temporary_files(&config_path).is_empty());
-        expect_no_restart(&mut restarts).await;
+        assert!(!service_control.restart_pending());
 
         let _ = std::fs::remove_file(config_path);
     }
