@@ -1,4 +1,5 @@
 use anyhow::Result;
+use hmac::{Hmac, Mac};
 use pbkdf2::pbkdf2_hmac;
 use rusqlite::{params, OptionalExtension};
 use sha2::Sha256;
@@ -10,7 +11,11 @@ use super::MessageStore;
 const PASSWORD_HASH_ROUNDS: u32 = 100_000;
 
 impl MessageStore {
-    pub fn synchronize_auth_password(&self, password: &str) -> Result<()> {
+    pub fn synchronize_auth_password(
+        &self,
+        password: &str,
+        credential_secret: &[u8],
+    ) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let existing: Option<(Vec<u8>, Vec<u8>)> = tx
@@ -21,12 +26,12 @@ impl MessageStore {
             )
             .optional()?;
         let password_matches = existing.as_ref().is_some_and(|(salt, verifier)| {
-            let candidate = password_verifier(password, salt);
+            let candidate = password_verifier(password, salt, credential_secret);
             candidate.as_slice().ct_eq(verifier.as_slice()).into()
         });
         if !password_matches {
             let salt = Uuid::new_v4().into_bytes();
-            let verifier = password_verifier(password, &salt);
+            let verifier = password_verifier(password, &salt, credential_secret);
             tx.execute(
                 "INSERT INTO auth_credential_state (singleton, salt, verifier)
                  VALUES (1, ?1, ?2)
@@ -129,13 +134,16 @@ impl MessageStore {
     }
 }
 
-fn password_verifier(password: &str, salt: &[u8]) -> [u8; 32] {
-    let mut verifier = [0_u8; 32];
+fn password_verifier(password: &str, salt: &[u8], credential_secret: &[u8]) -> [u8; 32] {
+    let mut derived = [0_u8; 32];
     pbkdf2_hmac::<Sha256>(
         password.as_bytes(),
         salt,
         PASSWORD_HASH_ROUNDS,
-        &mut verifier,
+        &mut derived,
     );
-    verifier
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(credential_secret)
+        .expect("HMAC accepts any key size");
+    mac.update(&derived);
+    mac.finalize().into_bytes().into()
 }

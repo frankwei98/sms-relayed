@@ -1,5 +1,8 @@
 use std::collections::HashMap;
+use std::fs;
+use std::io::Write;
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant};
 
@@ -23,6 +26,7 @@ const SESSION_DAYS: i64 = 7;
 const MAX_SESSIONS: usize = 256;
 const MAX_LOGIN_FAILURES: u32 = 5;
 const LOGIN_FAILURE_WINDOW: StdDuration = StdDuration::from_secs(5 * 60);
+const CREDENTIAL_SECRET_BYTES: usize = 32;
 
 #[derive(Clone, Copy)]
 struct LoginFailures {
@@ -45,9 +49,13 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
-    pub async fn open(store: Store, password: &str) -> anyhow::Result<Self> {
+    pub async fn open(store: Store, password: &str, database_path: &Path) -> anyhow::Result<Self> {
+        let secret_path = credential_secret_path(database_path);
+        let credential_secret =
+            tokio::task::spawn_blocking(move || load_or_create_credential_secret(&secret_path))
+                .await??;
         store
-            .synchronize_auth_password(password.to_string())
+            .synchronize_auth_password(password.to_string(), credential_secret.to_vec())
             .await?;
         Ok(Self::new(store, password))
     }
@@ -173,6 +181,51 @@ impl SessionStore {
     pub async fn len(&self) -> anyhow::Result<usize> {
         self.store.auth_session_count().await
     }
+}
+
+fn credential_secret_path(database_path: &Path) -> PathBuf {
+    let mut path = database_path.as_os_str().to_os_string();
+    path.push(".auth-key");
+    path.into()
+}
+
+fn load_or_create_credential_secret(path: &Path) -> anyhow::Result<[u8; CREDENTIAL_SECRET_BYTES]> {
+    match fs::read(path) {
+        Ok(secret) => return parse_credential_secret(secret),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let mut secret = [0_u8; CREDENTIAL_SECRET_BYTES];
+    secret[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+    secret[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(mut file) => {
+            file.write_all(&secret)?;
+            file.sync_all()?;
+            Ok(secret)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            parse_credential_secret(fs::read(path)?)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn parse_credential_secret(secret: Vec<u8>) -> anyhow::Result<[u8; CREDENTIAL_SECRET_BYTES]> {
+    secret.try_into().map_err(|secret: Vec<u8>| {
+        anyhow::anyhow!(
+            "authentication key must be {CREDENTIAL_SECRET_BYTES} bytes, got {}",
+            secret.len()
+        )
+    })
 }
 
 fn token_hash(token: &str) -> [u8; 32] {
@@ -363,6 +416,7 @@ mod tests {
                 .await
                 .unwrap(),
             "same-password",
+            &database_path,
         )
         .await
         .unwrap();
@@ -374,6 +428,7 @@ mod tests {
                 .await
                 .unwrap(),
             "same-password",
+            &database_path,
         )
         .await
         .unwrap();
@@ -385,6 +440,7 @@ mod tests {
             database_path.clone(),
             database_path.with_extension("sqlite-shm"),
             database_path.with_extension("sqlite-wal"),
+            credential_secret_path(&database_path),
         ] {
             let _ = std::fs::remove_file(path);
         }
@@ -393,26 +449,33 @@ mod tests {
     #[tokio::test]
     async fn changing_the_api_password_invalidates_existing_sessions() {
         let store = crate::persistence::Store::open_in_memory().unwrap();
-        let sessions = SessionStore::open(store.clone(), "old-password")
+        let config_path = std::env::temp_dir().join(format!(
+            "sms-relayed-password-restart-{}.toml",
+            Uuid::new_v4()
+        ));
+        let sessions = SessionStore::open(store.clone(), "old-password", &config_path)
             .await
             .unwrap();
         let token = sessions.create_session().await.unwrap();
 
-        let sessions_after_password_change = SessionStore::open(store.clone(), "new-password")
-            .await
-            .unwrap();
+        let sessions_after_password_change =
+            SessionStore::open(store.clone(), "new-password", &config_path)
+                .await
+                .unwrap();
 
         assert!(!sessions_after_password_change
             .is_valid(&token)
             .await
             .unwrap());
 
-        let sessions_after_password_reuse =
-            SessionStore::open(store, "old-password").await.unwrap();
+        let sessions_after_password_reuse = SessionStore::open(store, "old-password", &config_path)
+            .await
+            .unwrap();
         assert!(!sessions_after_password_reuse
             .is_valid(&token)
             .await
             .unwrap());
+        let _ = fs::remove_file(credential_secret_path(&config_path));
     }
 
     #[tokio::test]

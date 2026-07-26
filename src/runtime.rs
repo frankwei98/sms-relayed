@@ -72,7 +72,12 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
             events: events.clone(),
             delivery_wakeup: delivery_wakeup.clone(),
             started_at: Instant::now(),
-            sessions: SessionStore::open(store.clone(), &config.api.password).await?,
+            sessions: SessionStore::open(
+                store.clone(),
+                &config.api.password,
+                Path::new(&config.api.database_path),
+            )
+            .await?,
             modem: modem_service,
             sms_sender: sms_sender.clone(),
         };
