@@ -18,6 +18,9 @@ import type { AppConfig } from "#/lib/config-model";
 const routerMocks = vi.hoisted(() => ({
 	navigate: vi.fn(),
 	shouldBlockFn: vi.fn(),
+	blockerStatus: "idle" as "idle" | "blocked",
+	proceed: vi.fn(),
+	reset: vi.fn(),
 }));
 
 vi.mock("@tanstack/react-router", async () => {
@@ -37,12 +40,12 @@ vi.mock("@tanstack/react-router", async () => {
 		}) => {
 			routerMocks.shouldBlockFn.mockImplementation(shouldBlockFn);
 			return {
-				status: "idle",
+				status: routerMocks.blockerStatus,
 				current: undefined,
 				next: undefined,
 				action: undefined,
-				proceed: undefined,
-				reset: undefined,
+				proceed: routerMocks.proceed,
+				reset: routerMocks.reset,
 			};
 		},
 	};
@@ -200,6 +203,9 @@ function EditorHarness({
 beforeEach(() => {
 	routerMocks.navigate.mockReset();
 	routerMocks.shouldBlockFn.mockReset();
+	routerMocks.blockerStatus = "idle";
+	routerMocks.proceed.mockReset();
+	routerMocks.reset.mockReset();
 });
 
 afterEach(() => {
@@ -208,6 +214,69 @@ afterEach(() => {
 });
 
 describe("ConfigEditor workspace", () => {
+	test("associates field help with its form control", async () => {
+		installApi();
+		render(<EditorHarness />);
+
+		const input = await screen.findByLabelText("Device name");
+		const descriptionId = input.getAttribute("aria-describedby");
+		expect(descriptionId).toBe("app-device-name-description");
+		expect(document.getElementById(descriptionId ?? "")?.textContent).toContain(
+			"Included in forwarding payloads",
+		);
+	});
+
+	test("keeps comma-separated input editable and updates the protected draft", async () => {
+		installApi();
+		render(<EditorHarness initialSection="sms" />);
+
+		const keywords = (await screen.findByLabelText(
+			"Code keywords",
+		)) as HTMLInputElement;
+		fireEvent.change(keywords, { target: { value: "code," } });
+		expect(keywords.value).toBe("code,");
+		fireEvent.blur(keywords);
+		expect(keywords.value).toBe("code");
+
+		fireEvent.change(keywords, { target: { value: "code, otp" } });
+		expect(keywords.value).toBe("code, otp");
+		expect(
+			routerMocks.shouldBlockFn({
+				current: { pathname: "/config" },
+				next: { pathname: "/" },
+			}),
+		).toBe(true);
+
+		fireEvent.blur(keywords);
+		expect(keywords.value).toBe("code, otp");
+	});
+
+	test("allows replacing a number without writing zero while it is empty", async () => {
+		const { requests } = installApi();
+		render(<EditorHarness initialSection="forwarding" />);
+
+		const concurrency = (await screen.findByLabelText(
+			"Concurrent deliveries",
+		)) as HTMLInputElement;
+		fireEvent.change(concurrency, { target: { value: "" } });
+		expect(concurrency.value).toBe("");
+		expect(
+			(screen.getByRole("button", { name: "Save" }) as HTMLButtonElement)
+				.disabled,
+		).toBe(true);
+
+		fireEvent.change(concurrency, { target: { value: "4" } });
+		fireEvent.click(screen.getByRole("button", { name: "Check" }));
+		await screen.findByText("Check passed");
+		const checkRequest = requests.find(
+			(request) => request.url === "/api/config/check",
+		);
+		expect(
+			(JSON.parse(checkRequest?.init?.body as string) as AppConfig).delivery
+				.concurrency,
+		).toBe(4);
+	});
+
 	test("preserves one draft across categories and submits the complete candidate", async () => {
 		const { requests } = installApi();
 		render(<EditorHarness />);
@@ -437,8 +506,47 @@ describe("ConfigEditor workspace", () => {
 			requests.some((request) => request.url === "/api/service/restart"),
 		).toBe(false);
 		expect(routerMocks.navigate).toHaveBeenCalledWith(
-			expect.objectContaining({ to: "/login" }),
+			expect.objectContaining({
+				to: "/login",
+				search: { notice: "config_saved_restart_scheduled" },
+			}),
 		);
+	});
+
+	test("uses singular category copy for one changed section", async () => {
+		installApi();
+		render(<EditorHarness />);
+
+		fireEvent.change(await screen.findByLabelText("Device name"), {
+			target: { value: "relay-two" },
+		});
+		expect(screen.getByText("1 category changed")).toBeTruthy();
+	});
+
+	test("shows an unknown operational warning code instead of a blank row", async () => {
+		installApi({ warnings: ["future_warning"] });
+		render(<EditorHarness />);
+
+		fireEvent.change(await screen.findByLabelText("Device name"), {
+			target: { value: "relay-two" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "Save" }));
+		expect(await screen.findByText("future_warning")).toBeTruthy();
+	});
+
+	test.each([
+		["Stay", "reset"],
+		["Discard and leave", "proceed"],
+	] as const)("resolves blocked navigation with %s", async (label, action) => {
+		installApi();
+		render(<EditorHarness />);
+
+		const deviceName = await screen.findByLabelText("Device name");
+		routerMocks.blockerStatus = "blocked";
+		fireEvent.change(deviceName, { target: { value: "relay-two" } });
+		expect(await screen.findByText("Leave with unsaved changes?")).toBeTruthy();
+		fireEvent.click(screen.getByRole("button", { name: label }));
+		expect(routerMocks[action]).toHaveBeenCalledOnce();
 	});
 
 	test("exposes delivery, timeout, and retention categories", async () => {

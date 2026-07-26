@@ -152,8 +152,7 @@ function ConfigWorkspace({
 				await navigate({
 					to: "/login",
 					search: {
-						notice:
-							"Configuration saved and restart scheduled. Sign in with the new password after the service returns.",
+						notice: "config_saved_restart_scheduled",
 					},
 				});
 			} finally {
@@ -191,7 +190,9 @@ function ConfigWorkspace({
 					<p className="text-sm font-semibold">Configuration</p>
 					<p className="text-xs text-muted-foreground">
 						{draft.dirtySections.size > 0
-							? `${draft.dirtySections.size} categories changed`
+							? `${draft.dirtySections.size} ${
+									draft.dirtySections.size === 1 ? "category" : "categories"
+								} changed`
 							: "No unsaved changes"}
 					</p>
 				</div>
@@ -557,7 +558,7 @@ function SaveReviewDialog({
 									{preview.response.warnings.map((warning) => (
 										<div key={warning} className="flex gap-2 text-sm">
 											<AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-700 dark:text-amber-400" />
-											<span>{warningLabels[warning]}</span>
+											<span>{warningLabels[warning] ?? warning}</span>
 										</div>
 									))}
 								</div>

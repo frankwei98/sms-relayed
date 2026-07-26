@@ -9,7 +9,7 @@ import {
 	saveConfig,
 } from "#/lib/config-api";
 import type { AppConfig } from "#/lib/config-model";
-import type { ConfigSection } from "./config-sections";
+import { CONFIG_SECTIONS, type ConfigSection } from "./config-sections";
 
 export type ConfigCheckState =
 	| { status: "idle" }
@@ -95,14 +95,7 @@ export function useConfigDraft(initialDocument: ConfigDocument) {
 
 	const dirtySections = useMemo(() => {
 		const dirty = new Set<ConfigSection>();
-		for (const section of [
-			"device",
-			"sms",
-			"forwarding",
-			"api",
-			"timeouts",
-			"retention",
-		] as const) {
+		for (const section of CONFIG_SECTIONS) {
 			if (
 				!structurallyEqual(
 					sectionValue(baseline, section),

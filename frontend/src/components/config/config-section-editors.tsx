@@ -1,4 +1,9 @@
-import type { ReactNode } from "react";
+import {
+	type ComponentProps,
+	cloneElement,
+	type ReactElement,
+	useState,
+} from "react";
 import { ChannelEditor } from "#/components/config/channel-editor";
 import { Input } from "#/components/ui/input";
 import { Switch } from "#/components/ui/switch";
@@ -15,11 +20,14 @@ type FieldProps = {
 	id: string;
 	label: string;
 	description?: string;
-	children: ReactNode;
+	children: ReactElement<{ "aria-describedby"?: string }>;
 };
 
 function Field({ id, label, description, children }: FieldProps) {
 	const descriptionId = description ? `${id}-description` : undefined;
+	const describedBy = [children.props["aria-describedby"], descriptionId]
+		.filter(Boolean)
+		.join(" ");
 	return (
 		<div className="grid gap-2 border-b py-4 last:border-b-0 md:grid-cols-[13rem_minmax(0,1fr)] md:gap-6">
 			<div>
@@ -35,8 +43,10 @@ function Field({ id, label, description, children }: FieldProps) {
 					</p>
 				) : null}
 			</div>
-			<div className="min-w-0" aria-describedby={descriptionId}>
-				{children}
+			<div className="min-w-0">
+				{cloneElement(children, {
+					"aria-describedby": describedBy || undefined,
+				})}
 			</div>
 		</div>
 	);
@@ -64,6 +74,59 @@ function arrayInput(next: string): string[] {
 		.split(",")
 		.map((entry) => entry.trim())
 		.filter(Boolean);
+}
+
+type ArrayInputProps = Omit<
+	ComponentProps<typeof Input>,
+	"value" | "onChange" | "onBlur"
+> & {
+	value: string[];
+	onValueChange: (value: string[]) => void;
+};
+
+function ArrayInput({ value, onValueChange, ...props }: ArrayInputProps) {
+	const [text, setText] = useState(() => value.join(", "));
+
+	return (
+		<Input
+			{...props}
+			value={text}
+			onChange={(event) => {
+				const next = event.target.value;
+				setText(next);
+				onValueChange(arrayInput(next));
+			}}
+			onBlur={() => setText(value.join(", "))}
+		/>
+	);
+}
+
+type NumberInputProps = Omit<
+	ComponentProps<typeof Input>,
+	"value" | "onChange" | "onBlur" | "type"
+> & {
+	value: number;
+	onValueChange: (value: number) => void;
+};
+
+function NumberInput({ value, onValueChange, ...props }: NumberInputProps) {
+	const [text, setText] = useState(() => String(value));
+
+	return (
+		<Input
+			{...props}
+			type="number"
+			value={text}
+			onChange={(event) => {
+				const next = event.target.value;
+				setText(next);
+				if (next === "") return;
+				const parsed = Number(next);
+				if (Number.isFinite(parsed)) onValueChange(parsed);
+			}}
+			onBlur={() => setText(String(value))}
+		/>
+	);
 }
 
 export function ConfigSectionEditor({
@@ -156,12 +219,10 @@ function SmsSection({
 				label="Ignored storage"
 				description="Comma-separated storage identifiers, such as sm."
 			>
-				<Input
+				<ArrayInput
 					id="sms-ignore-storage"
-					value={config.sms.ignore_storage.join(", ")}
-					onChange={(event) =>
-						onPathChange("sms.ignore_storage", arrayInput(event.target.value))
-					}
+					value={config.sms.ignore_storage}
+					onValueChange={(value) => onPathChange("sms.ignore_storage", value)}
 				/>
 			</Field>
 			<Field
@@ -169,12 +230,10 @@ function SmsSection({
 				label="Code keywords"
 				description="Comma-separated, case-insensitive phrases used to recognize verification codes."
 			>
-				<Input
+				<ArrayInput
 					id="sms-code-keywords"
-					value={config.sms.code_keywords.join(", ")}
-					onChange={(event) =>
-						onPathChange("sms.code_keywords", arrayInput(event.target.value))
-					}
+					value={config.sms.code_keywords}
+					onValueChange={(value) => onPathChange("sms.code_keywords", value)}
 				/>
 			</Field>
 		</>
@@ -197,15 +256,12 @@ function ForwardingSection({
 				label="Concurrent deliveries"
 				description="Number of forwarding jobs processed at once. Valid range: 1–16."
 			>
-				<Input
+				<NumberInput
 					id="delivery-concurrency"
-					type="number"
 					min={1}
 					max={16}
 					value={config.delivery.concurrency}
-					onChange={(event) =>
-						onPathChange("delivery.concurrency", Number(event.target.value))
-					}
+					onValueChange={(value) => onPathChange("delivery.concurrency", value)}
 				/>
 			</Field>
 			<div className="pt-6">
@@ -245,15 +301,12 @@ function ApiSection({
 				/>
 			</Field>
 			<Field id="api-port" label="Port" description="Valid range: 1–65535.">
-				<Input
+				<NumberInput
 					id="api-port"
-					type="number"
 					min={1}
 					max={65535}
 					value={config.api.port}
-					onChange={(event) =>
-						onPathChange("api.port", Number(event.target.value))
-					}
+					onValueChange={(value) => onPathChange("api.port", value)}
 				/>
 			</Field>
 			<Field
@@ -311,41 +364,32 @@ function TimeoutsSection({
 				label="Connect timeout"
 				description="Must be positive and no greater than the request timeout."
 			>
-				<Input
+				<NumberInput
 					id="http-connect-timeout"
-					type="number"
 					min={1}
 					value={config.http.connect_timeout_secs}
-					onChange={(event) =>
-						onPathChange(
-							"http.connect_timeout_secs",
-							Number(event.target.value),
-						)
+					onValueChange={(value) =>
+						onPathChange("http.connect_timeout_secs", value)
 					}
 				/>
 			</Field>
 			<Field id="http-request-timeout" label="Request timeout">
-				<Input
+				<NumberInput
 					id="http-request-timeout"
-					type="number"
 					min={1}
 					value={config.http.request_timeout_secs}
-					onChange={(event) =>
-						onPathChange(
-							"http.request_timeout_secs",
-							Number(event.target.value),
-						)
+					onValueChange={(value) =>
+						onPathChange("http.request_timeout_secs", value)
 					}
 				/>
 			</Field>
 			<Field id="shell-timeout" label="Shell timeout">
-				<Input
+				<NumberInput
 					id="shell-timeout"
-					type="number"
 					min={1}
 					value={config.http.shell_timeout_secs}
-					onChange={(event) =>
-						onPathChange("http.shell_timeout_secs", Number(event.target.value))
+					onValueChange={(value) =>
+						onPathChange("http.shell_timeout_secs", value)
 					}
 				/>
 			</Field>
@@ -377,13 +421,12 @@ function RetentionSection({
 				label="Maximum age"
 				description="Messages older than this many days become eligible for cleanup."
 			>
-				<Input
+				<NumberInput
 					id="retention-max-age"
-					type="number"
 					min={1}
 					value={config.retention.max_age_days}
-					onChange={(event) =>
-						onPathChange("retention.max_age_days", Number(event.target.value))
+					onValueChange={(value) =>
+						onPathChange("retention.max_age_days", value)
 					}
 				/>
 			</Field>
@@ -392,14 +435,11 @@ function RetentionSection({
 				label="Batch size"
 				description="Maximum rows removed by one cleanup pass."
 			>
-				<Input
+				<NumberInput
 					id="retention-batch-size"
-					type="number"
 					min={1}
 					value={config.retention.batch_size}
-					onChange={(event) =>
-						onPathChange("retention.batch_size", Number(event.target.value))
-					}
+					onValueChange={(value) => onPathChange("retention.batch_size", value)}
 				/>
 			</Field>
 		</>

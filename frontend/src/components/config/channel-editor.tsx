@@ -253,6 +253,7 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 				const duplicateName =
 					candidateName.length > 0 && candidateName in profiles;
 				const newProfileId = `new-${channel}-profile`;
+				const duplicateNameId = `${newProfileId}-duplicate`;
 				return (
 					<div key={channel} className="rounded-xl border bg-card/30 p-3">
 						<h4 className="mb-2 text-sm font-medium capitalize">{channel}</h4>
@@ -363,6 +364,7 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 									}
 									className="h-8 flex-1 text-xs"
 									aria-invalid={duplicateName}
+									aria-describedby={duplicateName ? duplicateNameId : undefined}
 								/>
 								<Button
 									variant="outline"
@@ -374,7 +376,10 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 								</Button>
 							</div>
 							{duplicateName ? (
-								<p className="mt-1 text-xs text-destructive">
+								<p
+									id={duplicateNameId}
+									className="mt-1 text-xs text-destructive"
+								>
 									That profile name already exists.
 								</p>
 							) : null}
