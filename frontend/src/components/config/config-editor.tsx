@@ -12,6 +12,7 @@ import {
 	XCircle,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { ConfigSectionEditor } from "#/components/config/config-section-editors";
 import {
 	CONFIG_SECTION_DEFINITIONS,
@@ -46,6 +47,7 @@ export function ConfigEditor({ section, onSectionChange }: ConfigEditorProps) {
 	const [document, setDocument] = useState<ConfigDocument | null>(null);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState("");
+	const { t } = useTranslation();
 
 	const load = useCallback(async () => {
 		setLoading(true);
@@ -67,7 +69,7 @@ export function ConfigEditor({ section, onSectionChange }: ConfigEditorProps) {
 		return (
 			<div className="flex h-full items-center justify-center text-sm text-muted-foreground">
 				<LoaderCircle className="mr-2 size-4 animate-spin" />
-				Loading configuration…
+				{t("config.editor.loading")}
 			</div>
 		);
 	}
@@ -76,14 +78,14 @@ export function ConfigEditor({ section, onSectionChange }: ConfigEditorProps) {
 		return (
 			<div className="flex h-full items-center justify-center p-6">
 				<div className="max-w-md rounded-xl border border-destructive/30 bg-destructive/5 p-5">
-					<h2 className="font-semibold">Configuration unavailable</h2>
+					<h2 className="font-semibold">{t("config.error.title")}</h2>
 					<p className="mt-2 text-sm text-muted-foreground">{error}</p>
 					<Button
 						className="mt-4"
 						variant="outline"
 						onClick={() => void load()}
 					>
-						Retry
+						{t("common.retry")}
 					</Button>
 				</div>
 			</div>
@@ -123,6 +125,7 @@ function ConfigWorkspace({
 	const [restartBusy, setRestartBusy] = useState(false);
 	const [actionMessage, setActionMessage] = useState("");
 	const allowNavigation = useRef(false);
+	const { t } = useTranslation();
 	const activeSection = useMemo(
 		() =>
 			CONFIG_SECTION_DEFINITIONS.find(
@@ -162,8 +165,8 @@ function ConfigWorkspace({
 		}
 		setActionMessage(
 			result.requires_restart
-				? "Configuration saved. Restart required."
-				: "Configuration saved.",
+				? t("config.status.savedRestart")
+				: t("config.status.saved"),
 		);
 	}
 
@@ -172,12 +175,14 @@ function ConfigWorkspace({
 		setActionMessage("");
 		try {
 			await scheduleRestart();
-			setActionMessage(
-				"Restart scheduled. The dashboard may disconnect briefly.",
-			);
+			setActionMessage(t("config.status.restartScheduled"));
 			setRestartOpen(false);
 		} catch (restartError) {
-			setActionMessage(`Restart failed: ${(restartError as Error).message}`);
+			setActionMessage(
+				t("config.status.restartFailed", {
+					message: (restartError as Error).message,
+				}),
+			);
 		} finally {
 			setRestartBusy(false);
 		}
@@ -187,13 +192,13 @@ function ConfigWorkspace({
 		<>
 			<div className="flex shrink-0 items-center justify-between border-b px-4 py-3">
 				<div>
-					<p className="text-sm font-semibold">Configuration</p>
+					<p className="text-sm font-semibold">{t("config.sidebar.title")}</p>
 					<p className="text-xs text-muted-foreground">
 						{draft.dirtySections.size > 0
-							? `${draft.dirtySections.size} ${
-									draft.dirtySections.size === 1 ? "category" : "categories"
-								} changed`
-							: "No unsaved changes"}
+							? t("config.sidebar.dirty", {
+									count: draft.dirtySections.size,
+								})
+							: t("config.sidebar.clean")}
 					</p>
 				</div>
 				<Button
@@ -201,14 +206,14 @@ function ConfigWorkspace({
 					size="icon-sm"
 					className="md:hidden"
 					onClick={() => setMobileNavigationOpen(false)}
-					aria-label="Back to configuration"
+					aria-label={t("header.ariaBackConfig")}
 				>
 					<ChevronLeft className="size-4" />
 				</Button>
 			</div>
 			<nav
 				className="min-h-0 flex-1 overflow-y-auto p-2"
-				aria-label="Config categories"
+				aria-label={t("config.sidebar.ariaLabel")}
 			>
 				{CONFIG_SECTION_DEFINITIONS.map((definition) => {
 					const Icon = definition.icon;
@@ -232,16 +237,16 @@ function ConfigWorkspace({
 							<Icon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
 							<span className="min-w-0 flex-1">
 								<span className="flex items-center gap-2 text-sm font-medium">
-									{definition.label}
+									{t(definition.labelTKey)}
 									{dirtySection ? (
 										<CircleDot
 											className="size-3 text-amber-600 dark:text-amber-400"
-											aria-label="Unsaved changes"
+											aria-label={t("config.sidebar.ariaUnsaved")}
 										/>
 									) : null}
 								</span>
 								<span className="mt-0.5 block text-xs leading-snug text-muted-foreground">
-									{definition.description}
+									{t(definition.descriptionTKey)}
 								</span>
 							</span>
 						</button>
@@ -254,7 +259,7 @@ function ConfigWorkspace({
 	return (
 		<WorkspaceLayout
 			navigation={navigation}
-			navigationLabel="Configuration categories"
+			navigationLabel={t("config.sidebar.ariaLabel")}
 			mobileNavigationOpen={mobileNavigationOpen}
 		>
 			<div className="flex shrink-0 flex-col border-b bg-background/95 supports-backdrop-filter:backdrop-blur">
@@ -266,15 +271,19 @@ function ConfigWorkspace({
 						onClick={() => setMobileNavigationOpen(true)}
 					>
 						<ListTree className="size-4" />
-						Categories
+						{t("config.sidebar.categories")}
 					</Button>
 					<div className="min-w-0 flex-1">
 						<p className="truncate text-sm font-semibold">
-							{activeSection.label}
+							{t(activeSection.labelTKey)}
 						</p>
 						<p className="truncate text-xs text-muted-foreground">
-							{draft.isDirty ? "Unsaved draft" : "Saved configuration"}
-							{draft.restartRequired ? " · Restart required" : ""}
+							{draft.isDirty
+								? t("config.editor.unsavedDraft")
+								: t("config.editor.saved")}
+							{draft.restartRequired
+								? ` · ${t("config.editor.restartRequired")}`
+								: ""}
 						</p>
 					</div>
 					<div className="flex shrink-0 items-center gap-2">
@@ -284,7 +293,7 @@ function ConfigWorkspace({
 							disabled={!draft.isDirty || draft.preview.status === "loading"}
 						>
 							<Save className="size-4" />
-							Save
+							{t("config.action.save")}
 						</Button>
 						<Button
 							variant="outline"
@@ -300,7 +309,7 @@ function ConfigWorkspace({
 							) : (
 								<CheckCircle2 className="size-4" />
 							)}
-							Check
+							{t("config.action.check")}
 						</Button>
 						<Button
 							variant="destructive"
@@ -308,7 +317,7 @@ function ConfigWorkspace({
 							onClick={() => setRestartOpen(true)}
 						>
 							<RotateCcw className="size-4" />
-							Restart
+							{t("config.action.restart")}
 						</Button>
 					</div>
 				</div>
@@ -343,24 +352,20 @@ function ConfigWorkspace({
 			<Dialog open={restartOpen} onOpenChange={setRestartOpen}>
 				<DialogContent>
 					<DialogHeader>
-						<DialogTitle>Schedule service restart?</DialogTitle>
+						<DialogTitle>{t("config.restartDialog.title")}</DialogTitle>
 						<DialogDescription>
-							The request only schedules the service-manager command. This page
-							may disconnect before the service is available again.
+							{t("config.restartDialog.description")}
 						</DialogDescription>
 					</DialogHeader>
 					{draft.isDirty ? (
 						<div className="flex gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
 							<AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-700 dark:text-amber-400" />
-							<p>
-								Unsaved edits are only in this browser tab. Restart uses the
-								persisted file and may make this draft unrecoverable.
-							</p>
+							<p>{t("config.restartDialog.unsavedWarning")}</p>
 						</div>
 					) : null}
 					<DialogFooter>
 						<Button variant="outline" onClick={() => setRestartOpen(false)}>
-							Cancel
+							{t("config.restartDialog.cancel")}
 						</Button>
 						<Button
 							variant="destructive"
@@ -372,7 +377,7 @@ function ConfigWorkspace({
 							) : (
 								<RotateCcw className="size-4" />
 							)}
-							Schedule restart
+							{t("config.restartDialog.scheduleRestart")}
 						</Button>
 					</DialogFooter>
 				</DialogContent>
@@ -386,10 +391,9 @@ function ConfigWorkspace({
 			>
 				<DialogContent>
 					<DialogHeader>
-						<DialogTitle>Leave with unsaved changes?</DialogTitle>
+						<DialogTitle>{t("config.leaveDialog.title")}</DialogTitle>
 						<DialogDescription>
-							The configuration draft contains credentials and is intentionally
-							not stored in the browser. Leaving will discard it.
+							{t("config.leaveDialog.description")}
 						</DialogDescription>
 					</DialogHeader>
 					<DialogFooter>
@@ -397,13 +401,13 @@ function ConfigWorkspace({
 							variant="outline"
 							onClick={() => blocker.status === "blocked" && blocker.reset()}
 						>
-							Stay
+							{t("config.leaveDialog.stay")}
 						</Button>
 						<Button
 							variant="destructive"
 							onClick={() => blocker.status === "blocked" && blocker.proceed()}
 						>
-							Discard and leave
+							{t("config.leaveDialog.discard")}
 						</Button>
 					</DialogFooter>
 				</DialogContent>
@@ -419,15 +423,16 @@ function ConfigStatusLine({
 	check: ReturnType<typeof useConfigDraft>["check"];
 	message: string;
 }) {
-	let checkText = "Not checked";
+	const { t } = useTranslation();
+	let checkText = t("config.action.notChecked");
 	let className = "text-muted-foreground";
-	if (check.status === "checking") checkText = "Checking complete draft…";
+	if (check.status === "checking") checkText = t("config.action.checking");
 	if (check.status === "passed") {
-		checkText = "Check passed";
+		checkText = t("config.action.checkPassed");
 		className = "text-emerald-700 dark:text-emerald-400";
 	}
 	if (check.status === "failed") {
-		checkText = `Check failed: ${check.message}`;
+		checkText = t("config.action.checkFailed", { message: check.message });
 		className = "text-destructive";
 	}
 	const checkInProgressOrFailed =
@@ -454,13 +459,12 @@ function SaveReviewDialog({
 	onReload: () => void;
 }) {
 	const open = preview.status !== "closed";
+	const { t } = useTranslation();
 	const warningLabels: Record<ConfigWarning, string> = {
-		password_change:
-			"All sessions will be signed out after Save + Restart is scheduled.",
-		api_disable: "The dashboard will be unavailable after restart.",
-		api_endpoint_change: "The dashboard address may change after restart.",
-		database_path_change:
-			"The service will use a different message database after restart.",
+		password_change: t("config.warnings.passwordChange"),
+		api_disable: t("config.warnings.apiDisable"),
+		api_endpoint_change: t("config.warnings.apiEndpointChange"),
+		database_path_change: t("config.warnings.databasePathChange"),
 	};
 
 	return (
@@ -477,10 +481,9 @@ function SaveReviewDialog({
 				showCloseButton={preview.status !== "ready" || !preview.saving}
 			>
 				<DialogHeader className="shrink-0 border-b px-4 py-4 pr-12 md:px-6">
-					<DialogTitle>Review configuration changes</DialogTitle>
+					<DialogTitle>{t("config.saveReview.title")}</DialogTitle>
 					<DialogDescription>
-						Check the exact TOML that will replace the current file, then
-						confirm a second time to save.
+						{t("config.saveReview.description")}
 					</DialogDescription>
 				</DialogHeader>
 
@@ -488,7 +491,7 @@ function SaveReviewDialog({
 					{preview.status === "loading" ? (
 						<div className="flex min-h-64 items-center justify-center text-sm text-muted-foreground">
 							<LoaderCircle className="mr-2 size-4 animate-spin" />
-							Generating TOML diff and checking the draft…
+							{t("config.saveReview.generating")}
 						</div>
 					) : null}
 
@@ -498,8 +501,8 @@ function SaveReviewDialog({
 							<div>
 								<h3 className="font-semibold">
 									{preview.conflict
-										? "Configuration changed on disk"
-										: "Preview failed"}
+										? t("config.saveReview.conflict")
+										: t("config.saveReview.previewFailed")}
 								</h3>
 								<p className="mt-1 text-sm text-muted-foreground">
 									{preview.message}
@@ -507,7 +510,7 @@ function SaveReviewDialog({
 							</div>
 							{preview.conflict ? (
 								<Button variant="destructive" onClick={onReload}>
-									Reload from disk and discard draft
+									{t("config.saveReview.reload")}
 								</Button>
 							) : null}
 						</div>
@@ -530,8 +533,8 @@ function SaveReviewDialog({
 								<div>
 									<p className="text-sm font-medium">
 										{preview.response.check.passed
-											? "Check passed"
-											: "Check failed"}
+											? t("config.saveReview.checkPassed")
+											: t("config.saveReview.checkFailed")}
 									</p>
 									{preview.response.check.message ? (
 										<p className="mt-1 text-xs text-muted-foreground">
@@ -544,16 +547,14 @@ function SaveReviewDialog({
 							<div className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
 								<ShieldAlert className="mt-0.5 size-4 shrink-0 text-amber-700 dark:text-amber-400" />
 								<p className="text-xs leading-relaxed">
-									This diff is intentionally unredacted. Passwords, tokens,
-									webhook URLs, and other credentials are visible in this
-									authenticated dialog and the network response.
+									{t("config.saveReview.securityWarning")}
 								</p>
 							</div>
 
 							{preview.response.warnings.length > 0 ? (
 								<div className="space-y-2 rounded-lg border p-3">
 									<p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-										Operational warnings
+										{t("config.saveReview.operationalWarnings")}
 									</p>
 									{preview.response.warnings.map((warning) => (
 										<div key={warning} className="flex gap-2 text-sm">
@@ -566,30 +567,34 @@ function SaveReviewDialog({
 
 							<div>
 								<div className="mb-2 flex items-center justify-between gap-3">
-									<h3 className="text-sm font-semibold">TOML diff</h3>
+									<h3 className="text-sm font-semibold">
+										{t("config.saveReview.tomlDiff")}
+									</h3>
 									<Badge variant="outline">
 										{preview.response.requires_restart
-											? "Restart required"
-											: "No runtime change"}
+											? t("config.saveReview.restartRequired")
+											: t("config.saveReview.noRuntimeChange")}
 									</Badge>
 								</div>
 								{preview.response.has_changes ? (
 									<textarea
 										readOnly
 										wrap="off"
-										aria-label="Complete plaintext TOML diff"
+										aria-label={t("config.saveReview.tomlDiff")}
 										value={preview.response.diff}
 										className="h-[50dvh] w-full resize-none overflow-auto rounded-lg border bg-zinc-950 p-4 font-mono text-xs leading-relaxed text-zinc-100 outline-none focus-visible:ring-2 focus-visible:ring-ring"
 									/>
 								) : (
 									<p className="rounded-lg border p-4 text-sm text-muted-foreground">
-										No file changes to save.
+										{t("config.saveReview.noChanges")}
 									</p>
 								)}
 							</div>
 							{preview.saveError ? (
 								<p className="text-sm text-destructive" role="alert">
-									Save failed: {preview.saveError}
+									{t("config.saveReview.saveFailed", {
+										error: preview.saveError,
+									})}
 								</p>
 							) : null}
 						</div>
@@ -602,7 +607,7 @@ function SaveReviewDialog({
 						disabled={preview.status === "ready" && preview.saving}
 						onClick={onClose}
 					>
-						Cancel
+						{t("config.saveReview.cancel")}
 					</Button>
 					{preview.status === "ready" ? (
 						<Button
@@ -619,8 +624,8 @@ function SaveReviewDialog({
 								<Save className="size-4" />
 							)}
 							{preview.response.password_change_pending
-								? "Save and schedule restart"
-								: "Save configuration"}
+								? t("config.saveReview.saveAndRestart")
+								: t("config.saveReview.saveConfig")}
 						</Button>
 					) : null}
 				</DialogFooter>

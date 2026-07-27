@@ -1,11 +1,13 @@
 import { Check, Copy } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Button } from "#/components/ui/button";
 
 export function PhoneNumberCopy({ phoneNumber }: { phoneNumber: string }) {
 	const [result, setResult] = useState<"idle" | "copied" | "failed">("idle");
 	const resetTimer = useRef<number | undefined>(undefined);
 	const latestRequest = useRef(0);
+	const { t } = useTranslation();
 
 	async function copy() {
 		const request = ++latestRequest.current;
@@ -32,21 +34,21 @@ export function PhoneNumberCopy({ phoneNumber }: { phoneNumber: string }) {
 				type="button"
 				size="sm"
 				variant="ghost"
-				aria-label="Copy phone number"
+				aria-label={t("phoneCopy.ariaLabel")}
 				onClick={copy}
 			>
 				{result === "copied" ? <Check /> : <Copy />}
 				{result === "copied"
-					? "Copied"
+					? t("phoneCopy.copied")
 					: result === "failed"
-						? "Copy failed"
-						: "Copy"}
+						? t("phoneCopy.copyFailed")
+						: t("phoneCopy.copy")}
 			</Button>
 			<output className="sr-only" aria-live="polite">
 				{result === "copied"
-					? "Phone number copied"
+					? t("phoneCopy.srCopied")
 					: result === "failed"
-						? "Phone number copy failed"
+						? t("phoneCopy.srFailed")
 						: ""}
 			</output>
 		</>

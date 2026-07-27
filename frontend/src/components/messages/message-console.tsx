@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { PhoneNumberCopy } from "#/components/phone-number-copy";
 import { Badge } from "#/components/ui/badge";
 import { Button } from "#/components/ui/button";
@@ -618,19 +619,20 @@ function ConversationListHeader({
 	onNewMessage: () => void;
 	filters: ReactNode;
 }) {
+	const { t } = useTranslation();
 	return (
 		<div className="shrink-0 border-b bg-background/95 px-4 py-3 backdrop-blur md:rounded-t-[min(var(--radius-4xl),28px)] md:border-x md:border-t">
 			<div className="flex items-center justify-between gap-3">
 				<div>
 					<p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-						SMS
+						{t("nav.sms")}
 					</p>
 					<h2 className="font-heading text-2xl font-semibold tracking-normal">
-						Messages
+						{t("messages.title")}
 					</h2>
 					{ownNumber ? (
 						<div className="flex items-center gap-1 text-sm text-muted-foreground">
-							<span>SIM {ownNumber}</span>
+							<span>{t("messages.sim", { number: ownNumber })}</span>
 							<PhoneNumberCopy phoneNumber={ownNumber} />
 						</div>
 					) : null}
@@ -641,7 +643,7 @@ function ConversationListHeader({
 						type="button"
 						size="icon"
 						variant="default"
-						aria-label="New message"
+						aria-label={t("messages.aria.newMessage")}
 						onClick={onNewMessage}
 					>
 						<Plus />
@@ -653,7 +655,7 @@ function ConversationListHeader({
 				<Input
 					value={query}
 					onChange={(event) => onQueryChange(event.target.value)}
-					placeholder="Search messages"
+					placeholder={t("messages.search.placeholder")}
 					className="h-10 bg-muted pl-9"
 				/>
 			</div>
@@ -680,6 +682,7 @@ function FilterDialog({
 	onExportCsv: () => void;
 	onExportJson: () => void;
 }) {
+	const { t } = useTranslation();
 	return (
 		<Dialog>
 			<DialogTrigger
@@ -688,7 +691,7 @@ function FilterDialog({
 						type="button"
 						size="icon"
 						variant="outline"
-						aria-label="Filters"
+						aria-label={t("messages.aria.filters")}
 					/>
 				}
 			>
@@ -696,15 +699,15 @@ function FilterDialog({
 			</DialogTrigger>
 			<DialogContent className="gap-5">
 				<DialogHeader>
-					<DialogTitle>Message tools</DialogTitle>
+					<DialogTitle>{t("messages.filter.title")}</DialogTitle>
 					<DialogDescription>
-						Filter the inbox or export the current message view.
+						{t("messages.filter.description")}
 					</DialogDescription>
 				</DialogHeader>
 				<div className="grid gap-4">
 					<div className="grid gap-1.5">
 						<span className="text-xs font-medium text-muted-foreground">
-							Direction
+							{t("messages.filter.direction")}
 						</span>
 						<Select
 							value={direction}
@@ -716,15 +719,21 @@ function FilterDialog({
 								<SelectValue />
 							</SelectTrigger>
 							<SelectContent>
-								<SelectItem value={ALL_DIRECTIONS}>All directions</SelectItem>
-								<SelectItem value="inbound">Inbound</SelectItem>
-								<SelectItem value="outbound">Outbound</SelectItem>
+								<SelectItem value={ALL_DIRECTIONS}>
+									{t("messages.filter.allDirections")}
+								</SelectItem>
+								<SelectItem value="inbound">
+									{t("messages.filter.inbound")}
+								</SelectItem>
+								<SelectItem value="outbound">
+									{t("messages.filter.outbound")}
+								</SelectItem>
 							</SelectContent>
 						</Select>
 					</div>
 					<div className="grid gap-1.5">
 						<span className="text-xs font-medium text-muted-foreground">
-							Status
+							{t("messages.filter.status")}
 						</span>
 						<Select
 							value={statusFilter}
@@ -736,16 +745,28 @@ function FilterDialog({
 								<SelectValue />
 							</SelectTrigger>
 							<SelectContent>
-								<SelectItem value={ALL_STATUSES}>All statuses</SelectItem>
-								<SelectItem value="received">Received</SelectItem>
-								<SelectItem value="sending">Sending</SelectItem>
-								<SelectItem value="sent">Sent</SelectItem>
-								<SelectItem value="failed">Failed</SelectItem>
+								<SelectItem value={ALL_STATUSES}>
+									{t("messages.filter.allStatuses")}
+								</SelectItem>
+								<SelectItem value="received">
+									{t("messages.filter.received")}
+								</SelectItem>
+								<SelectItem value="sending">
+									{t("messages.filter.sending")}
+								</SelectItem>
+								<SelectItem value="sent">
+									{t("messages.filter.sent")}
+								</SelectItem>
+								<SelectItem value="failed">
+									{t("messages.filter.failed")}
+								</SelectItem>
 							</SelectContent>
 						</Select>
 					</div>
 					<div className="flex items-center justify-between rounded-2xl bg-muted/70 px-3 py-2">
-						<span className="text-sm font-medium">Unread only</span>
+						<span className="text-sm font-medium">
+							{t("messages.filter.unreadOnly")}
+						</span>
 						<Checkbox
 							checked={unreadOnly}
 							onCheckedChange={(checked) => setUnreadOnly(checked === true)}
@@ -755,14 +776,14 @@ function FilterDialog({
 				<DialogFooter className="grid grid-cols-2 sm:flex">
 					<Button type="button" variant="outline" onClick={onExportCsv}>
 						<Download />
-						CSV
+						{t("messages.filter.exportCsv")}
 					</Button>
 					<Button type="button" variant="outline" onClick={onExportJson}>
 						<Archive />
-						JSON
+						{t("messages.filter.exportJson")}
 					</Button>
 					<DialogClose render={<Button type="button" variant="secondary" />}>
-						Done
+						{t("messages.filter.done")}
 					</DialogClose>
 				</DialogFooter>
 			</DialogContent>
@@ -779,6 +800,7 @@ function ConversationList({
 	selectedPhone: string | null;
 	onSelect: (phone: string) => void;
 }) {
+	const { t } = useTranslation();
 	if (conversations.length === 0) {
 		return (
 			<div className="grid flex-1 place-items-center px-6 text-center">
@@ -787,9 +809,11 @@ function ConversationList({
 						<Inbox className="size-5" />
 					</div>
 					<div>
-						<p className="font-medium">No conversations</p>
+						<p className="font-medium">
+							{t("messages.conversationList.empty")}
+						</p>
 						<p className="mt-1 text-sm text-muted-foreground">
-							Incoming and outgoing SMS threads will appear here.
+							{t("messages.conversationList.emptyDescription")}
 						</p>
 					</div>
 				</div>
@@ -822,6 +846,7 @@ function ConversationCard({
 	active: boolean;
 	onClick: () => void;
 }) {
+	const { t } = useTranslation();
 	const last = conversation.last_message;
 	return (
 		<button
@@ -852,7 +877,9 @@ function ConversationCard({
 								active && "text-primary-foreground/75",
 							)}
 						>
-							{conversation.total_count} messages
+							{t("messages.conversationList.messages", {
+								count: conversation.total_count,
+							})}
 						</p>
 					</div>
 					<div className="flex shrink-0 flex-col items-end gap-1">
@@ -905,7 +932,11 @@ function DirectionPill({
 	message: Message;
 	active: boolean;
 }) {
-	const text = message.direction === "outbound" ? "Sent" : "Inbox";
+	const { t } = useTranslation();
+	const text =
+		message.direction === "outbound"
+			? t("messages.direction.sent")
+			: t("messages.direction.inbox");
 	return (
 		<span
 			className={cn(
@@ -914,7 +945,7 @@ function DirectionPill({
 				message.status === "failed" && "bg-destructive/10 text-destructive",
 			)}
 		>
-			{message.status === "failed" ? "Failed" : text}
+			{message.status === "failed" ? t("messages.direction.failed") : text}
 		</span>
 	);
 }
@@ -964,19 +995,22 @@ function ThreadPanel({
 	onMarkSelectedUnread: () => void;
 	onDeleteSelected: () => void;
 }) {
+	const { t } = useTranslation();
 	const threadScrollRef = useRef<HTMLDivElement>(null);
 	const loadingOlderRef = useRef(false);
 	const scrolledConversationRef = useRef<string | null>(null);
 	const activeConversationRef = useRef<string | null>(null);
 	activeConversationRef.current = conversation?.phone_number ?? null;
 	const title = isComposingNew
-		? "New message"
-		: (conversation?.phone_number ?? "Select a conversation");
+		? t("messages.thread.newMessage")
+		: (conversation?.phone_number ?? t("messages.thread.selectConversation"));
 	const subtitle = isComposingNew
-		? "Choose a recipient and write an SMS"
+		? t("messages.thread.newMessageSubtitle")
 		: conversation
-			? `${conversation.total_count} messages`
-			: "Pick a thread from the list";
+			? t("messages.conversationList.messages", {
+					count: conversation.total_count,
+				})
+			: t("messages.thread.selectConversationSubtitle");
 	const selectedCount = selectedIds.size;
 
 	useEffect(() => {
@@ -1040,7 +1074,7 @@ function ThreadPanel({
 						size="icon"
 						variant="ghost"
 						className="md:hidden"
-						aria-label="Back to conversations"
+						aria-label={t("messages.aria.backConversations")}
 						onClick={onBack}
 					>
 						<ChevronLeft />
@@ -1059,7 +1093,7 @@ function ThreadPanel({
 							type="button"
 							variant="outline"
 							size="icon"
-							aria-label="Mark conversation read"
+							aria-label={t("messages.aria.markConversationRead")}
 							onClick={onMarkConversationRead}
 						>
 							<CheckCheck />
@@ -1083,7 +1117,7 @@ function ThreadPanel({
 					<div
 						ref={threadScrollRef}
 						role="log"
-						aria-label="Message timeline"
+						aria-label={t("messages.aria.messageTimeline")}
 						onScroll={handleThreadScroll}
 						className="min-h-0 flex-1 overflow-y-auto px-3 py-4 md:px-6"
 					>
@@ -1107,8 +1141,8 @@ function ThreadPanel({
 												<LoaderCircle className="animate-spin" />
 											)}
 											{loadingOlderMessages
-												? "Loading older messages"
-												: "Load older messages"}
+												? t("messages.thread.loadingOlder")
+												: t("messages.thread.loadOlder")}
 										</Button>
 									</div>
 								)}
@@ -1136,9 +1170,11 @@ function ThreadPanel({
 							<MessageCircle className="size-6" />
 						</div>
 						<div>
-							<p className="font-medium">No thread selected</p>
+							<p className="font-medium">
+								{t("messages.thread.noThreadSelected")}
+							</p>
 							<p className="mt-1 text-sm text-muted-foreground">
-								Choose a conversation or start a new SMS.
+								{t("messages.thread.noThreadDescription")}
 							</p>
 						</div>
 					</div>
@@ -1163,6 +1199,7 @@ function ThreadActionsDropdown({
 	onMarkSelectedUnread: () => void;
 	onDeleteSelected: () => void;
 }) {
+	const { t } = useTranslation();
 	return (
 		<DropdownMenu>
 			<DropdownMenuTrigger
@@ -1171,7 +1208,7 @@ function ThreadActionsDropdown({
 						type="button"
 						variant="outline"
 						size="icon"
-						aria-label="Conversation actions"
+						aria-label={t("messages.aria.conversationActions")}
 					/>
 				}
 			>
@@ -1179,25 +1216,29 @@ function ThreadActionsDropdown({
 			</DropdownMenuTrigger>
 			<DropdownMenuContent align="end" sideOffset={8} className="w-60">
 				<DropdownMenuGroup>
-					<DropdownMenuLabel>Conversation actions</DropdownMenuLabel>
+					<DropdownMenuLabel>
+						{t("messages.actions.conversationActions")}
+					</DropdownMenuLabel>
 					<DropdownMenuSeparator />
 					<DropdownMenuItem onClick={() => setSelectionMode(!selectionMode)}>
 						<CheckCheck />
-						{selectionMode ? "Stop selecting" : "Select messages"}
+						{selectionMode
+							? t("messages.actions.stopSelecting")
+							: t("messages.actions.selectMessages")}
 					</DropdownMenuItem>
 					<DropdownMenuItem
 						disabled={selectedCount === 0}
 						onClick={onMarkSelectedRead}
 					>
 						<CheckCheck />
-						Mark read ({selectedCount})
+						{t("messages.actions.markRead", { count: selectedCount })}
 					</DropdownMenuItem>
 					<DropdownMenuItem
 						disabled={selectedCount === 0}
 						onClick={onMarkSelectedUnread}
 					>
 						<MessageCircle />
-						Mark unread ({selectedCount})
+						{t("messages.actions.markUnread", { count: selectedCount })}
 					</DropdownMenuItem>
 					<DropdownMenuSeparator />
 					<DropdownMenuItem
@@ -1206,7 +1247,7 @@ function ThreadActionsDropdown({
 						onClick={onDeleteSelected}
 					>
 						<Trash2 />
-						Delete selected
+						{t("messages.actions.deleteSelected")}
 					</DropdownMenuItem>
 				</DropdownMenuGroup>
 			</DropdownMenuContent>
@@ -1221,19 +1262,20 @@ function NewMessageRecipient({
 	phoneNumber: string;
 	setPhoneNumber: (value: string) => void;
 }) {
+	const { t } = useTranslation();
 	return (
 		<div className="mx-auto grid max-w-xl gap-2">
 			<span
 				className="text-xs font-medium text-muted-foreground"
 				id="sms-to-label"
 			>
-				To
+				{t("messages.thread.recipientLabel")}
 			</span>
 			<Input
 				aria-labelledby="sms-to-label"
 				value={phoneNumber}
 				onChange={(event) => setPhoneNumber(event.target.value)}
-				placeholder="Phone number"
+				placeholder={t("messages.thread.recipientPlaceholder")}
 				className="h-11 bg-background"
 			/>
 		</div>
@@ -1251,13 +1293,16 @@ function MessageThread({
 	selectedIds: Set<number>;
 	onToggleSelect: (id: number) => void;
 }) {
+	const { t } = useTranslation();
 	if (messages.length === 0) {
 		return (
 			<div className="grid h-full place-items-center text-center">
 				<div className="max-w-64 space-y-2">
-					<p className="font-medium">No matching messages</p>
+					<p className="font-medium">
+						{t("messages.conversationList.noMatching")}
+					</p>
 					<p className="text-sm text-muted-foreground">
-						Adjust filters or wait for the next SMS event.
+						{t("messages.conversationList.noMatchingDescription")}
 					</p>
 				</div>
 			</div>
@@ -1364,13 +1409,14 @@ function MessageComposer({
 	sending: boolean;
 	disabled: boolean;
 }) {
+	const { t } = useTranslation();
 	return (
 		<div className="shrink-0 border-t bg-background/95 px-3 py-3 backdrop-blur md:rounded-b-[min(var(--radius-4xl),28px)] md:px-5">
 			<div className="mx-auto flex max-w-3xl items-end gap-2">
 				<Textarea
 					value={body}
 					onChange={(event) => setBody(event.target.value)}
-					placeholder="Message"
+					placeholder={t("messages.thread.composerPlaceholder")}
 					className="max-h-32 min-h-10 flex-1 bg-muted px-4 py-2.5"
 					onKeyDown={(event) => {
 						if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -1381,7 +1427,7 @@ function MessageComposer({
 				<Button
 					type="button"
 					size="icon-lg"
-					aria-label="Send message"
+					aria-label={t("messages.aria.sendMessage")}
 					disabled={disabled || sending || !body.trim()}
 					onClick={onSend}
 				>

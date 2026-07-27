@@ -6,6 +6,7 @@ import {
 	useRef,
 	useState,
 } from "react";
+import { useTranslation } from "react-i18next";
 import { ChannelEditor } from "#/components/config/channel-editor";
 import { Input } from "#/components/ui/input";
 import { Switch } from "#/components/ui/switch";
@@ -189,16 +190,17 @@ function DeviceSection({
 	config,
 	onPathChange,
 }: Pick<SectionEditorProps, "config" | "onPathChange">) {
+	const { t } = useTranslation();
 	return (
 		<>
 			<SectionHeading
-				title="Device"
-				description="Identify this relay and select the ModemManager object that receives and sends messages."
+				title={t("config.fields.device.sectionTitle")}
+				description={t("config.fields.device.sectionDescription")}
 			/>
 			<Field
 				id="app-device-name"
-				label="Device name"
-				description="Included in forwarding payloads so downstream channels can identify the source."
+				label={t("config.fields.device.deviceName")}
+				description={t("config.fields.device.deviceNameDescription")}
 			>
 				<Input
 					id="app-device-name"
@@ -210,8 +212,8 @@ function DeviceSection({
 			</Field>
 			<Field
 				id="app-modem-path"
-				label="Modem object path"
-				description="Must be a ModemManager path under /org/freedesktop/ModemManager1/Modem/."
+				label={t("config.fields.device.modemPath")}
+				description={t("config.fields.device.modemPathDescription")}
 			>
 				<Input
 					id="app-modem-path"
@@ -230,16 +232,17 @@ function SmsSection({
 	config,
 	onPathChange,
 }: Pick<SectionEditorProps, "config" | "onPathChange">) {
+	const { t } = useTranslation();
 	return (
 		<>
 			<SectionHeading
-				title="SMS"
-				description="Control which modem storage locations are ignored and which phrases identify verification-code messages."
+				title={t("config.fields.sms.sectionTitle")}
+				description={t("config.fields.sms.sectionDescription")}
 			/>
 			<Field
 				id="sms-ignore-storage"
-				label="Ignored storage"
-				description="Comma-separated storage identifiers, such as sm."
+				label={t("config.fields.sms.ignoredStorage")}
+				description={t("config.fields.sms.ignoredStorageDescription")}
 			>
 				<ArrayInput
 					id="sms-ignore-storage"
@@ -249,8 +252,8 @@ function SmsSection({
 			</Field>
 			<Field
 				id="sms-code-keywords"
-				label="Code keywords"
-				description="Comma-separated, case-insensitive phrases used to recognize verification codes."
+				label={t("config.fields.sms.codeKeywords")}
+				description={t("config.fields.sms.codeKeywordsDescription")}
 			>
 				<ArrayInput
 					id="sms-code-keywords"
@@ -267,16 +270,17 @@ function ForwardingSection({
 	onConfigChange,
 	onPathChange,
 }: SectionEditorProps) {
+	const { t } = useTranslation();
 	return (
 		<>
 			<SectionHeading
-				title="Forwarding"
-				description="Configure delivery concurrency, channel credentials, and the named profiles that receive inbound messages."
+				title={t("config.fields.forwarding.sectionTitle")}
+				description={t("config.fields.forwarding.sectionDescription")}
 			/>
 			<Field
 				id="delivery-concurrency"
-				label="Concurrent deliveries"
-				description="Number of forwarding jobs processed at once. Valid range: 1–16."
+				label={t("config.fields.forwarding.concurrency")}
+				description={t("config.fields.forwarding.concurrencyDescription")}
 			>
 				<NumberInput
 					id="delivery-concurrency"
@@ -297,16 +301,17 @@ function ApiSection({
 	config,
 	onPathChange,
 }: Pick<SectionEditorProps, "config" | "onPathChange">) {
+	const { t } = useTranslation();
 	return (
 		<>
 			<SectionHeading
-				title="Web API"
-				description="Control dashboard availability, listener addresses, authentication, and the message database."
+				title={t("config.fields.api.sectionTitle")}
+				description={t("config.fields.api.sectionDescription")}
 			/>
 			<Field
 				id="api-enabled"
-				label="Enable Web API"
-				description="Disabling the API removes access to this dashboard after restart."
+				label={t("config.fields.api.enableApi")}
+				description={t("config.fields.api.enableApiDescription")}
 			>
 				<Switch
 					id="api-enabled"
@@ -314,7 +319,7 @@ function ApiSection({
 					onCheckedChange={(checked) => onPathChange("api.enabled", checked)}
 				/>
 			</Field>
-			<Field id="api-bind" label="Bind address">
+			<Field id="api-bind" label={t("config.fields.api.bindAddress")}>
 				<Input
 					id="api-bind"
 					className="font-mono text-xs"
@@ -322,7 +327,11 @@ function ApiSection({
 					onChange={(event) => onPathChange("api.bind", event.target.value)}
 				/>
 			</Field>
-			<Field id="api-port" label="Port" description="Valid range: 1–65535.">
+			<Field
+				id="api-port"
+				label={t("config.fields.api.port")}
+				description={t("config.fields.api.portDescription")}
+			>
 				<NumberInput
 					id="api-port"
 					min={1}
@@ -333,8 +342,8 @@ function ApiSection({
 			</Field>
 			<Field
 				id="api-ipv6"
-				label="IPv6 companion"
-				description="Also listen on a safe IPv6 companion address when one can be inferred."
+				label={t("config.fields.api.ipv6")}
+				description={t("config.fields.api.ipv6Description")}
 			>
 				<Switch
 					id="api-ipv6"
@@ -346,8 +355,8 @@ function ApiSection({
 			</Field>
 			<Field
 				id="api-password"
-				label="Password"
-				description="Changing this value saves and schedules restart in one step, then signs out every session."
+				label={t("config.fields.api.password")}
+				description={t("config.fields.api.passwordDescription")}
 			>
 				<Input
 					id="api-password"
@@ -357,7 +366,7 @@ function ApiSection({
 					onChange={(event) => onPathChange("api.password", event.target.value)}
 				/>
 			</Field>
-			<Field id="api-database" label="Database path">
+			<Field id="api-database" label={t("config.fields.api.databasePath")}>
 				<Input
 					id="api-database"
 					className="font-mono text-xs"
@@ -375,16 +384,17 @@ function TimeoutsSection({
 	config,
 	onPathChange,
 }: Pick<SectionEditorProps, "config" | "onPathChange">) {
+	const { t } = useTranslation();
 	return (
 		<>
 			<SectionHeading
-				title="Timeouts"
-				description="Bound connection setup, provider requests, and shell-profile execution. All values are seconds."
+				title={t("config.fields.timeouts.sectionTitle")}
+				description={t("config.fields.timeouts.sectionDescription")}
 			/>
 			<Field
 				id="http-connect-timeout"
-				label="Connect timeout"
-				description="Must be positive and no greater than the request timeout."
+				label={t("config.fields.timeouts.connectTimeout")}
+				description={t("config.fields.timeouts.connectTimeoutDescription")}
 			>
 				<NumberInput
 					id="http-connect-timeout"
@@ -395,7 +405,10 @@ function TimeoutsSection({
 					}
 				/>
 			</Field>
-			<Field id="http-request-timeout" label="Request timeout">
+			<Field
+				id="http-request-timeout"
+				label={t("config.fields.timeouts.requestTimeout")}
+			>
 				<NumberInput
 					id="http-request-timeout"
 					min={1}
@@ -405,7 +418,10 @@ function TimeoutsSection({
 					}
 				/>
 			</Field>
-			<Field id="shell-timeout" label="Shell timeout">
+			<Field
+				id="shell-timeout"
+				label={t("config.fields.timeouts.shellTimeout")}
+			>
 				<NumberInput
 					id="shell-timeout"
 					min={1}
@@ -423,13 +439,17 @@ function RetentionSection({
 	config,
 	onPathChange,
 }: Pick<SectionEditorProps, "config" | "onPathChange">) {
+	const { t } = useTranslation();
 	return (
 		<>
 			<SectionHeading
-				title="Retention"
-				description="Remove old terminal messages in bounded batches while preserving messages with active deliveries."
+				title={t("config.fields.retention.sectionTitle")}
+				description={t("config.fields.retention.sectionDescription")}
 			/>
-			<Field id="retention-enabled" label="Enable cleanup">
+			<Field
+				id="retention-enabled"
+				label={t("config.fields.retention.enableCleanup")}
+			>
 				<Switch
 					id="retention-enabled"
 					checked={config.retention.enabled}
@@ -440,8 +460,8 @@ function RetentionSection({
 			</Field>
 			<Field
 				id="retention-max-age"
-				label="Maximum age"
-				description="Messages older than this many days become eligible for cleanup."
+				label={t("config.fields.retention.maxAge")}
+				description={t("config.fields.retention.maxAgeDescription")}
 			>
 				<NumberInput
 					id="retention-max-age"
@@ -454,8 +474,8 @@ function RetentionSection({
 			</Field>
 			<Field
 				id="retention-batch-size"
-				label="Batch size"
-				description="Maximum rows removed by one cleanup pass."
+				label={t("config.fields.retention.batchSize")}
+				description={t("config.fields.retention.batchSizeDescription")}
 			>
 				<NumberInput
 					id="retention-batch-size"

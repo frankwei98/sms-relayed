@@ -7,10 +7,21 @@ import {
 	useNavigate,
 } from "@tanstack/react-router";
 import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools";
+import { Globe } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Button } from "#/components/ui/button";
+import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuLabel,
+	DropdownMenuSeparator,
+	DropdownMenuTrigger,
+} from "#/components/ui/dropdown-menu";
 import { type AuthState, apiFetch } from "#/lib/api";
 import { AuthContext } from "#/lib/auth";
+import i18n, { type SupportedLanguage, supportedLanguages } from "#/lib/i18n";
 
 import "../styles.css";
 
@@ -71,7 +82,7 @@ function RootComponent() {
 					</h1>
 					<nav
 						className="flex min-w-0 flex-1 gap-1 overflow-x-auto"
-						aria-label="Primary"
+						aria-label={t("header.ariaPrimary")}
 					>
 						<Link
 							to="/"
@@ -86,23 +97,24 @@ function RootComponent() {
 							className="shrink-0 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
 							activeProps={{ className: "bg-accent text-accent-foreground" }}
 						>
-							Modem
+							{t("nav.modem")}
 						</Link>
 						<Link
 							to="/forwarding"
 							className="shrink-0 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
 							activeProps={{ className: "bg-accent text-accent-foreground" }}
 						>
-							Forwarding
+							{t("nav.forwarding")}
 						</Link>
 						<Link
 							to="/config"
 							className="shrink-0 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
 							activeProps={{ className: "bg-accent text-accent-foreground" }}
 						>
-							Config
+							{t("nav.config")}
 						</Link>
 					</nav>
+					<LanguageSwitcher />
 				</header>
 				<main className={mainClassName}>
 					<Outlet />
@@ -118,5 +130,44 @@ function RootComponent() {
 				/>
 			</div>
 		</AuthContext.Provider>
+	);
+}
+
+function LanguageSwitcher() {
+	const { t } = useTranslation();
+	const currentLanguage = i18n.language as SupportedLanguage;
+
+	function changeLanguage(lang: SupportedLanguage) {
+		void i18n.changeLanguage(lang);
+	}
+
+	return (
+		<DropdownMenu>
+			<DropdownMenuTrigger
+				render={
+					<Button
+						type="button"
+						variant="ghost"
+						size="icon"
+						aria-label={t("language.label")}
+					/>
+				}
+			>
+				<Globe className="size-4" />
+			</DropdownMenuTrigger>
+			<DropdownMenuContent align="end" sideOffset={8}>
+				<DropdownMenuLabel>{t("language.label")}</DropdownMenuLabel>
+				<DropdownMenuSeparator />
+				{supportedLanguages.map((lang) => (
+					<DropdownMenuItem
+						key={lang}
+						disabled={lang === currentLanguage}
+						onClick={() => changeLanguage(lang)}
+					>
+						{t(lang === "en" ? "language.en" : "language.zhCN")}
+					</DropdownMenuItem>
+				))}
+			</DropdownMenuContent>
+		</DropdownMenu>
 	);
 }

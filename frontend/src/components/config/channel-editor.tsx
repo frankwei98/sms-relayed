@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Button } from "#/components/ui/button";
 import {
 	Dialog,
@@ -100,6 +101,7 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 		channel: string;
 		name: string;
 	} | null>(null);
+	const { t } = useTranslation();
 	const enabledRefs = new Set(config.forward.enabled);
 	const profileRefs = getProfileRefs(config);
 	const profileCount = profileRefs.size;
@@ -198,14 +200,18 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 		<div className="space-y-4">
 			<div className="flex items-center justify-between gap-3 rounded-xl border bg-muted/20 px-4 py-3">
 				<div>
-					<p className="text-sm font-medium">Delivery routes</p>
+					<p className="text-sm font-medium">
+						{t("config.channel.deliveryRoutes")}
+					</p>
 					<p className="text-xs text-muted-foreground">
-						Enable the profiles that should receive forwarded messages.
+						{t("config.channel.deliveryRoutesDescription")}
 					</p>
 				</div>
 				<p className="font-mono text-xs text-muted-foreground">
-					<span className="font-semibold text-foreground">{enabledCount}</span>{" "}
-					/ {profileCount} active
+					{t("config.channel.profilesActive", {
+						enabled: enabledCount,
+						total: profileCount,
+					})}
 				</p>
 			</div>
 			{missingProfileRefs.length > 0 ? (
@@ -218,11 +224,10 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 							id="missing-forwarding-profiles"
 							className="text-sm font-medium text-amber-950 dark:text-amber-100"
 						>
-							Missing forwarding profiles
+							{t("config.channel.missingProfiles")}
 						</h4>
 						<p className="mt-1 text-xs text-amber-900/80 dark:text-amber-100/75">
-							These enabled references do not match a configured profile. Remove
-							them to make this configuration valid.
+							{t("config.channel.missingProfilesDescription")}
 						</p>
 					</div>
 					<ul className="mt-3 space-y-2">
@@ -236,10 +241,12 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 									variant="outline"
 									size="sm"
 									className="shrink-0 self-start border-amber-500/35 sm:self-auto"
-									aria-label={`Remove missing forwarding reference ${profileRef}`}
+									aria-label={t("config.channel.removeReferenceAria", {
+										ref: profileRef,
+									})}
 									onClick={() => removeMissingProfileRef(profileRef)}
 								>
-									Remove reference
+									{t("config.channel.removeReference")}
 								</Button>
 							</li>
 						))}
@@ -258,7 +265,9 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 					<div key={channel} className="rounded-xl border bg-card/30 p-3">
 						<h4 className="mb-2 text-sm font-medium capitalize">{channel}</h4>
 						{names.length === 0 && (
-							<p className="mb-2 text-xs text-muted-foreground">No profiles</p>
+							<p className="mb-2 text-xs text-muted-foreground">
+								{t("config.channel.noProfiles")}
+							</p>
 						)}
 						{names.map((name) => {
 							const profileRef = getProfileRef(channel, name);
@@ -288,12 +297,16 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 															: "text-muted-foreground"
 													}
 												>
-													{enabled ? "Enabled" : "Disabled"}
+													{enabled
+														? t("config.channel.enabled")
+														: t("config.channel.disabled")}
 												</span>
 												<Switch
 													size="sm"
 													checked={enabled}
-													aria-label={`Enable forwarding for ${profileRef}`}
+													aria-label={t("config.channel.enableAria", {
+														ref: profileRef,
+													})}
 													onCheckedChange={(checked: boolean) =>
 														setProfileEnabled(channel, name, checked)
 													}
@@ -302,10 +315,12 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 											<Button
 												variant="destructive"
 												size="sm"
-												aria-label={`Remove ${profileRef}`}
+												aria-label={t("config.channel.removeAria", {
+													ref: profileRef,
+												})}
 												onClick={() => setPendingRemoval({ channel, name })}
 											>
-												Remove
+												{t("config.channel.remove")}
 											</Button>
 										</div>
 									</div>
@@ -349,12 +364,12 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 						})}
 						<div className="mt-3 border-t pt-3">
 							<label htmlFor={newProfileId} className="text-xs font-medium">
-								Add {channel} profile
+								{t("config.channel.addProfile", { channel })}
 							</label>
 							<div className="mt-1.5 flex items-center gap-2">
 								<Input
 									id={newProfileId}
-									placeholder="Profile name"
+									placeholder={t("config.channel.profileName")}
 									value={newName[channel] ?? ""}
 									onChange={(e) =>
 										setNewName((prev) => ({
@@ -372,7 +387,7 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 									disabled={!candidateName || duplicateName}
 									onClick={() => addProfile(channel)}
 								>
-									Add
+									{t("config.channel.add")}
 								</Button>
 							</div>
 							{duplicateName ? (
@@ -380,7 +395,7 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 									id={duplicateNameId}
 									className="mt-1 text-xs text-destructive"
 								>
-									That profile name already exists.
+									{t("config.channel.duplicateName")}
 								</p>
 							) : null}
 						</div>
@@ -395,10 +410,9 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 			>
 				<DialogContent>
 					<DialogHeader>
-						<DialogTitle>Remove forwarding profile?</DialogTitle>
+						<DialogTitle>{t("config.channel.removeDialog.title")}</DialogTitle>
 						<DialogDescription>
-							This removes the profile credentials and its enabled reference
-							from the current draft. The change is not written until you save.
+							{t("config.channel.removeDialog.description")}
 						</DialogDescription>
 					</DialogHeader>
 					{pendingRemoval ? (
@@ -408,7 +422,7 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 					) : null}
 					<DialogFooter>
 						<Button variant="outline" onClick={() => setPendingRemoval(null)}>
-							Cancel
+							{t("config.channel.removeDialog.cancel")}
 						</Button>
 						<Button
 							variant="destructive"
@@ -418,7 +432,7 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 								setPendingRemoval(null);
 							}}
 						>
-							Remove profile
+							{t("config.channel.removeDialog.remove")}
 						</Button>
 					</DialogFooter>
 				</DialogContent>

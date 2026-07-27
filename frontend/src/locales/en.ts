@@ -1,5 +1,564 @@
 export const en = {
 	nav: {
 		sms: "SMS",
+		modem: "Modem",
+		forwarding: "Forwarding",
+		config: "Config",
+	},
+	header: {
+		ariaPrimary: "Primary",
+		ariaBackConfig: "Back to configuration",
+		ariaConfigCategories: "Config categories",
+		ariaUnsavedChanges: "Unsaved changes",
+	},
+	common: {
+		refresh: "Refresh",
+		cancel: "Cancel",
+		save: "Save",
+		check: "Check",
+		restart: "Restart",
+		retry: "Retry",
+		done: "Done",
+		search: "Search",
+		add: "Add",
+		remove: "Remove",
+	},
+	modem: {
+		title: "Modem",
+		lastChecked: "Last checked {{time}}",
+		statusUnavailable: "Status unavailable",
+		loading: "Loading modem status...",
+		refresh: "Refresh",
+		field: {
+			configuredPath: "Configured path",
+			resolvedModem: "Resolved modem",
+			enabled: "Enabled",
+			state: "State",
+			sim: "SIM",
+			phoneNumber: "Phone number",
+			operator: "Operator",
+			signal: "Signal",
+			access: "Access",
+			messaging: "Messaging",
+			mmcli: "mmcli",
+		},
+		value: {
+			yes: "Yes",
+			no: "No",
+			unknown: "Unknown",
+			notFound: "Not found",
+			notReported: "Not reported",
+			available: "Available",
+			unavailable: "Unavailable",
+			missing: "Missing",
+			notSelected: "Not selected",
+		},
+		status: {
+			ok: "OK",
+			degraded: "DEGRADED",
+			error: "ERROR",
+			unknown: "UNKNOWN",
+		},
+		smsOverIms: {
+			title: "SMS over IMS",
+			description:
+				"Reported by the modem; this does not prove the route used by each message.",
+			field: {
+				configured: "Configured",
+				registration: "Registration",
+				smsService: "SMS service",
+				technology: "Technology",
+				qmicli: "qmicli",
+				qmiDevice: "QMI device",
+				evidence: "Evidence",
+			},
+			enum: {
+				enabled: "Enabled",
+				disabled: "Disabled",
+				registered: "Registered",
+				registering: "Registering",
+				limited: "Limited",
+				notRegistered: "Not Registered",
+				notAvailable: "Not available",
+				available: "Available",
+				unknown: "Unknown",
+			},
+			availableOverWlan: "Available over WLAN",
+			technology: {
+				wwan: "WWAN",
+				wlan: "WLAN",
+				interworkingWlan: "Interworking WLAN",
+				unknown: "Unknown",
+			},
+			evidence: {
+				qmiImsa: "QMI IMSA",
+				qmiIms: "QMI IMS",
+				noEvidence: "No runtime evidence",
+			},
+		},
+		actions: {
+			enable: "Enable",
+			disable: "Disable",
+		},
+		dangerZone: {
+			title: "Danger zone",
+			reset: "Reset modem",
+			dialogTitle: "Reset modem?",
+			dialogDescription:
+				"This can disconnect cellular service and cause the modem to disappear while it re-enumerates.",
+			cancel: "Cancel",
+			confirmReset: "Reset",
+		},
+		diagnostics: {
+			title: "Diagnostics",
+			reasons: "Reasons: {{reasons}}",
+			possibleNewPath: "Possible new modem path: {{path}}",
+			error: "Error: {{error}}",
+		},
+		imsDiagnostics: {
+			imsProbeNotAttempted: "IMS probing was not attempted.",
+			modemNotResolved:
+				"IMS probing was skipped because no modem was resolved.",
+			modemDisabled: "IMS probing was skipped because the modem is disabled.",
+			qmicliMissing: "qmicli is not installed or could not be executed.",
+			qmicliPathInvalid: "The configured qmicli path is invalid.",
+			qmicliProbeFailed: "qmicli capability detection failed.",
+			imsProbePermissionDenied:
+				"qmicli could not be executed due to permissions.",
+			qmiPortUnavailable: "No QMI control port was reported by ModemManager.",
+			qmiPortAmbiguous: "More than one QMI control port was reported.",
+			qmiProxyUnavailable: "The QMI proxy is unavailable.",
+			imsProbeTimeout: "The IMS probe exceeded its time budget.",
+			imsServicesQueryFailed: "The IMS service query failed.",
+			imsServicesQueryUnavailable:
+				"qmicli does not expose the IMS service query.",
+			imsRegistrationQueryFailed: "The IMS registration query failed.",
+			imsRegistrationQueryUnavailable:
+				"qmicli does not expose the IMS registration query.",
+			imsSettingsQueryFailed: "The IMS settings query failed.",
+			imsSettingsQueryUnavailable:
+				"qmicli does not expose the IMS settings query.",
+			imsServicesOutputUnrecognized:
+				"The IMS service response was not recognized.",
+			imsRegistrationOutputUnrecognized:
+				"The IMS registration response was not recognized.",
+			imsSettingsOutputUnrecognized:
+				"The IMS settings response was not recognized.",
+			imsServicesOutputNonstandard:
+				"The IMS service response used a nonstandard label.",
+			imsRegistrationOutputNonstandard:
+				"The IMS registration response used a nonstandard label.",
+			imsSettingsOutputNonstandard:
+				"The IMS settings response used a nonstandard label.",
+			imsStateInconsistent:
+				"The modem reported inconsistent IMS configuration and runtime state.",
+			fallback: "Additional IMS diagnostic information is unavailable.",
+		},
+	},
+	forwarding: {
+		sidebar: {
+			title: "Forwarding",
+			operations: "Operations",
+			ariaLabel: "Forwarding profiles",
+			ariaViews: "Forwarding views",
+			ariaRefresh: "Refresh forwarding status",
+			ariaClose: "Close forwarding navigation",
+			ariaOpen: "Open forwarding navigation",
+		},
+		overview: {
+			title: "Overview",
+			subtitle: "All profile snapshots",
+			configured: "Configured",
+			historical: "Historical",
+			noConfiguredProfiles: "No configured profiles",
+			noHistoricalProfiles: "No retained historical profiles",
+		},
+		snapshot: {
+			generated: "Snapshot generated",
+			generatedDescription: "Up to {{limit}} retained attempts per profile",
+		},
+		loading: "Loading forwarding status...",
+		error: {
+			title: "Unable to load forwarding status",
+			description: "The forwarding snapshot could not be loaded.",
+			refreshFailed: "Refresh failed",
+			refreshDescription: "Showing the previous snapshot. {{error}}",
+		},
+		srLive: {
+			refreshing: "Refreshing forwarding status.",
+			snapshot: "Forwarding snapshot generated {{time}}.",
+		},
+		detail: {
+			overview: "Overview",
+			overviewSubtitle: "Configured profiles and retained attempt history",
+			retainedAttempts: "Retained forwarding attempts",
+			notPresent: "Not present in the latest snapshot",
+			lastUpdated: "Last updated {{time}}",
+		},
+		overviewSection: {
+			currentSnapshot: "Current snapshot",
+			coverage: "Forwarding coverage",
+			description:
+				"Configuration state and retained attempt availability from the latest backend snapshot.",
+			configuredProfiles: "Configured profiles",
+			enabledProfiles: "Enabled profiles",
+			profilesWithAttempts: "Profiles with retained attempts",
+			profileSnapshot: "Profile snapshot",
+			profileSnapshotDescription:
+				"Latest retained outcome for each configured or historical profile.",
+			empty: "No forwarding profiles configured.",
+			emptyDescription:
+				"No retained historical profile attempts are available either.",
+		},
+		table: {
+			ariaLabel: "Forwarding profile snapshot",
+			profile: "Profile",
+			state: "State",
+			latestOutcome: "Latest outcome",
+			latestCompleted: "Latest completed",
+			retained: "Retained",
+			attempt: "Attempt",
+			completed: "Completed",
+			outcome: "Outcome",
+			timing: "Timing",
+			error: "Error",
+		},
+		profile: {
+			unavailable: "Profile unavailable",
+			unavailableDescription:
+				"The profile {{key}} is not present in the latest forwarding snapshot.",
+			viewOverview: "View Overview",
+		},
+		badge: {
+			configured: "Configured",
+			enabled: "Enabled",
+			disabled: "Disabled",
+			historical: "Historical",
+			retry: "Retry",
+		},
+		outcome: {
+			success: "Success",
+			transientFailure: "Transient failure",
+			permanentFailure: "Permanent failure",
+			unknown: "Unknown outcome",
+			noAttempts: "No attempts",
+			latest: "Latest: {{outcome}}",
+		},
+		attempts: {
+			title_one: "Latest {{count}} attempt",
+			title_other: "Latest {{count}} attempts",
+			retainedDescription: "{{count}} retained in this snapshot",
+			newestFirst: "Newest first",
+			empty: "No forwarding attempts yet.",
+			emptyDescription:
+				"This snapshot contains no retained attempts for this profile.",
+			label: "{{label}} for {{key}}",
+		},
+		mobile: {
+			completed: "Completed",
+			timing: "Timing",
+			error: "Error",
+			retained: "{{count}} retained",
+		},
+		timing: {
+			dispatch: "Dispatch {{time}}",
+			request: "Request {{time}}",
+		},
+	},
+	messages: {
+		title: "Messages",
+		sim: "SIM {{number}}",
+		aria: {
+			newMessage: "New message",
+			filters: "Filters",
+			backConversations: "Back to conversations",
+			markConversationRead: "Mark conversation read",
+			messageTimeline: "Message timeline",
+			conversationActions: "Conversation actions",
+			sendMessage: "Send message",
+			searchMessages: "Search messages",
+		},
+		search: {
+			placeholder: "Search messages",
+		},
+		filter: {
+			title: "Message tools",
+			description: "Filter the inbox or export the current message view.",
+			direction: "Direction",
+			allDirections: "All directions",
+			inbound: "Inbound",
+			outbound: "Outbound",
+			status: "Status",
+			allStatuses: "All statuses",
+			received: "Received",
+			sending: "Sending",
+			sent: "Sent",
+			failed: "Failed",
+			unreadOnly: "Unread only",
+			exportCsv: "CSV",
+			exportJson: "JSON",
+			done: "Done",
+			search: "Search",
+		},
+		conversationList: {
+			empty: "No conversations",
+			emptyDescription: "Incoming and outgoing SMS threads will appear here.",
+			messages: "{{count}} messages",
+			noMatching: "No matching messages",
+			noMatchingDescription: "Adjust filters or wait for the next SMS event.",
+		},
+		thread: {
+			loadingOlder: "Loading older messages",
+			loadOlder: "Load older messages",
+			newMessage: "New message",
+			newMessageSubtitle: "Choose a recipient and write an SMS",
+			selectConversation: "Select a conversation",
+			selectConversationSubtitle: "Pick a thread from the list",
+			noThreadSelected: "No thread selected",
+			noThreadDescription: "Choose a conversation or start a new SMS.",
+			recipientLabel: "To",
+			recipientPlaceholder: "Phone number",
+			composerPlaceholder: "Message",
+			sendMessage: "Send",
+			sendingMessage: "Sending...",
+		},
+		direction: {
+			sent: "Sent",
+			inbox: "Inbox",
+			failed: "Failed",
+		},
+		actions: {
+			selectMessages: "Select messages",
+			stopSelecting: "Stop selecting",
+			markRead: "Mark read ({{count}})",
+			markUnread: "Mark unread ({{count}})",
+			deleteSelected: "Delete selected",
+			markConversationRead: "Mark conversation read",
+			conversationActions: "Conversation actions",
+		},
+		relativeDay: {
+			today: "Today",
+			yesterday: "Yesterday",
+			daysAgo: "{{count}} days ago",
+		},
+	},
+	config: {
+		sidebar: {
+			title: "Configuration",
+			ariaLabel: "Configuration categories",
+			ariaUnsaved: "Unsaved changes",
+			categories: "Categories",
+			dirty: "{{count}} {{category}} changed",
+			dirty_one: "{{count}} category changed",
+			dirty_other: "{{count}} categories changed",
+			clean: "No unsaved changes",
+		},
+		editor: {
+			unsavedDraft: "Unsaved draft",
+			saved: "Saved configuration",
+			restartRequired: "Restart required",
+			loading: "Loading configuration…",
+		},
+		error: {
+			title: "Configuration unavailable",
+		},
+		action: {
+			save: "Save",
+			check: "Check",
+			restart: "Restart",
+			checking: "Checking complete draft…",
+			notChecked: "Not checked",
+			checkPassed: "Check passed",
+			checkFailed: "Check failed: {{message}}",
+		},
+		status: {
+			saved: "Configuration saved.",
+			savedRestart: "Configuration saved. Restart required.",
+			restartScheduled:
+				"Restart scheduled. The dashboard may disconnect briefly.",
+			restartFailed: "Restart failed: {{message}}",
+		},
+		restartDialog: {
+			title: "Schedule service restart?",
+			description:
+				"The request only schedules the service-manager command. This page may disconnect before the service is available again.",
+			unsavedWarning:
+				"Unsaved edits are only in this browser tab. Restart uses the persisted file and may make this draft unrecoverable.",
+			cancel: "Cancel",
+			scheduleRestart: "Schedule restart",
+		},
+		saveReview: {
+			title: "Review configuration changes",
+			description:
+				"Check the exact TOML that will replace the current file, then confirm a second time to save.",
+			generating: "Generating TOML diff and checking the draft…",
+			conflict: "Configuration changed on disk",
+			previewFailed: "Preview failed",
+			reload: "Reload from disk and discard draft",
+			checkPassed: "Check passed",
+			checkFailed: "Check failed",
+			securityWarning:
+				"This diff is intentionally unredacted. Passwords, tokens, webhook URLs, and other credentials are visible in this authenticated dialog and the network response.",
+			operationalWarnings: "Operational warnings",
+			tomlDiff: "TOML diff",
+			noChanges: "No file changes to save.",
+			saveFailed: "Save failed: {{error}}",
+			noRuntimeChange: "No runtime change",
+			restartRequired: "Restart required",
+			cancel: "Cancel",
+			saveConfig: "Save configuration",
+			saveAndRestart: "Save and schedule restart",
+		},
+		warnings: {
+			passwordChange:
+				"All sessions will be signed out after Save + Restart is scheduled.",
+			apiDisable: "The dashboard will be unavailable after restart.",
+			apiEndpointChange: "The dashboard address may change after restart.",
+			databasePathChange:
+				"The service will use a different message database after restart.",
+		},
+		leaveDialog: {
+			title: "Leave with unsaved changes?",
+			description:
+				"The configuration draft contains credentials and is intentionally not stored in the browser. Leaving will discard it.",
+			stay: "Stay",
+			discard: "Discard and leave",
+		},
+		sections: {
+			device: "Device",
+			deviceDescription: "Modem identity and object path",
+			sms: "SMS",
+			smsDescription: "Storage filters and code keywords",
+			forwarding: "Forwarding",
+			forwardingDescription: "Delivery workers and channel profiles",
+			api: "Web API",
+			apiDescription: "Dashboard access and persistence",
+			timeouts: "Timeouts",
+			timeoutsDescription: "HTTP and shell execution limits",
+			retention: "Retention",
+			retentionDescription: "Automatic message cleanup",
+		},
+		fields: {
+			device: {
+				sectionTitle: "Device",
+				sectionDescription:
+					"Identify this relay and select the ModemManager object that receives and sends messages.",
+				deviceName: "Device name",
+				deviceNameDescription:
+					"Included in forwarding payloads so downstream channels can identify the source.",
+				modemPath: "Modem object path",
+				modemPathDescription:
+					"Must be a ModemManager path under /org/freedesktop/ModemManager1/Modem/.",
+			},
+			sms: {
+				sectionTitle: "SMS",
+				sectionDescription:
+					"Control which modem storage locations are ignored and which phrases identify verification-code messages.",
+				ignoredStorage: "Ignored storage",
+				ignoredStorageDescription:
+					"Comma-separated storage identifiers, such as sm.",
+				codeKeywords: "Code keywords",
+				codeKeywordsDescription:
+					"Comma-separated, case-insensitive phrases used to recognize verification codes.",
+			},
+			forwarding: {
+				sectionTitle: "Forwarding",
+				sectionDescription:
+					"Configure delivery concurrency, channel credentials, and the named profiles that receive inbound messages.",
+				concurrency: "Concurrent deliveries",
+				concurrencyDescription:
+					"Number of forwarding jobs processed at once. Valid range: 1–16.",
+			},
+			api: {
+				sectionTitle: "Web API",
+				sectionDescription:
+					"Control dashboard availability, listener addresses, authentication, and the message database.",
+				enableApi: "Enable Web API",
+				enableApiDescription:
+					"Disabling the API removes access to this dashboard after restart.",
+				bindAddress: "Bind address",
+				port: "Port",
+				portDescription: "Valid range: 1–65535.",
+				ipv6: "IPv6 companion",
+				ipv6Description:
+					"Also listen on a safe IPv6 companion address when one can be inferred.",
+				password: "Password",
+				passwordDescription:
+					"Changing this value saves and schedules restart in one step, then signs out every session.",
+				databasePath: "Database path",
+			},
+			timeouts: {
+				sectionTitle: "Timeouts",
+				sectionDescription:
+					"Bound connection setup, provider requests, and shell-profile execution. All values are seconds.",
+				connectTimeout: "Connect timeout",
+				connectTimeoutDescription:
+					"Must be positive and no greater than the request timeout.",
+				requestTimeout: "Request timeout",
+				shellTimeout: "Shell timeout",
+			},
+			retention: {
+				sectionTitle: "Retention",
+				sectionDescription:
+					"Remove old terminal messages in bounded batches while preserving messages with active deliveries.",
+				enableCleanup: "Enable cleanup",
+				maxAge: "Maximum age",
+				maxAgeDescription:
+					"Messages older than this many days become eligible for cleanup.",
+				batchSize: "Batch size",
+				batchSizeDescription: "Maximum rows removed by one cleanup pass.",
+			},
+		},
+		channel: {
+			deliveryRoutes: "Delivery routes",
+			deliveryRoutesDescription:
+				"Enable the profiles that should receive forwarded messages.",
+			profilesActive: "{{enabled}} / {{total}} active",
+			missingProfiles: "Missing forwarding profiles",
+			missingProfilesDescription:
+				"These enabled references do not match a configured profile. Remove them to make this configuration valid.",
+			removeReference: "Remove reference",
+			removeReferenceAria: "Remove missing forwarding reference {{ref}}",
+			noProfiles: "No profiles",
+			enabled: "Enabled",
+			disabled: "Disabled",
+			remove: "Remove",
+			add: "Add",
+			profileName: "Profile name",
+			addProfile: "Add {{channel}} profile",
+			duplicateName: "That profile name already exists.",
+			enableAria: "Enable forwarding for {{ref}}",
+			removeAria: "Remove {{ref}}",
+			removeDialog: {
+				title: "Remove forwarding profile?",
+				description:
+					"This removes the profile credentials and its enabled reference from the current draft. The change is not written until you save.",
+				cancel: "Cancel",
+				remove: "Remove profile",
+			},
+		},
+	},
+	login: {
+		title: "SMS Relayed",
+		password: "Password",
+		login: "Login",
+		loginFailed: "Login failed",
+		notice: {
+			configSavedRestart:
+				"Configuration saved and restart scheduled. Sign in with the new password after the service returns.",
+		},
+	},
+	phoneCopy: {
+		copy: "Copy",
+		copied: "Copied",
+		copyFailed: "Copy failed",
+		ariaLabel: "Copy phone number",
+		srCopied: "Phone number copied",
+		srFailed: "Phone number copy failed",
+	},
+	language: {
+		label: "Language",
+		en: "English",
+		zhCN: "简体中文",
 	},
 } as const;

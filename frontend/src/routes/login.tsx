@@ -1,5 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Button } from "#/components/ui/button";
 import { Input } from "#/components/ui/input";
 import { type AuthState, apiFetch } from "#/lib/api";
@@ -32,6 +33,7 @@ function LoginPage() {
 	const { setAuth } = useAuth();
 	const [password, setPassword] = useState("");
 	const [error, setError] = useState("");
+	const { t } = useTranslation();
 
 	async function handleSubmit(e: React.FormEvent) {
 		e.preventDefault();
@@ -46,7 +48,7 @@ function LoginPage() {
 				navigate({ to: "/" });
 			}
 		} catch (err: unknown) {
-			setError((err as Error).message ?? "Login failed");
+			setError((err as Error).message ?? t("login.loginFailed"));
 		}
 	}
 
@@ -56,21 +58,21 @@ function LoginPage() {
 				onSubmit={handleSubmit}
 				className="mx-auto w-full max-w-sm space-y-4 rounded-lg border p-6"
 			>
-				<h1 className="text-xl font-semibold">SMS Relayed</h1>
+				<h1 className="text-xl font-semibold">{t("login.title")}</h1>
 				{notice ? (
 					<p className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
-						{LOGIN_NOTICES[notice]}
+						{t("login.notice.configSavedRestart")}
 					</p>
 				) : null}
 				{error ? <p className="text-sm text-destructive">{error}</p> : null}
 				<Input
 					type="password"
-					placeholder="Password"
+					placeholder={t("login.password")}
 					value={password}
 					onChange={(e) => setPassword(e.target.value)}
 				/>
 				<Button type="submit" className="w-full">
-					Login
+					{t("login.login")}
 				</Button>
 			</form>
 		</div>

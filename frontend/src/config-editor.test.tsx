@@ -383,7 +383,7 @@ describe("ConfigEditor workspace", () => {
 		fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
 		const diff = await screen.findByRole("textbox", {
-			name: "Complete plaintext TOML diff",
+			name: "TOML diff",
 		});
 		expect((diff as HTMLTextAreaElement).value).toContain("old-password");
 		expect(requests.some((request) => request.init?.method === "PUT")).toBe(
@@ -457,7 +457,7 @@ describe("ConfigEditor workspace", () => {
 			}),
 		);
 		const diff = await screen.findByRole("textbox", {
-			name: "Complete plaintext TOML diff",
+			name: "TOML diff",
 		});
 		expect((diff as HTMLTextAreaElement).value).toContain("relay-three");
 
@@ -472,7 +472,7 @@ describe("ConfigEditor workspace", () => {
 		expect(
 			(
 				screen.getByRole("textbox", {
-					name: "Complete plaintext TOML diff",
+					name: "TOML diff",
 				}) as HTMLTextAreaElement
 			).value,
 		).toContain("relay-three");

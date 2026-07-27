@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Badge } from "#/components/ui/badge";
 import { Button } from "#/components/ui/button";
 import {
@@ -63,6 +64,7 @@ export function ForwardingStatusPanel({
 	const generationRef = useRef(0);
 	const previousSelectionRef = useRef(selectedProfile);
 	const navigationId = useId();
+	const { t } = useTranslation();
 
 	const refresh = useCallback(async () => {
 		const generation = ++generationRef.current;
@@ -76,7 +78,11 @@ export function ForwardingStatusPanel({
 			}
 		} catch (refreshError) {
 			if (generation === generationRef.current) {
-				setError(errorMessage(refreshError));
+				setError(
+					refreshError instanceof Error
+						? refreshError.message
+						: t("forwarding.error.description"),
+				);
 			}
 		} finally {
 			if (generation === generationRef.current) {
@@ -84,7 +90,7 @@ export function ForwardingStatusPanel({
 				setRefreshing(false);
 			}
 		}
-	}, []);
+	}, [t]);
 
 	useEffect(() => {
 		void refresh();
@@ -146,7 +152,7 @@ export function ForwardingStatusPanel({
 	return (
 		<div className="h-full min-h-0" aria-busy={refreshing}>
 			<WorkspaceLayout
-				navigationLabel="Forwarding profiles"
+				navigationLabel={t("forwarding.sidebar.ariaLabel")}
 				mobileNavigationOpen={mobileNavigationOpen}
 				navigation={
 					<ForwardingNavigation
@@ -198,14 +204,17 @@ export function ForwardingStatusPanel({
 			</WorkspaceLayout>
 			<output className="sr-only" aria-live="polite" aria-atomic="true">
 				{refreshing
-					? "Refreshing forwarding status."
-					: `Forwarding snapshot generated ${formatTimestamp(data.generated_at)}.`}
+					? t("forwarding.srLive.refreshing")
+					: t("forwarding.srLive.snapshot", {
+							time: formatTimestamp(data.generated_at),
+						})}
 			</output>
 		</div>
 	);
 }
 
 function InitialLoadingState() {
+	const { t } = useTranslation();
 	return (
 		<div
 			className="grid h-full min-h-64 place-items-center bg-background px-6"
@@ -216,7 +225,7 @@ function InitialLoadingState() {
 				aria-live="polite"
 			>
 				<RefreshCw className="size-4 animate-spin" aria-hidden="true" />
-				<span>Loading forwarding status...</span>
+				<span>{t("forwarding.loading")}</span>
 			</output>
 		</div>
 	);
@@ -227,6 +236,7 @@ function InitialErrorState({
 	refreshing,
 	onRefresh,
 }: { error: string } & RefreshAction) {
+	const { t } = useTranslation();
 	return (
 		<div className="grid h-full min-h-64 place-items-center bg-background px-5">
 			<div className="w-full max-w-md rounded-xl border bg-card p-6 shadow-sm">
@@ -235,10 +245,10 @@ function InitialErrorState({
 				</div>
 				<div role="alert">
 					<h2 className="text-base font-semibold">
-						Unable to load forwarding status
+						{t("forwarding.error.title")}
 					</h2>
 					<p className="mt-1 text-sm text-muted-foreground">
-						{error || "The forwarding snapshot could not be loaded."}
+						{error || t("forwarding.error.description")}
 					</p>
 				</div>
 				<Button
@@ -252,7 +262,7 @@ function InitialErrorState({
 						className={cn("size-4", refreshing && "animate-spin")}
 						aria-hidden="true"
 					/>
-					Refresh
+					{t("common.refresh")}
 				</Button>
 			</div>
 		</div>
@@ -284,14 +294,17 @@ function ForwardingNavigation({
 	onSelectProfile: (profile?: string) => void;
 	onClose: () => void;
 } & RefreshAction) {
+	const { t } = useTranslation();
 	return (
 		<div id={navigationId} className="flex h-full min-h-0 flex-col">
 			<header className="flex shrink-0 items-center justify-between gap-3 border-b border-sidebar-border px-4 py-4">
 				<div className="min-w-0">
 					<p className="text-[11px] font-semibold tracking-[0.16em] text-sidebar-foreground/55 uppercase">
-						Operations
+						{t("forwarding.sidebar.operations")}
 					</p>
-					<h2 className="mt-0.5 text-base font-semibold">Forwarding</h2>
+					<h2 className="mt-0.5 text-base font-semibold">
+						{t("forwarding.sidebar.title")}
+					</h2>
 				</div>
 				<div className="flex items-center gap-1 md:hidden">
 					<Button
@@ -299,7 +312,7 @@ function ForwardingNavigation({
 						variant="ghost"
 						size="icon"
 						className="hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-						aria-label="Refresh forwarding status"
+						aria-label={t("forwarding.sidebar.ariaRefresh")}
 						disabled={refreshing}
 						onClick={onRefresh}
 					>
@@ -313,7 +326,7 @@ function ForwardingNavigation({
 						variant="ghost"
 						size="icon"
 						className="hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-						aria-label="Close forwarding navigation"
+						aria-label={t("forwarding.sidebar.ariaClose")}
 						aria-controls={navigationId}
 						aria-expanded={navigationOpen}
 						onClick={onClose}
@@ -329,7 +342,7 @@ function ForwardingNavigation({
 
 			<nav
 				className="min-h-0 flex-1 overflow-y-auto px-2 py-3"
-				aria-label="Forwarding views"
+				aria-label={t("forwarding.sidebar.ariaViews")}
 			>
 				<button
 					type="button"
@@ -341,31 +354,33 @@ function ForwardingNavigation({
 						<LayoutDashboard className="size-4" aria-hidden="true" />
 					</span>
 					<span className="min-w-0">
-						<span className="block text-sm font-medium">Overview</span>
+						<span className="block text-sm font-medium">
+							{t("forwarding.overview.title")}
+						</span>
 						<span className="mt-0.5 block text-xs text-sidebar-foreground/55">
-							All profile snapshots
+							{t("forwarding.overview.subtitle")}
 						</span>
 					</span>
 				</button>
 
 				<ProfileNavigationGroup
-					title="Configured"
+					title={t("forwarding.overview.configured")}
 					profiles={configuredProfiles}
-					emptyMessage="No configured profiles"
+					emptyMessage={t("forwarding.overview.noConfiguredProfiles")}
 					selectedProfile={selectedProfile}
 					onSelectProfile={onSelectProfile}
 				/>
 				<ProfileNavigationGroup
-					title="Historical"
+					title={t("forwarding.overview.historical")}
 					profiles={historicalProfiles}
-					emptyMessage="No retained historical profiles"
+					emptyMessage={t("forwarding.overview.noHistoricalProfiles")}
 					selectedProfile={selectedProfile}
 					onSelectProfile={onSelectProfile}
 				/>
 			</nav>
 
 			<footer className="shrink-0 border-t border-sidebar-border px-4 py-3 text-[11px] leading-relaxed text-sidebar-foreground/55">
-				<p>Snapshot generated</p>
+				<p>{t("forwarding.snapshot.generated")}</p>
 				<time
 					dateTime={generatedAt}
 					className="block text-sidebar-foreground/75"
@@ -373,8 +388,9 @@ function ForwardingNavigation({
 					{formatTimestamp(generatedAt)}
 				</time>
 				<p className="mt-1">
-					Up to {sampleLimit} retained {pluralize(sampleLimit, "attempt")} per
-					profile
+					{t("forwarding.snapshot.generatedDescription", {
+						limit: sampleLimit,
+					})}
 				</p>
 			</footer>
 		</div>
@@ -487,12 +503,13 @@ function DetailHeader({
 	navigationOpen: boolean;
 	onOpenNavigation: () => void;
 } & RefreshAction) {
+	const { t } = useTranslation();
 	const overview = selectedProfile === undefined;
 	const subtitle = overview
-		? "Configured profiles and retained attempt history"
+		? t("forwarding.detail.overviewSubtitle")
 		: activeProfile
-			? "Retained forwarding attempts"
-			: "Not present in the latest snapshot";
+			? t("forwarding.detail.retainedAttempts")
+			: t("forwarding.detail.notPresent");
 
 	return (
 		<header className="flex shrink-0 items-center justify-between gap-3 border-b bg-background/95 px-3 py-3 backdrop-blur md:px-5 md:py-4">
@@ -502,7 +519,7 @@ function DetailHeader({
 					variant="ghost"
 					size="icon"
 					className="md:hidden"
-					aria-label="Open forwarding navigation"
+					aria-label={t("forwarding.sidebar.ariaOpen")}
 					aria-controls={navigationId}
 					aria-expanded={navigationOpen}
 					onClick={onOpenNavigation}
@@ -525,12 +542,13 @@ function DetailHeader({
 							!overview && "break-all font-mono",
 						)}
 					>
-						{overview ? "Overview" : selectedProfile}
+						{overview ? t("forwarding.detail.overview") : selectedProfile}
 					</h2>
 					<p className="truncate text-xs text-muted-foreground">{subtitle}</p>
 					<p className="mt-0.5 hidden text-[11px] text-muted-foreground sm:block">
-						Last updated{" "}
-						<time dateTime={generatedAt}>{formatTimestamp(generatedAt)}</time>
+						{t("forwarding.detail.lastUpdated", {
+							time: formatTimestamp(generatedAt),
+						})}
 					</p>
 				</div>
 			</div>
@@ -538,7 +556,7 @@ function DetailHeader({
 				type="button"
 				variant="outline"
 				size="sm"
-				aria-label="Refresh forwarding status"
+				aria-label={t("forwarding.sidebar.ariaRefresh")}
 				disabled={refreshing}
 				onClick={onRefresh}
 			>
@@ -546,7 +564,7 @@ function DetailHeader({
 					className={cn(refreshing && "animate-spin")}
 					aria-hidden="true"
 				/>
-				<span className="hidden sm:inline">Refresh</span>
+				<span className="hidden sm:inline">{t("common.refresh")}</span>
 			</Button>
 		</header>
 	);
@@ -559,6 +577,7 @@ function RefreshErrorBanner({
 	error: string;
 	className?: string;
 }) {
+	const { t } = useTranslation();
 	return (
 		<div
 			className={cn(
@@ -569,9 +588,9 @@ function RefreshErrorBanner({
 			<div className="flex gap-2" role="alert">
 				<TriangleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
 				<div className="min-w-0 text-xs">
-					<p className="font-medium">Refresh failed</p>
+					<p className="font-medium">{t("forwarding.error.refreshFailed")}</p>
 					<p className="mt-0.5 break-words opacity-80">
-						Showing the previous snapshot. {error}
+						{t("forwarding.error.refreshDescription", { error })}
 					</p>
 				</div>
 			</div>
@@ -588,6 +607,7 @@ function ForwardingOverview({
 	sampleLimit: number;
 	onSelectProfile: (profile: string) => void;
 }) {
+	const { t } = useTranslation();
 	let configuredCount = 0;
 	let enabledCount = 0;
 	let profilesWithAttempts = 0;
@@ -604,34 +624,33 @@ function ForwardingOverview({
 			<section aria-labelledby="forwarding-overview-heading">
 				<div className="max-w-2xl">
 					<p className="text-[11px] font-semibold tracking-[0.16em] text-muted-foreground uppercase">
-						Current snapshot
+						{t("forwarding.overviewSection.currentSnapshot")}
 					</p>
 					<h3
 						id="forwarding-overview-heading"
 						className="mt-1 text-xl font-semibold tracking-tight"
 					>
-						Forwarding coverage
+						{t("forwarding.overviewSection.coverage")}
 					</h3>
 					<p className="mt-1 text-sm text-muted-foreground">
-						Configuration state and retained attempt availability from the
-						latest backend snapshot.
+						{t("forwarding.overviewSection.description")}
 					</p>
 				</div>
 
 				<dl className="mt-5 grid overflow-hidden rounded-xl border bg-border sm:grid-cols-3">
 					<OverviewMetric
 						icon={SlidersHorizontal}
-						label="Configured profiles"
+						label={t("forwarding.overviewSection.configuredProfiles")}
 						value={configuredCount}
 					/>
 					<OverviewMetric
 						icon={Power}
-						label="Enabled profiles"
+						label={t("forwarding.overviewSection.enabledProfiles")}
 						value={enabledCount}
 					/>
 					<OverviewMetric
 						icon={History}
-						label="Profiles with retained attempts"
+						label={t("forwarding.overviewSection.profilesWithAttempts")}
 						value={profilesWithAttempts}
 					/>
 				</dl>
@@ -644,14 +663,16 @@ function ForwardingOverview({
 							id="profile-snapshot-heading"
 							className="text-base font-semibold"
 						>
-							Profile snapshot
+							{t("forwarding.overviewSection.profileSnapshot")}
 						</h3>
 						<p className="mt-0.5 text-xs text-muted-foreground">
-							Latest retained outcome for each configured or historical profile.
+							{t("forwarding.overviewSection.profileSnapshotDescription")}
 						</p>
 					</div>
 					<p className="text-xs text-muted-foreground">
-						Up to {sampleLimit} {pluralize(sampleLimit, "attempt")} per profile
+						{t("forwarding.snapshot.generatedDescription", {
+							limit: sampleLimit,
+						})}
 					</p>
 				</div>
 
@@ -662,23 +683,29 @@ function ForwardingOverview({
 							aria-hidden="true"
 						/>
 						<p className="mt-3 text-sm font-medium">
-							No forwarding profiles configured.
+							{t("forwarding.overviewSection.empty")}
 						</p>
 						<p className="mt-1 text-xs text-muted-foreground">
-							No retained historical profile attempts are available either.
+							{t("forwarding.overviewSection.emptyDescription")}
 						</p>
 					</div>
 				) : (
 					<>
 						<div className="mt-4 hidden overflow-hidden rounded-xl border md:block">
-							<Table aria-label="Forwarding profile snapshot">
+							<Table aria-label={t("forwarding.table.ariaLabel")}>
 								<TableHeader className="bg-muted/40">
 									<TableRow className="hover:bg-transparent">
-										<TableHead className="pl-4">Profile</TableHead>
-										<TableHead>State</TableHead>
-										<TableHead>Latest outcome</TableHead>
-										<TableHead>Latest completed</TableHead>
-										<TableHead className="pr-4 text-right">Retained</TableHead>
+										<TableHead className="pl-4">
+											{t("forwarding.table.profile")}
+										</TableHead>
+										<TableHead>{t("forwarding.table.state")}</TableHead>
+										<TableHead>{t("forwarding.table.latestOutcome")}</TableHead>
+										<TableHead>
+											{t("forwarding.table.latestCompleted")}
+										</TableHead>
+										<TableHead className="pr-4 text-right">
+											{t("forwarding.table.retained")}
+										</TableHead>
 									</TableRow>
 								</TableHeader>
 								<TableBody>
@@ -695,7 +722,7 @@ function ForwardingOverview({
 
 						<ul
 							className="mt-4 divide-y overflow-hidden rounded-xl border md:hidden"
-							aria-label="Forwarding profile snapshot"
+							aria-label={t("forwarding.table.ariaLabel")}
 						>
 							{profiles.map((profile) => (
 								<li key={profile.profile_key}>
@@ -789,6 +816,7 @@ function MobileProfileSnapshot({
 	profile: ProfileStatus;
 	onSelect: () => void;
 }) {
+	const { t } = useTranslation();
 	const latest = profile.samples[0];
 	return (
 		<button
@@ -817,7 +845,7 @@ function MobileProfileSnapshot({
 					<NoAttemptsStatus />
 				)}
 				<span className="text-[11px] text-muted-foreground">
-					{profile.samples.length} retained
+					{t("forwarding.mobile.retained", { count: profile.samples.length })}
 				</span>
 			</span>
 		</button>
@@ -831,30 +859,31 @@ function ProfileDetail({
 	profile: ProfileStatus;
 	sampleLimit: number;
 }) {
+	const { t } = useTranslation();
 	const latest = profile.samples[0];
-	const attemptsLabel = `Latest ${sampleLimit} ${pluralize(sampleLimit, "attempt")}`;
+	const attemptsLabel = t("forwarding.attempts.title", { count: sampleLimit });
 
 	return (
 		<div className="space-y-7 px-4 py-5 md:px-6 md:py-7 lg:px-8">
 			<section aria-labelledby="profile-state-heading">
 				<p className="text-[11px] font-semibold tracking-[0.16em] text-muted-foreground uppercase">
-					Profile snapshot
+					{t("forwarding.overviewSection.profileSnapshot")}
 				</p>
 				<h3 id="profile-state-heading" className="sr-only">
-					State for {profile.profile_key}
+					{t("forwarding.table.state")}
 				</h3>
 				<dl className="mt-2 grid overflow-hidden rounded-xl border bg-border sm:grid-cols-3">
-					<SummaryField label="State">
+					<SummaryField label={t("forwarding.table.state")}>
 						<ProfileStateBadges profile={profile} />
 					</SummaryField>
-					<SummaryField label="Latest outcome">
+					<SummaryField label={t("forwarding.table.latestOutcome")}>
 						{latest ? (
 							<OutcomeBadge outcome={latest.outcome} />
 						) : (
 							<NoAttemptsStatus />
 						)}
 					</SummaryField>
-					<SummaryField label="Latest completed">
+					<SummaryField label={t("forwarding.table.latestCompleted")}>
 						{latest ? (
 							<time
 								dateTime={latest.completed_at}
@@ -879,12 +908,14 @@ function ProfileDetail({
 							{attemptsLabel}
 						</h3>
 						<p className="mt-0.5 text-xs text-muted-foreground">
-							{profile.samples.length} retained in this snapshot
+							{t("forwarding.attempts.retainedDescription", {
+								count: profile.samples.length,
+							})}
 						</p>
 					</div>
 					<div className="flex items-center gap-1.5 text-xs text-muted-foreground">
 						<Clock3 className="size-3.5" aria-hidden="true" />
-						Newest first
+						{t("forwarding.attempts.newestFirst")}
 					</div>
 				</div>
 
@@ -895,23 +926,32 @@ function ProfileDetail({
 							aria-hidden="true"
 						/>
 						<p className="mt-3 text-sm font-medium">
-							No forwarding attempts yet.
+							{t("forwarding.attempts.empty")}
 						</p>
 						<p className="mt-1 text-xs text-muted-foreground">
-							This snapshot contains no retained attempts for this profile.
+							{t("forwarding.attempts.emptyDescription")}
 						</p>
 					</div>
 				) : (
 					<>
 						<div className="mt-4 hidden overflow-hidden rounded-xl border md:block">
-							<Table aria-label={`${attemptsLabel} for ${profile.profile_key}`}>
+							<Table
+								aria-label={t("forwarding.attempts.label", {
+									label: attemptsLabel,
+									key: profile.profile_key,
+								})}
+							>
 								<TableHeader className="bg-muted/40">
 									<TableRow className="hover:bg-transparent">
-										<TableHead className="pl-4">Attempt</TableHead>
-										<TableHead>Completed</TableHead>
-										<TableHead>Outcome</TableHead>
-										<TableHead>Timing</TableHead>
-										<TableHead className="pr-4">Error</TableHead>
+										<TableHead className="pl-4">
+											{t("forwarding.table.attempt")}
+										</TableHead>
+										<TableHead>{t("forwarding.table.completed")}</TableHead>
+										<TableHead>{t("forwarding.table.outcome")}</TableHead>
+										<TableHead>{t("forwarding.table.timing")}</TableHead>
+										<TableHead className="pr-4">
+											{t("forwarding.table.error")}
+										</TableHead>
 									</TableRow>
 								</TableHeader>
 								<TableBody>
@@ -927,7 +967,10 @@ function ProfileDetail({
 
 						<ol
 							className="mt-4 space-y-3 md:hidden"
-							aria-label={`${attemptsLabel} for ${profile.profile_key}`}
+							aria-label={t("forwarding.attempts.label", {
+								label: attemptsLabel,
+								key: profile.profile_key,
+							})}
 						>
 							{profile.samples.map((sample, index) => (
 								<li key={attemptKey(sample, index)}>
@@ -960,13 +1003,14 @@ function SummaryField({
 }
 
 function AttemptTableRow({ sample }: { sample: ForwardAttemptSample }) {
+	const { t } = useTranslation();
 	return (
 		<TableRow>
 			<TableCell className="pl-4 font-mono text-xs">
 				<span className="tabular-nums">{sample.attempt_number}</span>
 				{sample.is_retry ? (
 					<Badge variant="outline" className="ml-2">
-						Retry
+						{t("forwarding.badge.retry")}
 					</Badge>
 				) : null}
 			</TableCell>
@@ -989,23 +1033,28 @@ function AttemptTableRow({ sample }: { sample: ForwardAttemptSample }) {
 }
 
 function MobileAttemptRecord({ sample }: { sample: ForwardAttemptSample }) {
+	const { t } = useTranslation();
 	return (
 		<article className="rounded-xl border bg-card p-4">
 			<header className="flex items-start justify-between gap-3">
 				<div className="flex min-w-0 flex-wrap items-center gap-2">
 					<p className="text-sm font-medium">
-						Attempt{" "}
+						{t("forwarding.table.attempt")}{" "}
 						<span className="font-mono tabular-nums">
 							{sample.attempt_number}
 						</span>
 					</p>
-					{sample.is_retry ? <Badge variant="outline">Retry</Badge> : null}
+					{sample.is_retry ? (
+						<Badge variant="outline">{t("forwarding.badge.retry")}</Badge>
+					) : null}
 				</div>
 				<OutcomeBadge outcome={sample.outcome} />
 			</header>
 			<dl className="mt-4 grid gap-3 text-xs">
 				<div className="grid grid-cols-[5rem_minmax(0,1fr)] gap-3">
-					<dt className="text-muted-foreground">Completed</dt>
+					<dt className="text-muted-foreground">
+						{t("forwarding.mobile.completed")}
+					</dt>
 					<dd className="text-right">
 						<time dateTime={sample.completed_at}>
 							{formatTimestamp(sample.completed_at)}
@@ -1013,13 +1062,17 @@ function MobileAttemptRecord({ sample }: { sample: ForwardAttemptSample }) {
 					</dd>
 				</div>
 				<div className="grid grid-cols-[5rem_minmax(0,1fr)] gap-3">
-					<dt className="text-muted-foreground">Timing</dt>
+					<dt className="text-muted-foreground">
+						{t("forwarding.mobile.timing")}
+					</dt>
 					<dd className="text-right font-mono">
 						{formatAttemptTiming(sample.dispatch_delay_ms, sample.latency_ms)}
 					</dd>
 				</div>
 				<div className="grid grid-cols-[5rem_minmax(0,1fr)] gap-3">
-					<dt className="text-muted-foreground">Error</dt>
+					<dt className="text-muted-foreground">
+						{t("forwarding.mobile.error")}
+					</dt>
 					<dd className="break-all text-right font-mono text-muted-foreground">
 						{sample.error_code ?? "—"}
 					</dd>
@@ -1036,19 +1089,18 @@ function UnavailableProfile({
 	profileKey: string;
 	onOverview: () => void;
 }) {
+	const { t } = useTranslation();
 	return (
 		<div className="grid min-h-full place-items-center px-5 py-12">
 			<div className="w-full max-w-lg rounded-xl border border-dashed bg-card px-5 py-10 text-center">
 				<div className="mx-auto grid size-11 place-items-center rounded-full bg-muted text-muted-foreground">
 					<CircleAlert className="size-5" aria-hidden="true" />
 				</div>
-				<h3 className="mt-4 text-base font-semibold">Profile unavailable</h3>
+				<h3 className="mt-4 text-base font-semibold">
+					{t("forwarding.profile.unavailable")}
+				</h3>
 				<p className="mt-2 text-sm text-muted-foreground">
-					The profile{" "}
-					<code className="break-all rounded bg-muted px-1 py-0.5 text-xs text-foreground">
-						{profileKey}
-					</code>{" "}
-					is not present in the latest forwarding snapshot.
+					{t("forwarding.profile.unavailableDescription", { key: profileKey })}
 				</p>
 				<Button
 					type="button"
@@ -1057,7 +1109,7 @@ function UnavailableProfile({
 					onClick={onOverview}
 				>
 					<LayoutDashboard aria-hidden="true" />
-					View Overview
+					{t("forwarding.profile.viewOverview")}
 				</Button>
 			</div>
 		</div>
@@ -1065,6 +1117,7 @@ function UnavailableProfile({
 }
 
 function ProfileStateBadges({ profile }: { profile: ProfileStatus }) {
+	const { t } = useTranslation();
 	if (!profile.configured) {
 		return <ProfileStateBadge profile={profile} />;
 	}
@@ -1072,7 +1125,7 @@ function ProfileStateBadges({ profile }: { profile: ProfileStatus }) {
 		<>
 			<Badge variant="outline">
 				<ServerCog aria-hidden="true" />
-				Configured
+				{t("forwarding.badge.configured")}
 			</Badge>
 			<ProfileStateBadge profile={profile} />
 		</>
@@ -1080,7 +1133,8 @@ function ProfileStateBadges({ profile }: { profile: ProfileStatus }) {
 }
 
 function ProfileStateBadge({ profile }: { profile: ProfileStatus }) {
-	const { label, Icon, badgeClassName } = profileStatePresentation(profile);
+	const { label } = profileStatePresentation(profile);
+	const { Icon, badgeClassName } = profileStatePresentation(profile);
 	return (
 		<Badge variant="outline" className={badgeClassName}>
 			<Icon aria-hidden="true" />
@@ -1146,11 +1200,12 @@ function InlineOutcomeStatus({
 }: {
 	sample: ForwardAttemptSample | undefined;
 }) {
+	const { t } = useTranslation();
 	if (!sample) {
 		return (
 			<span className="inline-flex items-center gap-1 text-sidebar-foreground/50">
 				<CircleDashed className="size-3" aria-hidden="true" />
-				No attempts
+				{t("forwarding.outcome.noAttempts")}
 			</span>
 		);
 	}
@@ -1158,16 +1213,17 @@ function InlineOutcomeStatus({
 	return (
 		<span className={cn("inline-flex items-center gap-1", inlineClassName)}>
 			<Icon className="size-3" aria-hidden="true" />
-			Latest: {label}
+			{t("forwarding.outcome.latest", { outcome: label })}
 		</span>
 	);
 }
 
 function NoAttemptsStatus() {
+	const { t } = useTranslation();
 	return (
 		<span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
 			<CircleDashed className="size-3.5" aria-hidden="true" />
-			No attempts
+			{t("forwarding.outcome.noAttempts")}
 		</span>
 	);
 }
@@ -1238,14 +1294,4 @@ function formatAttemptTiming(
 	const dispatch =
 		dispatchDelayMs == null ? "—" : formatLatency(dispatchDelayMs);
 	return `Dispatch ${dispatch} · Request ${formatLatency(requestLatencyMs)}`;
-}
-
-function pluralize(count: number, singular: string) {
-	return count === 1 ? singular : `${singular}s`;
-}
-
-function errorMessage(error: unknown) {
-	return error instanceof Error
-		? error.message
-		: "The forwarding snapshot could not be loaded.";
 }
