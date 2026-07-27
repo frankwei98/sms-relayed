@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-router";
 import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools";
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { type AuthState, apiFetch } from "#/lib/api";
 import { AuthContext } from "#/lib/auth";
 
@@ -20,6 +21,7 @@ export const Route = createRootRoute({
 function RootComponent() {
 	const location = useLocation();
 	const navigate = useNavigate();
+	const { t } = useTranslation();
 	const [auth, setAuth] = useState<AuthState | null>(null);
 
 	useEffect(() => {
@@ -77,7 +79,7 @@ function RootComponent() {
 							className="shrink-0 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
 							activeProps={{ className: "bg-accent text-accent-foreground" }}
 						>
-							SMS
+							{t("nav.sms")}
 						</Link>
 						<Link
 							to="/modem"
