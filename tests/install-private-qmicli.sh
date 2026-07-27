@@ -40,6 +40,7 @@ EOF
 printf '%s\n' "$*" >> "$FAKE_SYSTEMCTL_LOG"
 case "${1:-}" in
   is-active) [ "${FAKE_SERVICE_ACTIVE:-0}" = "1" ] ;;
+  daemon-reload) [ "${FAKE_RELOAD_FAIL:-0}" != "1" ] ;;
   restart) [ "${FAKE_RESTART_FAIL:-0}" != "1" ] ;;
 esac
 EOF
@@ -87,21 +88,35 @@ fi
 
 case_rollback="$TEST_TMP/rollback"
 make_fakes "$case_rollback"
-mkdir -p \
-  "$case_rollback/root/opt/sms-relayed/libqmi-old" \
-  "$case_rollback/root/etc/systemd/system/sms-relayed.service.d"
-ln -s "libqmi-old" "$case_rollback/root/opt/sms-relayed/libqmi"
-printf '%s\n' "old drop-in" > "$case_rollback/root/etc/systemd/system/sms-relayed.service.d/qmicli.conf"
 FAKE_SERVICE_ACTIVE=1
 FAKE_RESTART_FAIL=1
 export FAKE_SERVICE_ACTIVE FAKE_RESTART_FAIL
 if run_installer "$case_rollback"; then
   fail "restart failure did not fail the installer"
 fi
-[ "$(readlink "$case_rollback/root/opt/sms-relayed/libqmi")" = "libqmi-old" ] ||
-  fail "restart failure did not restore the previous symlink"
-assert_contains "$case_rollback/root/etc/systemd/system/sms-relayed.service.d/qmicli.conf" "old drop-in"
+[ ! -e "$case_rollback/root/opt/sms-relayed/libqmi" ] ||
+  fail "restart failure left the private symlink"
+[ ! -e "$case_rollback/root/opt/sms-relayed/libqmi-1.36.0" ] ||
+  fail "restart failure left the newly deployed version"
+[ ! -e "$case_rollback/root/etc/systemd/system/sms-relayed.service.d/qmicli.conf" ] ||
+  fail "restart failure left the systemd drop-in"
 unset FAKE_RESTART_FAIL
+
+case_reload_rollback="$TEST_TMP/reload-rollback"
+make_fakes "$case_reload_rollback"
+FAKE_SERVICE_ACTIVE=0
+FAKE_RELOAD_FAIL=1
+export FAKE_SERVICE_ACTIVE FAKE_RELOAD_FAIL
+if run_installer "$case_reload_rollback"; then
+  fail "daemon-reload failure did not fail the installer"
+fi
+[ ! -e "$case_reload_rollback/root/opt/sms-relayed/libqmi" ] ||
+  fail "daemon-reload failure left the private symlink"
+[ ! -e "$case_reload_rollback/root/opt/sms-relayed/libqmi-1.36.0" ] ||
+  fail "daemon-reload failure left the newly deployed version"
+[ ! -e "$case_reload_rollback/root/etc/systemd/system/sms-relayed.service.d/qmicli.conf" ] ||
+  fail "daemon-reload failure left the systemd drop-in"
+unset FAKE_RELOAD_FAIL
 
 case_uninstall="$TEST_TMP/uninstall"
 make_fakes "$case_uninstall"
@@ -115,5 +130,83 @@ run_installer "$case_uninstall" --uninstall
   fail "uninstall left the managed version directory"
 [ ! -e "$case_uninstall/root/etc/systemd/system/sms-relayed.service.d/qmicli.conf" ] ||
   fail "uninstall left the systemd drop-in"
+
+case_uninstall_reload_rollback="$TEST_TMP/uninstall-reload-rollback"
+make_fakes "$case_uninstall_reload_rollback"
+FAKE_SERVICE_ACTIVE=0
+export FAKE_SERVICE_ACTIVE
+run_installer "$case_uninstall_reload_rollback"
+FAKE_SERVICE_ACTIVE=1
+FAKE_RELOAD_FAIL=1
+export FAKE_SERVICE_ACTIVE FAKE_RELOAD_FAIL
+if run_installer "$case_uninstall_reload_rollback" --uninstall; then
+  fail "uninstall daemon-reload failure did not fail"
+fi
+[ -L "$case_uninstall_reload_rollback/root/opt/sms-relayed/libqmi" ] ||
+  fail "uninstall daemon-reload failure did not restore the symlink"
+[ -d "$case_uninstall_reload_rollback/root/opt/sms-relayed/libqmi-1.36.0" ] ||
+  fail "uninstall daemon-reload failure did not restore the version"
+[ -f "$case_uninstall_reload_rollback/root/etc/systemd/system/sms-relayed.service.d/qmicli.conf" ] ||
+  fail "uninstall daemon-reload failure did not restore the drop-in"
+unset FAKE_RELOAD_FAIL
+
+case_uninstall_restart_rollback="$TEST_TMP/uninstall-restart-rollback"
+make_fakes "$case_uninstall_restart_rollback"
+FAKE_SERVICE_ACTIVE=0
+export FAKE_SERVICE_ACTIVE
+run_installer "$case_uninstall_restart_rollback"
+FAKE_SERVICE_ACTIVE=1
+FAKE_RESTART_FAIL=1
+export FAKE_SERVICE_ACTIVE FAKE_RESTART_FAIL
+if run_installer "$case_uninstall_restart_rollback" --uninstall; then
+  fail "uninstall restart failure did not fail"
+fi
+[ -L "$case_uninstall_restart_rollback/root/opt/sms-relayed/libqmi" ] ||
+  fail "uninstall restart failure did not restore the symlink"
+[ -d "$case_uninstall_restart_rollback/root/opt/sms-relayed/libqmi-1.36.0" ] ||
+  fail "uninstall restart failure did not restore the version"
+[ -f "$case_uninstall_restart_rollback/root/etc/systemd/system/sms-relayed.service.d/qmicli.conf" ] ||
+  fail "uninstall restart failure did not restore the drop-in"
+unset FAKE_RESTART_FAIL
+
+case_unowned="$TEST_TMP/unowned"
+make_fakes "$case_unowned"
+mkdir -p "$case_unowned/root/opt/sms-relayed/libqmi-1.36.0"
+printf '%s\n' "operator data" > "$case_unowned/root/opt/sms-relayed/libqmi-1.36.0/keep"
+FAKE_SERVICE_ACTIVE=0
+export FAKE_SERVICE_ACTIVE
+if run_installer "$case_unowned" --uninstall; then
+  fail "uninstall accepted an unowned version directory"
+fi
+assert_contains "$case_unowned/root/opt/sms-relayed/libqmi-1.36.0/keep" "operator data"
+
+case_unmanaged_binding="$TEST_TMP/unmanaged-binding"
+make_fakes "$case_unmanaged_binding"
+mkdir -p \
+  "$case_unmanaged_binding/root/opt/sms-relayed" \
+  "$case_unmanaged_binding/root/etc/systemd/system/sms-relayed.service.d"
+ln -s "operator-libqmi" "$case_unmanaged_binding/root/opt/sms-relayed/libqmi"
+printf '%s\n' "operator drop-in" > "$case_unmanaged_binding/root/etc/systemd/system/sms-relayed.service.d/qmicli.conf"
+if run_installer "$case_unmanaged_binding"; then
+  fail "installer overwrote an unmanaged binding"
+fi
+[ "$(readlink "$case_unmanaged_binding/root/opt/sms-relayed/libqmi")" = "operator-libqmi" ] ||
+  fail "installer changed an unmanaged symlink"
+assert_contains "$case_unmanaged_binding/root/etc/systemd/system/sms-relayed.service.d/qmicli.conf" "operator drop-in"
+
+case_spoofed_drop_in="$TEST_TMP/spoofed-drop-in"
+make_fakes "$case_spoofed_drop_in"
+mkdir -p "$case_spoofed_drop_in/root/etc/systemd/system/sms-relayed.service.d"
+printf '%s\n' \
+  "# Managed by install-private-qmicli-debian.sh" \
+  "[Service]" \
+  "Environment=SMS_RELAYED_QMICLI_PATH=/operator/qmicli" \
+  > "$case_spoofed_drop_in/root/etc/systemd/system/sms-relayed.service.d/qmicli.conf"
+if run_installer "$case_spoofed_drop_in"; then
+  fail "installer accepted a drop-in with only the ownership comment"
+fi
+assert_contains \
+  "$case_spoofed_drop_in/root/etc/systemd/system/sms-relayed.service.d/qmicli.conf" \
+  "SMS_RELAYED_QMICLI_PATH=/operator/qmicli"
 
 printf '%s\n' "ok - private qmicli installer"
