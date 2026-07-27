@@ -170,21 +170,35 @@ pub fn parse_imsa_services(raw: &str) -> ParsedImsaServices {
         technology: ImsTechnology::Unknown,
         nonstandard: false,
     };
+    let mut in_sms_section = false;
     for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case("SMS:") {
+            in_sms_section = true;
+            continue;
+        }
+        if trimmed.ends_with(':') {
+            in_sms_section = false;
+            continue;
+        }
         let Some((label, value)) = line.trim().split_once(':') else {
             continue;
         };
         let label = label.trim().to_ascii_lowercase();
         let value = normalized_value(value);
-        if label == "ims sms service status" {
+        if (in_sms_section && label == "status") || label == "ims sms service status" {
+            parsed.nonstandard |= label == "ims sms service status";
             parsed.sms_service = match value.as_str() {
                 "available" | "full service" => ImsSmsService::Available,
                 "limited" | "limited service" => ImsSmsService::Limited,
                 "unavailable" | "no service" => ImsSmsService::Unavailable,
                 _ => ImsSmsService::Unknown,
             };
-        } else if label == "ims sms service rat" || label == "ims sms service technology" {
-            parsed.nonstandard |= label != "ims sms service rat";
+        } else if (in_sms_section && label == "technology")
+            || label == "ims sms service rat"
+            || label == "ims sms service technology"
+        {
+            parsed.nonstandard |= label != "technology";
             parsed.technology = match value.as_str() {
                 "wwan" => ImsTechnology::Wwan,
                 "wlan" => ImsTechnology::Wlan,
@@ -209,15 +223,24 @@ pub fn parse_imsa_registration(raw: &str) -> ParsedImsaRegistration {
         registration: ImsRegistration::Unknown,
         nonstandard: false,
     };
+    let mut in_registration_section = false;
     for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.to_ascii_lowercase().ends_with("ims registration:") {
+            in_registration_section = true;
+            continue;
+        }
         let Some((label, value)) = line.trim().split_once(':') else {
             continue;
         };
         let label = label.trim().to_ascii_lowercase();
-        if label != "ims registration status" && label != "registration status" {
+        if !(in_registration_section && label == "status")
+            && label != "ims registration status"
+            && label != "registration status"
+        {
             continue;
         }
-        parsed.nonstandard |= label != "ims registration status";
+        parsed.nonstandard |= label != "status";
         parsed.registration = match normalized_value(value).as_str() {
             "registered" => ImsRegistration::Registered,
             "registering" => ImsRegistration::Registering,
@@ -245,10 +268,13 @@ pub fn parse_ims_settings(raw: &str) -> ParsedImsSettings {
             continue;
         };
         let label = label.trim().to_ascii_lowercase();
-        if label != "ims sms service" && label != "ims sms enabled" {
+        if label != "sms service enabled"
+            && label != "ims sms service"
+            && label != "ims sms enabled"
+        {
             continue;
         }
-        parsed.nonstandard |= label != "ims sms service";
+        parsed.nonstandard |= label != "sms service enabled";
         parsed.configured = match normalized_value(value).as_str() {
             "enabled" | "yes" | "true" => ImsConfigured::Enabled,
             "disabled" | "no" | "false" => ImsConfigured::Disabled,
@@ -945,7 +971,13 @@ mod tests {
     #[test]
     fn parses_available_sms_service_over_wlan() {
         let parsed = parse_imsa_services(
-            "IMS SMS service status: 'available'\nIMS SMS service RAT: 'wlan'\n",
+            "[/dev/wwan0qmi0] IMS services:\n\
+             \tSMS:\n\
+             \t\tStatus: 'full service'\n\
+             \t\tTechnology: 'wlan'\n\
+             \tVoice:\n\
+             \t\tStatus: 'no service'\n\
+             \t\tTechnology: 'wwan'\n",
         );
 
         assert_eq!(parsed.sms_service, ImsSmsService::Available);
@@ -956,11 +988,21 @@ mod tests {
     #[test]
     fn parses_registration_and_sms_enabled_setting() {
         assert_eq!(
-            parse_imsa_registration("IMS registration status: 'registered'\n").registration,
+            parse_imsa_registration(
+                "[/dev/wwan0qmi0] IMS registration:\n\
+                 \t    Status: 'registered'\n\
+                 \tTechnology: 'wwan'\n"
+            )
+            .registration,
             ImsRegistration::Registered
         );
         assert_eq!(
-            parse_ims_settings("IMS SMS service: 'enabled'\n").configured,
+            parse_ims_settings(
+                "[/dev/wwan0qmi0] IMS services:\n\
+                 \tVoice service enabled: no\n\
+                 \tSMS service enabled: yes\n"
+            )
+            .configured,
             ImsConfigured::Enabled
         );
     }

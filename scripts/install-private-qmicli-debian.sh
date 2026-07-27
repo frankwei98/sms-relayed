@@ -144,7 +144,8 @@ build_payload() {
       -Dgtk_doc=false \
       -Dman=false \
       -Dbash_completion=false
-    meson compile -C "$build_dir"
+    # Low-memory SD410 boards can become unresponsive when Ninja uses all cores.
+    meson compile -C "$build_dir" -j 1
     DESTDIR="$stage" meson install -C "$build_dir"
     payload="$stage$LOGICAL_VERSION_DIR"
   fi

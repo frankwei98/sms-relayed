@@ -148,7 +148,7 @@ describe("ModemStatusPanel SMS over IMS", () => {
 			...status,
 			sms_over_ims: {
 				...status.sms_over_ims,
-				warnings: ["ims_services_nonstandard"],
+				warnings: ["ims_services_output_nonstandard"],
 			},
 		});
 
@@ -159,6 +159,6 @@ describe("ModemStatusPanel SMS over IMS", () => {
 				"The IMS service response used a nonstandard label.",
 			),
 		).toBeTruthy();
-		expect(screen.queryByText("ims_services_nonstandard")).toBeNull();
+		expect(screen.queryByText("ims_services_output_nonstandard")).toBeNull();
 	});
 });

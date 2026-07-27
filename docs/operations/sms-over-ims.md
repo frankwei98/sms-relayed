@@ -26,6 +26,11 @@ are missing, a QMI port cannot be selected unambiguously, the proxy is
 unavailable, or the modem does not return recognized fields. A recognized
 nonstandard label produces a warning while retaining the parsed result.
 
+Some MSM8916/SD410 firmware enumerates vendor service IDs but rejects the
+standard IMS and IMSA clients with QMI `InvalidServiceType`. SmsRelayed reports
+this honestly as `Unknown` with fixed query-failure reasons; the service version
+IDs alone are not treated as IMS evidence.
+
 ## Debian 12 and qmicli 1.36.0
 
 Debian 12 ships qmicli 1.32.x, which does not expose the required IMS/IMSA
