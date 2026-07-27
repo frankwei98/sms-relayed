@@ -1,0 +1,577 @@
+import type { en } from "./en";
+
+type TranslationShape<T> = {
+	[K in keyof T]: T[K] extends string ? string : TranslationShape<T[K]>;
+};
+
+export const ko = {
+	nav: {
+		sms: "SMS",
+		modem: "모뎀",
+		forwarding: "전달",
+		config: "구성",
+	},
+	header: {
+		ariaPrimary: "기본",
+		ariaBackConfig: "구성으로 돌아가기",
+		ariaConfigCategories: "구성 범주",
+		ariaUnsavedChanges: "저장하지 않은 변경 사항",
+	},
+	common: {
+		refresh: "새로 고침",
+		cancel: "취소",
+		save: "저장",
+		check: "확인",
+		restart: "재시작",
+		retry: "다시 시도",
+		done: "완료",
+		search: "검색",
+		add: "추가",
+		remove: "삭제",
+	},
+	modem: {
+		title: "모뎀",
+		lastChecked: "마지막 확인 {{time}}",
+		statusUnavailable: "상태를 사용할 수 없음",
+		loading: "모뎀 상태를 불러오는 중…",
+		refresh: "새로 고침",
+		field: {
+			configuredPath: "구성된 경로",
+			resolvedModem: "확인된 모뎀",
+			enabled: "활성화",
+			state: "상태",
+			sim: "SIM",
+			phoneNumber: "전화번호",
+			operator: "사업자",
+			signal: "신호",
+			access: "접속",
+			messaging: "메시징",
+			mmcli: "mmcli",
+		},
+		value: {
+			yes: "예",
+			no: "아니요",
+			unknown: "알 수 없음",
+			notFound: "찾을 수 없음",
+			notReported: "보고되지 않음",
+			available: "사용 가능",
+			unavailable: "사용할 수 없음",
+			missing: "누락",
+			notSelected: "선택되지 않음",
+		},
+		status: {
+			ok: "정상",
+			degraded: "저하됨",
+			error: "오류",
+			unknown: "알 수 없음",
+		},
+		smsOverIms: {
+			title: "SMS over IMS",
+			description:
+				"모뎀이 보고한 값이며, 각 메시지가 실제로 사용한 경로를 증명하지는 않습니다.",
+			field: {
+				configured: "구성됨",
+				registration: "등록 상태",
+				smsService: "SMS 서비스",
+				technology: "기술",
+				qmicli: "qmicli",
+				qmiDevice: "QMI 장치",
+				evidence: "근거",
+			},
+			enum: {
+				enabled: "활성화",
+				disabled: "비활성화",
+				registered: "등록됨",
+				registering: "등록 중",
+				limited: "제한됨",
+				notRegistered: "등록되지 않음",
+				notAvailable: "사용할 수 없음",
+				available: "사용 가능",
+				unknown: "알 수 없음",
+			},
+			availableOverWlan: "WLAN에서 사용 가능",
+			technology: {
+				wwan: "WWAN",
+				wlan: "WLAN",
+				interworkingWlan: "Interworking WLAN",
+				unknown: "알 수 없음",
+			},
+			evidence: {
+				qmiImsa: "QMI IMSA",
+				qmiIms: "QMI IMS",
+				noEvidence: "런타임 근거 없음",
+			},
+		},
+		actions: {
+			enable: "활성화",
+			disable: "비활성화",
+		},
+		dangerZone: {
+			title: "위험 구역",
+			reset: "모뎀 재설정",
+			dialogTitle: "모뎀을 재설정하시겠습니까?",
+			dialogDescription:
+				"이로 인해 셀룰러 서비스가 끊기고 모뎀이 다시 열거되는 동안 일시적으로 사라질 수 있습니다.",
+			cancel: "취소",
+			confirmReset: "재설정",
+		},
+		diagnostics: {
+			title: "진단",
+			reasons: "원인: {{reasons}}",
+			possibleNewPath: "가능한 새 모뎀 경로: {{path}}",
+			error: "오류: {{error}}",
+		},
+		imsDiagnostics: {
+			imsProbeNotAttempted: "IMS 탐색이 시도되지 않았습니다.",
+			modemNotResolved:
+				"모뎀이 확인되지 않아 IMS 탐색을 건너뛰었습니다.",
+			modemDisabled:
+				"모뎀이 비활성화되어 IMS 탐색을 건너뛰었습니다.",
+			qmicliMissing: "qmicli가 설치되지 않았거나 실행할 수 없습니다.",
+			qmicliPathInvalid: "구성된 qmicli 경로가 잘못되었습니다.",
+			qmicliProbeFailed: "qmicli 기능 감지에 실패했습니다.",
+			imsProbePermissionDenied:
+				"권한 부족으로 qmicli를 실행할 수 없습니다.",
+			qmiPortUnavailable:
+				"ModemManager가 QMI 제어 포트를 보고하지 않았습니다.",
+			qmiPortAmbiguous: "둘 이상의 QMI 제어 포트가 보고되었습니다.",
+			qmiProxyUnavailable: "QMI 프록시를 사용할 수 없습니다.",
+			imsProbeTimeout: "IMS 탐색이 시간 예산을 초과했습니다.",
+			imsServicesQueryFailed: "IMS 서비스 조회에 실패했습니다.",
+			imsServicesQueryUnavailable:
+				"qmicli가 IMS 서비스 조회를 노출하지 않습니다.",
+			imsRegistrationQueryFailed: "IMS 등록 조회에 실패했습니다.",
+			imsRegistrationQueryUnavailable:
+				"qmicli가 IMS 등록 조회를 노출하지 않습니다.",
+			imsSettingsQueryFailed: "IMS 설정 조회에 실패했습니다.",
+			imsSettingsQueryUnavailable:
+				"qmicli가 IMS 설정 조회를 노출하지 않습니다.",
+			imsServicesOutputUnrecognized:
+				"IMS 서비스 응답을 인식할 수 없습니다.",
+			imsRegistrationOutputUnrecognized:
+				"IMS 등록 응답을 인식할 수 없습니다.",
+			imsSettingsOutputUnrecognized:
+				"IMS 설정 응답을 인식할 수 없습니다.",
+			imsServicesOutputNonstandard:
+				"IMS 서비스 응답이 비표준 레이블을 사용했습니다.",
+			imsRegistrationOutputNonstandard:
+				"IMS 등록 응답이 비표준 레이블을 사용했습니다.",
+			imsSettingsOutputNonstandard:
+				"IMS 설정 응답이 비표준 레이블을 사용했습니다.",
+			imsStateInconsistent:
+				"모뎀이 일관되지 않은 IMS 구성 및 런타임 상태를 보고했습니다.",
+			fallback: "추가 IMS 진단 정보를 사용할 수 없습니다.",
+		},
+	},
+	forwarding: {
+		sidebar: {
+			title: "전달",
+			operations: "작업",
+			ariaLabel: "전달 프로필",
+			ariaViews: "전달 보기",
+			ariaRefresh: "전달 상태 새로 고침",
+			ariaClose: "전달 탐색 닫기",
+			ariaOpen: "전달 탐색 열기",
+		},
+		overview: {
+			title: "개요",
+			subtitle: "모든 프로필 스냅샷",
+			configured: "구성됨",
+			historical: "기록",
+			noConfiguredProfiles: "구성된 프로필 없음",
+			noHistoricalProfiles: "보존된 기록 프로필 없음",
+		},
+		snapshot: {
+			generated: "스냅샷 생성 시각",
+			generatedDescription: "프로필당 최대 {{limit}}개 시도 보존",
+		},
+		loading: "전달 상태를 불러오는 중…",
+		error: {
+			title: "전달 상태를 불러올 수 없음",
+			description: "전달 스냅샷을 불러올 수 없습니다.",
+			refreshFailed: "새로 고침 실패",
+			refreshDescription: "이전 스냅샷을 표시합니다. {{error}}",
+		},
+		srLive: {
+			refreshing: "전달 상태를 새로 고치는 중입니다.",
+			snapshot: "전달 스냅샷이 {{time}}에 생성되었습니다.",
+		},
+		detail: {
+			overview: "개요",
+			overviewSubtitle: "구성된 프로필 및 보존된 시도 기록",
+			retainedAttempts: "보존된 전달 시도",
+			notPresent: "최신 스냅샷에 없음",
+			lastUpdated: "마지막 업데이트 {{time}}",
+		},
+		overviewSection: {
+			currentSnapshot: "현재 스냅샷",
+			coverage: "전달 범위",
+			description:
+				"최신 백엔드 스냅샷의 구성 상태 및 보존된 시도 가용성입니다.",
+			configuredProfiles: "구성된 프로필",
+			enabledProfiles: "활성화된 프로필",
+			profilesWithAttempts: "시도가 있는 프로필",
+			profileSnapshot: "프로필 스냅샷",
+			profileSnapshotDescription:
+				"구성되거나 기록된 각 프로필의 최신 보존 결과입니다.",
+			empty: "전달 프로필이 구성되지 않았습니다.",
+			emptyDescription:
+				"사용 가능한 보존된 기록 프로필 시도도 없습니다.",
+		},
+		table: {
+			ariaLabel: "전달 프로필 스냅샷",
+			profile: "프로필",
+			state: "상태",
+			latestOutcome: "최신 결과",
+			latestCompleted: "최근 완료",
+			retained: "보존",
+			attempt: "시도",
+			completed: "완료",
+			outcome: "결과",
+			timing: "소요 시간",
+			error: "오류",
+		},
+		profile: {
+			unavailable: "프로필을 사용할 수 없음",
+			unavailableDescription:
+				"프로필 {{key}}이(가) 최신 전달 스냅샷에 없습니다.",
+			viewOverview: "개요 보기",
+		},
+		badge: {
+			configured: "구성됨",
+			enabled: "활성화",
+			disabled: "비활성화",
+			historical: "기록",
+			retry: "다시 시도",
+		},
+		outcome: {
+			success: "성공",
+			transientFailure: "일시적 실패",
+			permanentFailure: "영구 실패",
+			unknown: "알 수 없는 결과",
+			noAttempts: "시도 없음",
+			latest: "최신: {{outcome}}",
+		},
+		attempts: {
+			title_one: "최신 {{count}}개 시도",
+			title_other: "최신 {{count}}개 시도",
+			retainedDescription: "이 스냅샷에 {{count}}개 보존됨",
+			newestFirst: "최신순",
+			empty: "아직 전달 시도가 없습니다.",
+			emptyDescription:
+				"이 스냅샷에는 이 프로필에 대한 보존된 시도가 없습니다.",
+			label: "{{key}}에 대한 {{label}}",
+		},
+		mobile: {
+			completed: "완료",
+			timing: "소요 시간",
+			error: "오류",
+			retained: "{{count}}개 보존",
+		},
+		timing: {
+			dispatch: "디스패치 {{time}}",
+			request: "요청 {{time}}",
+		},
+	},
+	messages: {
+		title: "메시지",
+		sim: "SIM {{number}}",
+		aria: {
+			newMessage: "새 메시지",
+			filters: "필터",
+			backConversations: "대화 목록으로 돌아가기",
+			markConversationRead: "대화를 읽음으로 표시",
+			messageTimeline: "메시지 타임라인",
+			conversationActions: "대화 작업",
+			sendMessage: "메시지 보내기",
+			searchMessages: "메시지 검색",
+		},
+		search: {
+			placeholder: "메시지 검색",
+		},
+		filter: {
+			title: "메시지 도구",
+			description: "받은편지함을 필터링하거나 현재 메시지 보기를 내보냅니다.",
+			direction: "방향",
+			allDirections: "모든 방향",
+			inbound: "수신",
+			outbound: "발신",
+			status: "상태",
+			allStatuses: "모든 상태",
+			received: "수신됨",
+			sending: "전송 중",
+			sent: "전송됨",
+			failed: "실패",
+			unreadOnly: "읽지 않은 것만",
+			exportCsv: "CSV",
+			exportJson: "JSON",
+			done: "완료",
+			search: "검색",
+		},
+		conversationList: {
+			empty: "대화 없음",
+			emptyDescription: "수신 및 발신 SMS 스레드가 여기에 표시됩니다.",
+			messages: "{{count}}개의 메시지",
+			noMatching: "일치하는 메시지 없음",
+			noMatchingDescription: "필터를 조정하거나 다음 SMS 이벤트를 기다려 주세요.",
+		},
+		thread: {
+			loadingOlder: "이전 메시지를 불러오는 중",
+			loadOlder: "이전 메시지 불러오기",
+			newMessage: "새 메시지",
+			newMessageSubtitle: "수신자를 선택하고 SMS를 작성하세요",
+			selectConversation: "대화 선택",
+			selectConversationSubtitle: "목록에서 스레드를 선택하세요",
+			noThreadSelected: "선택된 스레드 없음",
+			noThreadDescription: "대화를 선택하거나 새 SMS를 시작하세요.",
+			recipientLabel: "받는 사람",
+			recipientPlaceholder: "전화번호",
+			composerPlaceholder: "메시지",
+			sendMessage: "보내기",
+			sendingMessage: "전송 중…",
+		},
+		direction: {
+			sent: "전송됨",
+			inbox: "받은편지함",
+			failed: "실패",
+		},
+		actions: {
+			selectMessages: "메시지 선택",
+			stopSelecting: "선택 중지",
+			markRead: "읽음으로 표시 ({{count}})",
+			markUnread: "읽지 않음으로 표시 ({{count}})",
+			deleteSelected: "선택 항목 삭제",
+			markConversationRead: "대화를 읽음으로 표시",
+			conversationActions: "대화 작업",
+		},
+		relativeDay: {
+			today: "오늘",
+			yesterday: "어제",
+			daysAgo: "{{count}}일 전",
+		},
+	},
+	config: {
+		sidebar: {
+			title: "구성",
+			ariaLabel: "구성 범주",
+			ariaUnsaved: "저장하지 않은 변경 사항",
+			categories: "범주",
+			dirty: "{{count}}개 {{category}} 변경됨",
+			dirty_one: "{{count}}개 범주 변경됨",
+			dirty_other: "{{count}}개 범주 변경됨",
+			clean: "저장하지 않은 변경 사항 없음",
+		},
+		editor: {
+			unsavedDraft: "저장되지 않은 초안",
+			saved: "저장된 구성",
+			restartRequired: "재시작 필요",
+			loading: "구성을 불러오는 중…",
+		},
+		error: {
+			title: "구성을 사용할 수 없음",
+		},
+		action: {
+			save: "저장",
+			check: "확인",
+			restart: "재시작",
+			checking: "전체 초안을 확인하는 중…",
+			notChecked: "확인되지 않음",
+			checkPassed: "확인 통과",
+			checkFailed: "확인 실패: {{message}}",
+		},
+		status: {
+			saved: "구성이 저장되었습니다.",
+			savedRestart: "구성이 저장되었습니다. 재시작이 필요합니다.",
+			restartScheduled:
+				"재시작이 예약되었습니다. 대시보드가 잠시 끊길 수 있습니다.",
+			restartFailed: "재시작 실패: {{message}}",
+		},
+		restartDialog: {
+			title: "서비스 재시작을 예약하시겠습니까?",
+			description:
+				"이 요청은 service-manager 명령만 예약합니다. 서비스가 다시 사용 가능해지기 전에 이 페이지의 연결이 끊길 수 있습니다.",
+			unsavedWarning:
+				"저장되지 않은 편집 내용은 이 브라우저 탭에만 있습니다. 재시작 시 영구 파일이 사용되며 이 초안을 복구하지 못할 수 있습니다.",
+			cancel: "취소",
+			scheduleRestart: "재시작 예약",
+		},
+		saveReview: {
+			title: "구성 변경 사항 검토",
+			description:
+				"현재 파일을 대체할 정확한 TOML을 확인한 후 다시 한번 확인하여 저장하세요.",
+			generating: "TOML 차이 생성 및 초안 확인 중…",
+			conflict: "디스크에서 구성이 변경되었습니다",
+			previewFailed: "미리보기 실패",
+			reload: "디스크에서 다시 불러오고 초안 삭제",
+			checkPassed: "확인 통과",
+			checkFailed: "확인 실패",
+			securityWarning:
+				"이 차이는 의도적으로 마스킹하지 않습니다. 비밀번호, 토큰, Webhook URL 및 기타 자격 증명이 이 인증된 대화 상자와 네트워크 응답에 표시됩니다.",
+			operationalWarnings: "운영 경고",
+			tomlDiff: "TOML 차이",
+			noChanges: "저장할 파일 변경 사항이 없습니다.",
+			saveFailed: "저장 실패: {{error}}",
+			noRuntimeChange: "런타임 변경 없음",
+			restartRequired: "재시작 필요",
+			cancel: "취소",
+			saveConfig: "구성 저장",
+			saveAndRestart: "저장 및 재시작 예약",
+		},
+		warnings: {
+			passwordChange:
+				"저장 및 재시작 예약 후 모든 세션에서 로그아웃됩니다.",
+			apiDisable: "재시작 후 대시보드를 사용할 수 없습니다.",
+			apiEndpointChange: "재시작 후 대시보드 주소가 변경될 수 있습니다.",
+			databasePathChange:
+				"재시작 후 서비스가 다른 메시지 데이터베이스를 사용합니다.",
+		},
+		leaveDialog: {
+			title: "저장하지 않은 변경 사항을 두고 나가시겠습니까?",
+			description:
+				"구성 초안에는 자격 증명이 포함되어 있으며 의도적으로 브라우저에 저장되지 않습니다. 나가면 초안이 삭제됩니다.",
+			stay: "머무르기",
+			discard: "삭제하고 나가기",
+		},
+		sections: {
+			device: "장치",
+			deviceDescription: "모뎀 식별자 및 객체 경로",
+			sms: "SMS",
+			smsDescription: "저장소 필터 및 인증 코드 키워드",
+			forwarding: "전달",
+			forwardingDescription: "배달 작업자 및 채널 프로필",
+			api: "Web API",
+			apiDescription: "대시보드 접근 및 영속성",
+			timeouts: "시간 제한",
+			timeoutsDescription: "HTTP 및 Shell 실행 제한",
+			retention: "보존",
+			retentionDescription: "자동 메시지 정리",
+		},
+		fields: {
+			device: {
+				sectionTitle: "장치",
+				sectionDescription:
+					"이 릴레이를 식별하고 메시지를 수신 및 전송하는 ModemManager 객체를 선택합니다.",
+				deviceName: "장치 이름",
+				deviceNameDescription:
+					"다운스트림 채널이 출처를 식별할 수 있도록 전달 페이로드에 포함됩니다.",
+				modemPath: "모뎀 객체 경로",
+				modemPathDescription:
+					"/org/freedesktop/ModemManager1/Modem/ 아래의 ModemManager 경로여야 합니다.",
+			},
+			sms: {
+				sectionTitle: "SMS",
+				sectionDescription:
+					"무시할 모뎀 저장소 위치와 인증 코드 메시지를 식별하는 문구를 제어합니다.",
+				ignoredStorage: "무시된 저장소",
+				ignoredStorageDescription:
+					"쉼표로 구분된 저장소 식별자(예: sm).",
+				codeKeywords: "인증 코드 키워드",
+				codeKeywordsDescription:
+					"인증 코드를 식별하는 데 사용되는 쉼표로 구분된 대소문자 구분 없는 문구입니다.",
+			},
+			forwarding: {
+				sectionTitle: "전달",
+				sectionDescription:
+					"배달 동시성, 채널 자격 증명 및 수신 메시지를 받는 명명된 프로필을 구성합니다.",
+				concurrency: "동시 배달 수",
+				concurrencyDescription:
+					"한 번에 처리되는 전달 작업 수입니다. 유효 범위: 1–16.",
+			},
+			api: {
+				sectionTitle: "Web API",
+				sectionDescription:
+					"대시보드 가용성, 수신 주소, 인증 및 메시지 데이터베이스를 제어합니다.",
+				enableApi: "Web API 활성화",
+				enableApiDescription:
+					"API를 비활성화하면 재시작 후 이 대시보드에 대한 접근이 제거됩니다.",
+				bindAddress: "바인드 주소",
+				port: "포트",
+				portDescription: "유효 범위: 1–65535.",
+				ipv6: "IPv6 동반 주소",
+				ipv6Description:
+					"안전한 IPv6 동반 주소를 추론할 수 있을 때 해당 주소에서도 수신합니다.",
+				password: "비밀번호",
+				passwordDescription:
+					"이 값을 변경하면 한 단계로 저장 및 재시작이 예약된 후 모든 세션에서 로그아웃됩니다.",
+				databasePath: "데이터베이스 경로",
+			},
+			timeouts: {
+				sectionTitle: "시간 제한",
+				sectionDescription:
+					"연결 설정, 공급자 요청 및 Shell 프로필 실행을 제한합니다. 모든 값은 초 단위입니다.",
+				connectTimeout: "연결 시간 제한",
+				connectTimeoutDescription:
+					"양수여야 하며 요청 시간 제한보다 클 수 없습니다.",
+				requestTimeout: "요청 시간 제한",
+				shellTimeout: "Shell 시간 제한",
+			},
+			retention: {
+				sectionTitle: "보존",
+				sectionDescription:
+					"활성 배달이 있는 메시지를 보존하면서 이전 메시지를 제한된 배치로 제거합니다.",
+				enableCleanup: "정리 활성화",
+				maxAge: "최대 기간",
+				maxAgeDescription:
+					"이 일수보다 오래된 메시지가 정리 대상이 됩니다.",
+				batchSize: "배치 크기",
+				batchSizeDescription:
+					"한 번의 정리 작업으로 제거되는 최대 행 수입니다.",
+			},
+		},
+		channel: {
+			deliveryRoutes: "배달 경로",
+			deliveryRoutesDescription:
+				"전달된 메시지를 받아야 하는 프로필을 활성화합니다.",
+			profilesActive: "{{enabled}} / {{total}} 활성",
+			missingProfiles: "누락된 전달 프로필",
+			missingProfilesDescription:
+				"이 활성화된 참조는 구성된 프로필과 일치하지 않습니다. 이 구성을 유효하게 하려면 제거하세요.",
+			removeReference: "참조 제거",
+			removeReferenceAria: "누락된 전달 참조 {{ref}} 제거",
+			noProfiles: "프로필 없음",
+			enabled: "활성화",
+			disabled: "비활성화",
+			remove: "제거",
+			add: "추가",
+			profileName: "프로필 이름",
+			addProfile: "{{channel}} 프로필 추가",
+			duplicateName: "해당 프로필 이름이 이미 존재합니다.",
+			enableAria: "{{ref}}에 대한 전달 활성화",
+			removeAria: "{{ref}} 제거",
+			removeDialog: {
+				title: "전달 프로필을 제거하시겠습니까?",
+				description:
+					"현재 초안에서 프로필 자격 증명과 활성화된 참조를 제거합니다. 저장하기 전까지 변경 사항이 기록되지 않습니다.",
+				cancel: "취소",
+				remove: "프로필 제거",
+			},
+		},
+	},
+	login: {
+		title: "SMS Relayed",
+		password: "비밀번호",
+		login: "로그인",
+		loginFailed: "로그인 실패",
+		notice: {
+			configSavedRestart:
+				"구성이 저장되고 재시작이 예약되었습니다. 서비스가 복구된 후 새 비밀번호로 로그인하세요.",
+		},
+	},
+	phoneCopy: {
+		copy: "복사",
+		copied: "복사됨",
+		copyFailed: "복사 실패",
+		ariaLabel: "전화번호 복사",
+		srCopied: "전화번호가 복사되었습니다",
+		srFailed: "전화번호 복사 실패",
+	},
+	language: {
+		label: "언어",
+		en: "English",
+		zhCN: "简体中文",
+		ja: "日本語",
+		ko: "한국어",
+		fr: "Français",
+		es: "Español",
+	},
+} satisfies TranslationShape<typeof en>;
