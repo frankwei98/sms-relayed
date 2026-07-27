@@ -123,17 +123,13 @@ export const ko = {
 		},
 		imsDiagnostics: {
 			imsProbeNotAttempted: "IMS 탐색이 시도되지 않았습니다.",
-			modemNotResolved:
-				"모뎀이 확인되지 않아 IMS 탐색을 건너뛰었습니다.",
-			modemDisabled:
-				"모뎀이 비활성화되어 IMS 탐색을 건너뛰었습니다.",
+			modemNotResolved: "모뎀이 확인되지 않아 IMS 탐색을 건너뛰었습니다.",
+			modemDisabled: "모뎀이 비활성화되어 IMS 탐색을 건너뛰었습니다.",
 			qmicliMissing: "qmicli가 설치되지 않았거나 실행할 수 없습니다.",
 			qmicliPathInvalid: "구성된 qmicli 경로가 잘못되었습니다.",
 			qmicliProbeFailed: "qmicli 기능 감지에 실패했습니다.",
-			imsProbePermissionDenied:
-				"권한 부족으로 qmicli를 실행할 수 없습니다.",
-			qmiPortUnavailable:
-				"ModemManager가 QMI 제어 포트를 보고하지 않았습니다.",
+			imsProbePermissionDenied: "권한 부족으로 qmicli를 실행할 수 없습니다.",
+			qmiPortUnavailable: "ModemManager가 QMI 제어 포트를 보고하지 않았습니다.",
 			qmiPortAmbiguous: "둘 이상의 QMI 제어 포트가 보고되었습니다.",
 			qmiProxyUnavailable: "QMI 프록시를 사용할 수 없습니다.",
 			imsProbeTimeout: "IMS 탐색이 시간 예산을 초과했습니다.",
@@ -146,12 +142,9 @@ export const ko = {
 			imsSettingsQueryFailed: "IMS 설정 조회에 실패했습니다.",
 			imsSettingsQueryUnavailable:
 				"qmicli가 IMS 설정 조회를 노출하지 않습니다.",
-			imsServicesOutputUnrecognized:
-				"IMS 서비스 응답을 인식할 수 없습니다.",
-			imsRegistrationOutputUnrecognized:
-				"IMS 등록 응답을 인식할 수 없습니다.",
-			imsSettingsOutputUnrecognized:
-				"IMS 설정 응답을 인식할 수 없습니다.",
+			imsServicesOutputUnrecognized: "IMS 서비스 응답을 인식할 수 없습니다.",
+			imsRegistrationOutputUnrecognized: "IMS 등록 응답을 인식할 수 없습니다.",
+			imsSettingsOutputUnrecognized: "IMS 설정 응답을 인식할 수 없습니다.",
 			imsServicesOutputNonstandard:
 				"IMS 서비스 응답이 비표준 레이블을 사용했습니다.",
 			imsRegistrationOutputNonstandard:
@@ -215,8 +208,7 @@ export const ko = {
 			profileSnapshotDescription:
 				"구성되거나 기록된 각 프로필의 최신 보존 결과입니다.",
 			empty: "전달 프로필이 구성되지 않았습니다.",
-			emptyDescription:
-				"사용 가능한 보존된 기록 프로필 시도도 없습니다.",
+			emptyDescription: "사용 가능한 보존된 기록 프로필 시도도 없습니다.",
 		},
 		table: {
 			ariaLabel: "전달 프로필 스냅샷",
@@ -313,7 +305,8 @@ export const ko = {
 			emptyDescription: "수신 및 발신 SMS 스레드가 여기에 표시됩니다.",
 			messages: "{{count}}개의 메시지",
 			noMatching: "일치하는 메시지 없음",
-			noMatchingDescription: "필터를 조정하거나 다음 SMS 이벤트를 기다려 주세요.",
+			noMatchingDescription:
+				"필터를 조정하거나 다음 SMS 이벤트를 기다려 주세요.",
 		},
 		thread: {
 			loadingOlder: "이전 메시지를 불러오는 중",
@@ -418,8 +411,7 @@ export const ko = {
 			saveAndRestart: "저장 및 재시작 예약",
 		},
 		warnings: {
-			passwordChange:
-				"저장 및 재시작 예약 후 모든 세션에서 로그아웃됩니다.",
+			passwordChange: "저장 및 재시작 예약 후 모든 세션에서 로그아웃됩니다.",
 			apiDisable: "재시작 후 대시보드를 사용할 수 없습니다.",
 			apiEndpointChange: "재시작 후 대시보드 주소가 변경될 수 있습니다.",
 			databasePathChange:
@@ -463,8 +455,7 @@ export const ko = {
 				sectionDescription:
 					"무시할 모뎀 저장소 위치와 인증 코드 메시지를 식별하는 문구를 제어합니다.",
 				ignoredStorage: "무시된 저장소",
-				ignoredStorageDescription:
-					"쉼표로 구분된 저장소 식별자(예: sm).",
+				ignoredStorageDescription: "쉼표로 구분된 저장소 식별자(예: sm).",
 				codeKeywords: "인증 코드 키워드",
 				codeKeywordsDescription:
 					"인증 코드를 식별하는 데 사용되는 쉼표로 구분된 대소문자 구분 없는 문구입니다.",
@@ -511,8 +502,7 @@ export const ko = {
 					"활성 배달이 있는 메시지를 보존하면서 이전 메시지를 제한된 배치로 제거합니다.",
 				enableCleanup: "정리 활성화",
 				maxAge: "최대 기간",
-				maxAgeDescription:
-					"이 일수보다 오래된 메시지가 정리 대상이 됩니다.",
+				maxAgeDescription: "이 일수보다 오래된 메시지가 정리 대상이 됩니다.",
 				batchSize: "배치 크기",
 				batchSizeDescription:
 					"한 번의 정리 작업으로 제거되는 최대 행 수입니다.",

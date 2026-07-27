@@ -130,10 +130,8 @@ export const ja = {
 			qmicliMissing: "qmicliがインストールされていないか、実行できません。",
 			qmicliPathInvalid: "設定されたqmicliパスが無効です。",
 			qmicliProbeFailed: "qmicliの機能検出に失敗しました。",
-			imsProbePermissionDenied:
-				"権限のためqmicliを実行できませんでした。",
-			qmiPortUnavailable:
-				"ModemManagerがQMI制御ポートを報告しませんでした。",
+			imsProbePermissionDenied: "権限のためqmicliを実行できませんでした。",
+			qmiPortUnavailable: "ModemManagerがQMI制御ポートを報告しませんでした。",
 			qmiPortAmbiguous: "複数のQMI制御ポートが報告されました。",
 			qmiProxyUnavailable: "QMIプロキシが利用できません。",
 			imsProbeTimeout: "IMSプローブが時間制限を超えました。",
@@ -144,14 +142,10 @@ export const ja = {
 			imsRegistrationQueryUnavailable:
 				"qmicliはIMS登録クエリを公開していません。",
 			imsSettingsQueryFailed: "IMS設定クエリに失敗しました。",
-			imsSettingsQueryUnavailable:
-				"qmicliはIMS設定クエリを公開していません。",
-			imsServicesOutputUnrecognized:
-				"IMSサービス応答を認識できませんでした。",
-			imsRegistrationOutputUnrecognized:
-				"IMS登録応答を認識できませんでした。",
-			imsSettingsOutputUnrecognized:
-				"IMS設定応答を認識できませんでした。",
+			imsSettingsQueryUnavailable: "qmicliはIMS設定クエリを公開していません。",
+			imsServicesOutputUnrecognized: "IMSサービス応答を認識できませんでした。",
+			imsRegistrationOutputUnrecognized: "IMS登録応答を認識できませんでした。",
+			imsSettingsOutputUnrecognized: "IMS設定応答を認識できませんでした。",
 			imsServicesOutputNonstandard:
 				"IMSサービス応答が非標準のラベルを使用しました。",
 			imsRegistrationOutputNonstandard:
@@ -215,8 +209,7 @@ export const ja = {
 			profileSnapshotDescription:
 				"設定済みまたは履歴プロファイルごとの最新の保持結果。",
 			empty: "転送プロファイルが設定されていません。",
-			emptyDescription:
-				"保持された履歴プロファイルの試行も利用できません。",
+			emptyDescription: "保持された履歴プロファイルの試行も利用できません。",
 		},
 		table: {
 			ariaLabel: "転送プロファイルスナップショット",
@@ -291,7 +284,8 @@ export const ja = {
 		},
 		filter: {
 			title: "メッセージツール",
-			description: "受信トレイをフィルターするか、現在のメッセージビューをエクスポートします。",
+			description:
+				"受信トレイをフィルターするか、現在のメッセージビューをエクスポートします。",
 			direction: "方向",
 			allDirections: "すべての方向",
 			inbound: "受信",
@@ -313,7 +307,8 @@ export const ja = {
 			emptyDescription: "受信および送信のSMSスレッドがここに表示されます。",
 			messages: "{{count}}件のメッセージ",
 			noMatching: "一致するメッセージがありません",
-			noMatchingDescription: "フィルターを調整するか、次のSMSイベントを待ってください。",
+			noMatchingDescription:
+				"フィルターを調整するか、次のSMSイベントを待ってください。",
 		},
 		thread: {
 			loadingOlder: "古いメッセージを読み込んでいます",
@@ -474,7 +469,8 @@ export const ja = {
 				sectionDescription:
 					"配信の同時実行性、チャネル認証情報、および受信メッセージを受ける名前付きプロファイルを構成します。",
 				concurrency: "同時配信数",
-				concurrencyDescription: "一度に処理される転送ジョブの数。有効範囲：1–16。",
+				concurrencyDescription:
+					"一度に処理される転送ジョブの数。有効範囲：1–16。",
 			},
 			api: {
 				sectionTitle: "Web API",
@@ -510,14 +506,16 @@ export const ja = {
 					"アクティブな配信があるメッセージを保持しながら、古いターミナルメッセージを制限されたバッチで削除します。",
 				enableCleanup: "クリーンアップを有効にする",
 				maxAge: "最大経過日数",
-				maxAgeDescription: "この日数より古いメッセージがクリーンアップの対象となります。",
+				maxAgeDescription:
+					"この日数より古いメッセージがクリーンアップの対象となります。",
 				batchSize: "バッチサイズ",
 				batchSizeDescription: "1回のクリーンアップで削除される最大行数。",
 			},
 		},
 		channel: {
 			deliveryRoutes: "配信ルート",
-			deliveryRoutesDescription: "転送メッセージを受信するプロファイルを有効にします。",
+			deliveryRoutesDescription:
+				"転送メッセージを受信するプロファイルを有効にします。",
 			profilesActive: "{{enabled}} / {{total}} アクティブ",
 			missingProfiles: "不足している転送プロファイル",
 			missingProfilesDescription:

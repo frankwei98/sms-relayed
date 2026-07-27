@@ -132,7 +132,8 @@ export const es = {
 			qmicliProbeFailed: "La detección de capacidades de qmicli falló.",
 			imsProbePermissionDenied:
 				"No se pudo ejecutar qmicli debido a los permisos.",
-			qmiPortUnavailable: "ModemManager no notificó ningún puerto de control QMI.",
+			qmiPortUnavailable:
+				"ModemManager no notificó ningún puerto de control QMI.",
 			qmiPortAmbiguous: "Se notificó más de un puerto de control QMI.",
 			qmiProxyUnavailable: "El proxy QMI no está disponible.",
 			imsProbeTimeout: "El sondeo de IMS excedió su tiempo límite.",
@@ -159,7 +160,8 @@ export const es = {
 				"La respuesta de ajustes de IMS utilizó una etiqueta no estándar.",
 			imsStateInconsistent:
 				"El módem notificó una configuración de IMS y un estado en tiempo de ejecución incoherentes.",
-			fallback: "La información de diagnóstico adicional de IMS no está disponible.",
+			fallback:
+				"La información de diagnóstico adicional de IMS no está disponible.",
 		},
 	},
 	forwarding: {
@@ -197,7 +199,8 @@ export const es = {
 		},
 		detail: {
 			overview: "Resumen",
-			overviewSubtitle: "Perfiles configurados e historial de intentos conservados",
+			overviewSubtitle:
+				"Perfiles configurados e historial de intentos conservados",
 			retainedAttempts: "Intentos de reenvío conservados",
 			notPresent: "No presente en la última instantánea",
 			lastUpdated: "Última actualización {{time}}",
@@ -290,7 +293,8 @@ export const es = {
 		},
 		filter: {
 			title: "Herramientas de mensajes",
-			description: "Filtre la bandeja de entrada o exporte la vista actual de mensajes.",
+			description:
+				"Filtre la bandeja de entrada o exporte la vista actual de mensajes.",
 			direction: "Dirección",
 			allDirections: "Todas las direcciones",
 			inbound: "Entrante",
@@ -309,10 +313,12 @@ export const es = {
 		},
 		conversationList: {
 			empty: "No hay conversaciones",
-			emptyDescription: "Los hilos de SMS entrantes y salientes aparecerán aquí.",
+			emptyDescription:
+				"Los hilos de SMS entrantes y salientes aparecerán aquí.",
 			messages: "{{count}} mensajes",
 			noMatching: "No hay mensajes coincidentes",
-			noMatchingDescription: "Ajuste los filtros o espere al siguiente evento de SMS.",
+			noMatchingDescription:
+				"Ajuste los filtros o espere al siguiente evento de SMS.",
 		},
 		thread: {
 			loadingOlder: "Cargando mensajes anteriores",
@@ -420,7 +426,8 @@ export const es = {
 			passwordChange:
 				"Todas las sesiones se cerrarán tras programar Guardar + Reiniciar.",
 			apiDisable: "El panel no estará disponible tras el reinicio.",
-			apiEndpointChange: "La dirección del panel puede cambiar tras el reinicio.",
+			apiEndpointChange:
+				"La dirección del panel puede cambiar tras el reinicio.",
 			databasePathChange:
 				"El servicio utilizará una base de datos de mensajes diferente tras el reinicio.",
 		},
@@ -513,7 +520,8 @@ export const es = {
 				maxAgeDescription:
 					"Los mensajes con más días de antigüedad que este valor serán elegibles para la limpieza.",
 				batchSize: "Tamaño del lote",
-				batchSizeDescription: "Filas máximas eliminadas en una pasada de limpieza.",
+				batchSizeDescription:
+					"Filas máximas eliminadas en una pasada de limpieza.",
 			},
 		},
 		channel: {

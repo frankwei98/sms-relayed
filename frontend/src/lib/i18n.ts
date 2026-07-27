@@ -2,15 +2,22 @@ import i18n from "i18next";
 import LanguageDetector from "i18next-browser-languagedetector";
 import { initReactI18next } from "react-i18next";
 import { en } from "#/locales/en";
-import { zhCN } from "#/locales/zh-CN";
+import { es } from "#/locales/es";
+import { fr } from "#/locales/fr";
 import { ja } from "#/locales/ja";
 import { ko } from "#/locales/ko";
-import { fr } from "#/locales/fr";
-import { es } from "#/locales/es";
+import { zhCN } from "#/locales/zh-CN";
 
 export const DEFAULT_NAMESPACE = "translation";
 export const LANGUAGE_STORAGE_KEY = "sms-relayed.locale";
-export const supportedLanguages = ["en", "zh-CN", "ja", "ko", "fr", "es"] as const;
+export const supportedLanguages = [
+	"en",
+	"zh-CN",
+	"ja",
+	"ko",
+	"fr",
+	"es",
+] as const;
 
 export type SupportedLanguage = (typeof supportedLanguages)[number];
 
