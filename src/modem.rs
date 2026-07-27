@@ -11,6 +11,9 @@ use time::OffsetDateTime;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+mod ims;
+pub use ims::SmsOverIms;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HealthLevel {
@@ -74,6 +77,7 @@ pub struct ModemStatus {
     pub health: HealthSummary,
     pub modem: ModemDetails,
     pub messaging: MessagingDetails,
+    pub sms_over_ims: SmsOverIms,
     pub diagnostics: Diagnostics,
 }
 
@@ -136,6 +140,7 @@ fn base_status(configured_path: &str, id: Option<String>) -> ModemStatus {
             supported_storages: Vec::new(),
             default_storage: None,
         },
+        sms_over_ims: SmsOverIms::default(),
         diagnostics: Diagnostics {
             last_error: None,
             path_drift_candidate: None,
