@@ -125,8 +125,7 @@ export const fr = {
 			imsProbeNotAttempted: "La sonde IMS n'a pas été tentée.",
 			modemNotResolved:
 				"La sonde IMS a été ignorée car aucun modem n'a été résolu.",
-			modemDisabled:
-				"La sonde IMS a été ignorée car le modem est désactivé.",
+			modemDisabled: "La sonde IMS a été ignorée car le modem est désactivé.",
 			qmicliMissing: "qmicli n'est pas installé ou n'a pas pu être exécuté.",
 			qmicliPathInvalid: "Le chemin qmicli configuré est invalide.",
 			qmicliProbeFailed: "La détection de capacité qmicli a échoué.",
@@ -134,15 +133,13 @@ export const fr = {
 				"qmicli n'a pas pu être exécuté en raison des permissions.",
 			qmiPortUnavailable:
 				"Aucun port de contrôle QMI n'a été signalé par ModemManager.",
-			qmiPortAmbiguous:
-				"Plus d'un port de contrôle QMI a été signalé.",
+			qmiPortAmbiguous: "Plus d'un port de contrôle QMI a été signalé.",
 			qmiProxyUnavailable: "Le proxy QMI est indisponible.",
 			imsProbeTimeout: "La sonde IMS a dépassé son budget de temps.",
 			imsServicesQueryFailed: "La requête de services IMS a échoué.",
 			imsServicesQueryUnavailable:
 				"qmicli n'expose pas la requête de services IMS.",
-			imsRegistrationQueryFailed:
-				"La requête d'enregistrement IMS a échoué.",
+			imsRegistrationQueryFailed: "La requête d'enregistrement IMS a échoué.",
 			imsRegistrationQueryUnavailable:
 				"qmicli n'expose pas la requête d'enregistrement IMS.",
 			imsSettingsQueryFailed: "La requête de paramètres IMS a échoué.",
@@ -316,8 +313,7 @@ export const fr = {
 		},
 		conversationList: {
 			empty: "Aucune conversation",
-			emptyDescription:
-				"Les fils SMS entrants et sortants apparaîtront ici.",
+			emptyDescription: "Les fils SMS entrants et sortants apparaîtront ici.",
 			messages: "{{count}} messages",
 			noMatching: "Aucun message correspondant",
 			noMatchingDescription:
@@ -408,8 +404,7 @@ export const fr = {
 			title: "Examiner les modifications de configuration",
 			description:
 				"Vérifiez le TOML exact qui remplacera le fichier actuel, puis confirmez une seconde fois pour enregistrer.",
-			generating:
-				"Génération du diff TOML et vérification du brouillon…",
+			generating: "Génération du diff TOML et vérification du brouillon…",
 			conflict: "La configuration a changé sur le disque",
 			previewFailed: "Échec de l'aperçu",
 			reload: "Recharger depuis le disque et abandonner le brouillon",
@@ -430,8 +425,7 @@ export const fr = {
 		warnings: {
 			passwordChange:
 				"Toutes les sessions seront déconnectées après l'enregistrement et la planification du redémarrage.",
-			apiDisable:
-				"Le tableau de bord sera indisponible après le redémarrage.",
+			apiDisable: "Le tableau de bord sera indisponible après le redémarrage.",
 			apiEndpointChange:
 				"L'adresse du tableau de bord peut changer après le redémarrage.",
 			databasePathChange:
@@ -450,8 +444,7 @@ export const fr = {
 			sms: "SMS",
 			smsDescription: "Filtres de stockage et mots-clés de code",
 			forwarding: "Transfert",
-			forwardingDescription:
-				"Workers de livraison et profils de canal",
+			forwardingDescription: "Workers de livraison et profils de canal",
 			api: "Web API",
 			apiDescription: "Accès au tableau de bord et persistance",
 			timeouts: "Délais d'attente",
