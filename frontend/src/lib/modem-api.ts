@@ -2,6 +2,41 @@ import { apiFetch } from "#/lib/api";
 
 export type HealthLevel = "ok" | "degraded" | "error" | "unknown";
 
+export type SmsOverIms = {
+	status:
+		| "available"
+		| "registering"
+		| "limited"
+		| "not_registered"
+		| "unavailable"
+		| "unknown";
+	support: "supported" | "unsupported" | "unknown";
+	configured: "enabled" | "disabled" | "unknown";
+	registration:
+		| "registered"
+		| "registering"
+		| "limited"
+		| "not_registered"
+		| "unknown";
+	sms_service: "available" | "limited" | "unavailable" | "unknown";
+	technology: "wwan" | "wlan" | "interworking_wlan" | "unknown";
+	probe: {
+		tool: string;
+		available: boolean;
+		version_raw: string | null;
+		transport: "direct_qmi" | "unknown";
+		device: string | null;
+		capabilities: {
+			ims_settings: boolean;
+			imsa_registration: boolean;
+			imsa_services: boolean;
+		};
+	};
+	evidence: string[];
+	reasons: string[];
+	warnings: string[];
+};
+
 export type ModemStatus = {
 	checked_at: string;
 	tool: {
@@ -33,6 +68,7 @@ export type ModemStatus = {
 		supported_storages: string[];
 		default_storage: string | null;
 	};
+	sms_over_ims: SmsOverIms;
 	diagnostics: {
 		last_error: string | null;
 		path_drift_candidate: string | null;
