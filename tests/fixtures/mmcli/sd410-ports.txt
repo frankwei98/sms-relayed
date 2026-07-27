@@ -1,0 +1,4 @@
+  -------------------------
+  Hardware |       primary port: wwan0qmi0
+           |              ports: rpmsg_ctrl2 (ignored), wwan0 (net),
+           |                     wwan0at0 (at), wwan0at1 (at), wwan0qmi0 (qmi)
