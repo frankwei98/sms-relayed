@@ -1,4 +1,11 @@
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
 use serde::Serialize;
+use tokio::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -259,6 +266,439 @@ fn normalized_value(value: &str) -> String {
         .to_ascii_lowercase()
 }
 
+#[derive(Debug, Clone)]
+pub struct QmicliOutput {
+    pub stdout: String,
+    pub status_success: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QmicliRunError {
+    Missing,
+    PathInvalid,
+    PermissionDenied,
+    ProxyUnavailable,
+    Timeout,
+    Failed,
+}
+
+pub trait QmicliRunner: Send + Sync {
+    fn run<'a>(
+        &'a self,
+        args: &'a [String],
+        timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<QmicliOutput, QmicliRunError>> + Send + 'a>>;
+}
+
+#[derive(Clone)]
+pub struct RealQmicliRunner {
+    program: PathBuf,
+    path_valid: bool,
+}
+
+impl RealQmicliRunner {
+    fn from_env() -> Self {
+        match std::env::var_os("SMS_RELAYED_QMICLI_PATH") {
+            Some(path) => {
+                let path = PathBuf::from(path);
+                let path_valid = path.is_absolute();
+                Self {
+                    program: path,
+                    path_valid,
+                }
+            }
+            None => Self {
+                program: PathBuf::from("qmicli"),
+                path_valid: true,
+            },
+        }
+    }
+}
+
+impl QmicliRunner for RealQmicliRunner {
+    fn run<'a>(
+        &'a self,
+        args: &'a [String],
+        timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<QmicliOutput, QmicliRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            if !self.path_valid {
+                return Err(QmicliRunError::PathInvalid);
+            }
+            let mut command = Command::new(&self.program);
+            command
+                .args(args)
+                .env("LC_ALL", "C")
+                .kill_on_drop(true)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            let output = tokio::time::timeout(timeout, command.output())
+                .await
+                .map_err(|_| QmicliRunError::Timeout)?
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        QmicliRunError::Missing
+                    } else if error.kind() == std::io::ErrorKind::PermissionDenied {
+                        QmicliRunError::PermissionDenied
+                    } else {
+                        QmicliRunError::Failed
+                    }
+                })?;
+            let stderr = bounded_text(&output.stderr);
+            if !output.status.success() {
+                let lower = stderr.to_ascii_lowercase();
+                if lower.contains("permission denied") || lower.contains("operation not permitted")
+                {
+                    return Err(QmicliRunError::PermissionDenied);
+                }
+                if lower.contains("qmi-proxy") || lower.contains("proxy") {
+                    return Err(QmicliRunError::ProxyUnavailable);
+                }
+            }
+            Ok(QmicliOutput {
+                stdout: bounded_text(&output.stdout),
+                status_success: output.status.success(),
+            })
+        })
+    }
+}
+
+fn bounded_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(&bytes[..bytes.len().min(64 * 1024)]).to_string()
+}
+
+pub trait ImsProbe: Send + Sync {
+    fn probe<'a>(
+        &'a self,
+        modem_output: &'a str,
+        json: bool,
+        enabled: Option<bool>,
+    ) -> Pin<Box<dyn Future<Output = SmsOverIms> + Send + 'a>>;
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub struct NoopImsProbe;
+
+#[cfg(test)]
+impl ImsProbe for NoopImsProbe {
+    fn probe<'a>(
+        &'a self,
+        _modem_output: &'a str,
+        _json: bool,
+        _enabled: Option<bool>,
+    ) -> Pin<Box<dyn Future<Output = SmsOverIms> + Send + 'a>> {
+        Box::pin(async { SmsOverIms::default() })
+    }
+}
+
+#[derive(Clone)]
+struct ToolCapabilities {
+    version: String,
+    capabilities: ImsCapabilities,
+}
+
+#[derive(Clone)]
+pub struct RealImsProbe {
+    runner: Arc<dyn QmicliRunner>,
+    tool: Arc<Mutex<Option<Result<ToolCapabilities, QmicliRunError>>>>,
+    flight: Arc<tokio::sync::Mutex<()>>,
+    last: Arc<Mutex<Option<(Instant, SmsOverIms)>>>,
+}
+
+impl RealImsProbe {
+    pub fn new() -> Self {
+        Self::with_runner(RealQmicliRunner::from_env())
+    }
+
+    pub fn with_runner<R>(runner: R) -> Self
+    where
+        R: QmicliRunner + 'static,
+    {
+        Self {
+            runner: Arc::new(runner),
+            tool: Arc::new(Mutex::new(None)),
+            flight: Arc::new(tokio::sync::Mutex::new(())),
+            last: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    async fn detect_tool(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<ToolCapabilities, QmicliRunError> {
+        if let Some(cached) = self.tool.lock().unwrap().clone() {
+            return cached;
+        }
+        let detected = async {
+            let version = self
+                .runner
+                .run(
+                    &["--version".to_string()],
+                    remaining_until(deadline).ok_or(QmicliRunError::Timeout)?,
+                )
+                .await?;
+            if !version.status_success {
+                return Err(QmicliRunError::Failed);
+            }
+            let help = self
+                .runner
+                .run(
+                    &["--help-all".to_string()],
+                    remaining_until(deadline).ok_or(QmicliRunError::Timeout)?,
+                )
+                .await?;
+            if !help.status_success {
+                return Err(QmicliRunError::Failed);
+            }
+            Ok(ToolCapabilities {
+                version: version
+                    .stdout
+                    .lines()
+                    .next()
+                    .unwrap_or("qmicli")
+                    .to_string(),
+                capabilities: ImsCapabilities {
+                    ims_settings: help
+                        .stdout
+                        .contains("--ims-get-ims-services-enabled-setting"),
+                    imsa_registration: help.stdout.contains("--imsa-get-ims-registration-status"),
+                    imsa_services: help.stdout.contains("--imsa-get-ims-services-status"),
+                },
+            })
+        };
+        let detected = detected.await;
+        if let Err(error) = detected.as_ref() {
+            log::warn!(
+                "SMS over IMS qmicli capability probe failed: {}",
+                tool_error_code(*error)
+            );
+        }
+        *self.tool.lock().unwrap() = Some(detected.clone());
+        detected
+    }
+
+    async fn probe_inner(
+        &self,
+        modem_output: &str,
+        json: bool,
+        enabled: Option<bool>,
+    ) -> SmsOverIms {
+        let mut result = SmsOverIms::default();
+        let selection = if json {
+            select_qmi_device_from_modem_json(modem_output)
+        } else {
+            select_qmi_device_from_modem_text(modem_output)
+        };
+        let device = match selection {
+            QmiPortSelection::Selected(device) => device,
+            QmiPortSelection::Unavailable => {
+                result.reasons = vec!["qmi_port_unavailable".to_string()];
+                return result;
+            }
+            QmiPortSelection::Ambiguous => {
+                result.reasons = vec!["qmi_port_ambiguous".to_string()];
+                return result;
+            }
+        };
+        result.probe.transport = ImsTransport::DirectQmi;
+        result.probe.device = Some(device.clone());
+        if enabled == Some(false) {
+            return result;
+        }
+        result.reasons.clear();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let tool = match self.detect_tool(deadline).await {
+            Ok(tool) => tool,
+            Err(error) => {
+                result.reasons.push(tool_error_code(error).to_string());
+                return result;
+            }
+        };
+        result.probe.available = true;
+        result.probe.version_raw = Some(tool.version);
+        result.probe.capabilities = tool.capabilities.clone();
+
+        let mut blockers = Vec::new();
+        if tool.capabilities.imsa_services {
+            match self
+                .run_query(
+                    &device,
+                    "--imsa-get-ims-services-status",
+                    deadline,
+                    "ims_services_query_failed",
+                )
+                .await
+            {
+                Ok(output) => {
+                    let parsed = parse_imsa_services(&output);
+                    result.sms_service = parsed.sms_service;
+                    result.technology = parsed.technology;
+                    if parsed.sms_service == ImsSmsService::Unknown {
+                        blockers.push("ims_services_output_unrecognized".to_string());
+                    } else {
+                        result.evidence.push("qmi_imsa_services".to_string());
+                    }
+                    if parsed.nonstandard {
+                        result
+                            .warnings
+                            .push("ims_services_output_nonstandard".to_string());
+                    }
+                }
+                Err(code) => blockers.push(code),
+            }
+        } else {
+            blockers.push("ims_services_query_unavailable".to_string());
+        }
+
+        if tool.capabilities.imsa_registration {
+            match self
+                .run_query(
+                    &device,
+                    "--imsa-get-ims-registration-status",
+                    deadline,
+                    "ims_registration_query_failed",
+                )
+                .await
+            {
+                Ok(output) => {
+                    let parsed = parse_imsa_registration(&output);
+                    result.registration = parsed.registration;
+                    if parsed.registration == ImsRegistration::Unknown {
+                        blockers.push("ims_registration_output_unrecognized".to_string());
+                    } else {
+                        result.evidence.push("qmi_imsa_registration".to_string());
+                    }
+                    if parsed.nonstandard {
+                        result
+                            .warnings
+                            .push("ims_registration_output_nonstandard".to_string());
+                    }
+                }
+                Err(code) => blockers.push(code),
+            }
+        } else {
+            blockers.push("ims_registration_query_unavailable".to_string());
+        }
+
+        if tool.capabilities.ims_settings {
+            match self
+                .run_query(
+                    &device,
+                    "--ims-get-ims-services-enabled-setting",
+                    deadline,
+                    "ims_settings_query_failed",
+                )
+                .await
+            {
+                Ok(output) => {
+                    let parsed = parse_ims_settings(&output);
+                    result.configured = parsed.configured;
+                    if parsed.configured == ImsConfigured::Unknown {
+                        result
+                            .warnings
+                            .push("ims_settings_output_unrecognized".to_string());
+                    } else {
+                        result.evidence.push("qmi_ims_settings".to_string());
+                    }
+                    if parsed.nonstandard {
+                        result
+                            .warnings
+                            .push("ims_settings_output_nonstandard".to_string());
+                    }
+                }
+                Err(code) => result.warnings.push(code),
+            }
+        } else {
+            result
+                .warnings
+                .push("ims_settings_query_unavailable".to_string());
+        }
+        result.classify();
+        if result.configured == ImsConfigured::Disabled
+            && result.status == SmsOverImsStatus::Available
+        {
+            result.warnings.push("ims_state_inconsistent".to_string());
+        }
+        if result.status == SmsOverImsStatus::Unknown {
+            result.reasons = blockers;
+        } else {
+            result.warnings.extend(blockers);
+        }
+        result
+    }
+
+    async fn run_query(
+        &self,
+        device: &str,
+        action: &str,
+        deadline: tokio::time::Instant,
+        failed_code: &str,
+    ) -> Result<String, String> {
+        let timeout = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .ok_or_else(|| "ims_probe_timeout".to_string())?;
+        let args = vec![
+            "-d".to_string(),
+            device.to_string(),
+            "--device-open-proxy".to_string(),
+            action.to_string(),
+        ];
+        match self.runner.run(&args, timeout).await {
+            Ok(output) if output.status_success => Ok(output.stdout),
+            Ok(_) => Err(failed_code.to_string()),
+            Err(error) => Err(query_error_code(error, failed_code).to_string()),
+        }
+    }
+}
+
+impl ImsProbe for RealImsProbe {
+    fn probe<'a>(
+        &'a self,
+        modem_output: &'a str,
+        json: bool,
+        enabled: Option<bool>,
+    ) -> Pin<Box<dyn Future<Output = SmsOverIms> + Send + 'a>> {
+        Box::pin(async move {
+            let requested_at = Instant::now();
+            let _guard = self.flight.lock().await;
+            if let Some((completed_at, result)) = self.last.lock().unwrap().clone() {
+                if completed_at >= requested_at {
+                    return result;
+                }
+            }
+            let result = self.probe_inner(modem_output, json, enabled).await;
+            *self.last.lock().unwrap() = Some((Instant::now(), result.clone()));
+            result
+        })
+    }
+}
+
+fn tool_error_code(error: QmicliRunError) -> &'static str {
+    match error {
+        QmicliRunError::Missing => "qmicli_missing",
+        QmicliRunError::PathInvalid => "qmicli_path_invalid",
+        QmicliRunError::PermissionDenied => "ims_probe_permission_denied",
+        QmicliRunError::ProxyUnavailable => "qmi_proxy_unavailable",
+        QmicliRunError::Timeout => "ims_probe_timeout",
+        QmicliRunError::Failed => "qmicli_probe_failed",
+    }
+}
+
+fn query_error_code(error: QmicliRunError, failed_code: &str) -> &str {
+    match error {
+        QmicliRunError::PermissionDenied => "ims_probe_permission_denied",
+        QmicliRunError::ProxyUnavailable => "qmi_proxy_unavailable",
+        QmicliRunError::Timeout => "ims_probe_timeout",
+        _ => failed_code,
+    }
+}
+
+fn remaining_until(deadline: tokio::time::Instant) -> Option<Duration> {
+    deadline.checked_duration_since(tokio::time::Instant::now())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QmiPortSelection {
     Selected(String),
@@ -342,7 +782,126 @@ fn qmi_port_basename(port: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+
+    #[derive(Clone)]
+    struct FakeQmicliRunner {
+        outputs: Arc<Mutex<VecDeque<QmicliOutput>>>,
+    }
+
+    impl QmicliRunner for FakeQmicliRunner {
+        fn run<'a>(
+            &'a self,
+            _args: &'a [String],
+            _timeout: std::time::Duration,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<QmicliOutput, QmicliRunError>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                self.outputs
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .ok_or(QmicliRunError::Failed)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_reports_available_from_qmi_runtime_evidence() {
+        let outputs = [
+            success("qmicli 1.36.0"),
+            success(
+                "--ims-get-ims-services-enabled-setting\n\
+                 --imsa-get-ims-registration-status\n\
+                 --imsa-get-ims-services-status",
+            ),
+            success("IMS SMS service status: 'available'\nIMS SMS service RAT: 'wwan'"),
+            success("IMS registration status: 'registered'"),
+            success("IMS SMS service: 'enabled'"),
+        ];
+        let probe = RealImsProbe::with_runner(FakeQmicliRunner {
+            outputs: Arc::new(Mutex::new(outputs.into())),
+        });
+
+        let status = probe
+            .probe(
+                r#"{"modem":{"generic":{"primary-port":"wwan0qmi0","ports":["wwan0qmi0 (qmi)"]}}}"#,
+                true,
+                Some(true),
+            )
+            .await;
+
+        assert_eq!(status.status, SmsOverImsStatus::Available);
+        assert_eq!(status.configured, ImsConfigured::Enabled);
+        assert_eq!(status.probe.device.as_deref(), Some("/dev/wwan0qmi0"));
+        assert!(status.reasons.is_empty());
+    }
+
+    #[tokio::test]
+    async fn old_qmicli_capabilities_report_unknown_without_running_queries() {
+        let probe = RealImsProbe::with_runner(FakeQmicliRunner {
+            outputs: Arc::new(Mutex::new(
+                [success("qmicli 1.32.2"), success("--help-wms")].into(),
+            )),
+        });
+
+        let status = probe
+            .probe(
+                r#"{"modem":{"generic":{"ports":["wwan0qmi0 (qmi)"]}}}"#,
+                true,
+                Some(true),
+            )
+            .await;
+
+        assert_eq!(status.status, SmsOverImsStatus::Unknown);
+        assert_eq!(status.probe.version_raw.as_deref(), Some("qmicli 1.32.2"));
+        assert!(status
+            .reasons
+            .contains(&"ims_services_query_unavailable".to_string()));
+        assert!(status
+            .reasons
+            .contains(&"ims_registration_query_unavailable".to_string()));
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_share_the_in_flight_probe_result() {
+        let outputs = [
+            success("qmicli 1.36.0"),
+            success(
+                "--ims-get-ims-services-enabled-setting\n\
+                 --imsa-get-ims-registration-status\n\
+                 --imsa-get-ims-services-status",
+            ),
+            success("IMS SMS service status: 'available'\nIMS SMS service RAT: 'wwan'"),
+            success("IMS registration status: 'registered'"),
+            success("IMS SMS service: 'enabled'"),
+        ];
+        let probe = RealImsProbe::with_runner(FakeQmicliRunner {
+            outputs: Arc::new(Mutex::new(outputs.into())),
+        });
+        let raw =
+            r#"{"modem":{"generic":{"primary-port":"wwan0qmi0","ports":["wwan0qmi0 (qmi)"]}}}"#;
+
+        let (first, second) = tokio::join!(
+            probe.probe(raw, true, Some(true)),
+            probe.probe(raw, true, Some(true))
+        );
+
+        assert_eq!(first.status, SmsOverImsStatus::Available);
+        assert_eq!(second.status, SmsOverImsStatus::Available);
+    }
+
+    fn success(stdout: &str) -> QmicliOutput {
+        QmicliOutput {
+            stdout: stdout.to_string(),
+            status_success: true,
+        }
+    }
 
     #[test]
     fn registered_available_sms_is_available_over_wwan() {
@@ -408,20 +967,7 @@ mod tests {
 
     #[test]
     fn selects_sd410_primary_qmi_port_from_modem_json() {
-        let raw = r#"{
-            "modem": {
-                "generic": {
-                    "primary-port": "wwan0qmi0",
-                    "ports": [
-                        "rpmsg_ctrl2 (ignored)",
-                        "wwan0 (net)",
-                        "wwan0at0 (at)",
-                        "wwan0at1 (at)",
-                        "wwan0qmi0 (qmi)"
-                    ]
-                }
-            }
-        }"#;
+        let raw = include_str!("../../tests/fixtures/mmcli/sd410-ports.json");
 
         assert_eq!(
             select_qmi_device_from_modem_json(raw),

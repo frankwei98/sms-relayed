@@ -12,7 +12,10 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 mod ims;
+#[cfg(test)]
+use ims::NoopImsProbe;
 pub use ims::SmsOverIms;
+use ims::{ImsProbe, RealImsProbe};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -638,6 +641,7 @@ impl ModemAction {
 #[derive(Clone)]
 pub struct ModemService {
     runner: Arc<dyn MmcliRunner>,
+    ims_probe: Arc<dyn ImsProbe>,
     capabilities: Arc<Mutex<Option<ToolInfo>>>,
     health_cache: Arc<Mutex<Option<(String, Instant, PublicModemHealth)>>>,
     pub(crate) action_lock: Arc<tokio::sync::Mutex<()>>,
@@ -648,15 +652,25 @@ pub struct ModemService {
 
 impl ModemService {
     pub fn new() -> Self {
-        Self::new_with_runner(RealMmcliRunner)
+        Self::new_with_runner_and_ims(RealMmcliRunner, RealImsProbe::new())
     }
 
+    #[cfg(test)]
     pub fn new_with_runner<R>(runner: R) -> Self
     where
         R: MmcliRunner + 'static,
     {
+        Self::new_with_runner_and_ims(runner, NoopImsProbe)
+    }
+
+    pub(crate) fn new_with_runner_and_ims<R, I>(runner: R, ims_probe: I) -> Self
+    where
+        R: MmcliRunner + 'static,
+        I: ImsProbe + 'static,
+    {
         Self {
             runner: Arc::new(runner),
+            ims_probe: Arc::new(ims_probe),
             capabilities: Arc::new(Mutex::new(None)),
             health_cache: Arc::new(Mutex::new(None)),
             action_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -675,6 +689,10 @@ impl ModemService {
     }
 
     pub async fn status(&self, configured_path: &str) -> ModemStatus {
+        self.status_internal(configured_path, true).await
+    }
+
+    async fn status_internal(&self, configured_path: &str, include_ims: bool) -> ModemStatus {
         let mut tool = self.detect_capabilities().await;
         if !tool.available {
             return unavailable_status(configured_path, tool, "mmcli_probe_failed");
@@ -707,6 +725,12 @@ impl ModemService {
                                 .await;
                             self.enrich_sim_status(&mut status, sim_target.as_deref(), use_json)
                                 .await;
+                            if include_ims {
+                                status.sms_over_ims = self
+                                    .ims_probe
+                                    .probe(&output.stdout, use_json, status.modem.enabled)
+                                    .await;
+                            }
                             status
                         }
                         Err(err) => {
@@ -764,6 +788,16 @@ impl ModemService {
                                                 use_json,
                                             )
                                             .await;
+                                            if include_ims {
+                                                status.sms_over_ims = self
+                                                    .ims_probe
+                                                    .probe(
+                                                        &retry.stdout,
+                                                        use_json,
+                                                        status.modem.enabled,
+                                                    )
+                                                    .await;
+                                            }
                                             status
                                         }
                                         Err(err) => error_status(
@@ -936,7 +970,7 @@ impl ModemService {
         }
 
         // Perform the refresh
-        let status = self.status(configured_path).await;
+        let status = self.status_internal(configured_path, false).await;
         let health = PublicModemHealth {
             status: status.health.status,
             reason: status.health.reasons.first().cloned(),
@@ -1414,6 +1448,26 @@ mod service_tests {
         outputs: Arc<Mutex<VecDeque<Result<MmcliOutput, ModemError>>>>,
     }
 
+    #[derive(Clone)]
+    struct FakeImsProbe {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        result: SmsOverIms,
+    }
+
+    impl ImsProbe for FakeImsProbe {
+        fn probe<'a>(
+            &'a self,
+            _modem_output: &'a str,
+            _json: bool,
+            _enabled: Option<bool>,
+        ) -> Pin<Box<dyn Future<Output = SmsOverIms> + Send + 'a>> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let result = self.result.clone();
+            Box::pin(async move { result })
+        }
+    }
+
     impl FakeRunner {
         fn new(outputs: Vec<Result<MmcliOutput, ModemError>>) -> Self {
             Self {
@@ -1451,6 +1505,57 @@ mod service_tests {
             stderr: String::new(),
             status_success: true,
         }
+    }
+
+    #[tokio::test]
+    async fn authenticated_status_includes_ims_without_changing_modem_health() {
+        let runner = FakeRunner::new(vec![
+            Ok(out("mmcli 1.22.0\n")),
+            Ok(out(include_str!("../tests/fixtures/mmcli/healthy.json"))),
+        ]);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut ims = SmsOverIms::default();
+        ims.registration = ims::ImsRegistration::Registered;
+        ims.sms_service = ims::ImsSmsService::Available;
+        ims.classify();
+        let service = ModemService::new_with_runner_and_ims(
+            runner,
+            FakeImsProbe {
+                calls: calls.clone(),
+                result: ims,
+            },
+        );
+
+        let status = service
+            .status("/org/freedesktop/ModemManager1/Modem/0")
+            .await;
+
+        assert_eq!(status.health.status, HealthLevel::Ok);
+        assert_eq!(status.sms_over_ims.status, ims::SmsOverImsStatus::Available);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn public_health_does_not_run_ims_probe() {
+        let runner = FakeRunner::new(vec![
+            Ok(out("mmcli 1.22.0\n")),
+            Ok(out(include_str!("../tests/fixtures/mmcli/healthy.json"))),
+        ]);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = ModemService::new_with_runner_and_ims(
+            runner,
+            FakeImsProbe {
+                calls: calls.clone(),
+                result: SmsOverIms::default(),
+            },
+        );
+
+        let health = service
+            .public_health("/org/freedesktop/ModemManager1/Modem/0")
+            .await;
+
+        assert_eq!(health.status, HealthLevel::Ok);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
