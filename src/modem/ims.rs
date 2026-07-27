@@ -927,6 +927,28 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct ScriptedQmicliRunner {
+        results: Arc<Mutex<VecDeque<Result<QmicliOutput, QmicliRunError>>>>,
+    }
+
+    impl QmicliRunner for ScriptedQmicliRunner {
+        fn run<'a>(
+            &'a self,
+            _args: &'a [String],
+            _timeout: Duration,
+        ) -> Pin<Box<dyn Future<Output = Result<QmicliOutput, QmicliRunError>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                self.results
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or(Err(QmicliRunError::Failed))
+            })
+        }
+    }
+
+    #[derive(Clone)]
     struct ErrorQmicliRunner {
         error: QmicliRunError,
         calls: Arc<AtomicUsize>,
@@ -1077,6 +1099,39 @@ mod tests {
             assert_eq!(status.status, SmsOverImsStatus::Unknown);
             assert_eq!(status.reasons, [code]);
         }
+    }
+
+    #[tokio::test]
+    async fn capability_probe_recovers_after_a_transient_failure() {
+        let results = [
+            Err(QmicliRunError::Missing),
+            Ok(success(
+                "--ims-get-ims-services-enabled-setting\n\
+                 --imsa-get-ims-registration-status\n\
+                 --imsa-get-ims-services-status",
+            )),
+            Ok(success("qmicli 1.36.0")),
+            Ok(success(
+                "SMS:\n\
+                 \tStatus: 'full service'\n\
+                 \tTechnology: 'wwan'\n",
+            )),
+            Ok(success("IMS registration:\n\tStatus: 'registered'\n")),
+            Ok(success("SMS service enabled: yes\n")),
+        ];
+        let probe = RealImsProbe::with_runner(ScriptedQmicliRunner {
+            results: Arc::new(Mutex::new(results.into())),
+        });
+        let modem =
+            r#"{"modem":{"generic":{"primary-port":"wwan0qmi0","ports":["wwan0qmi0 (qmi)"]}}}"#;
+
+        let first = probe.probe(modem, true, Some(true)).await;
+        let recovered = probe.probe(modem, true, Some(true)).await;
+
+        assert_eq!(first.status, SmsOverImsStatus::Unknown);
+        assert_eq!(first.reasons, ["qmicli_missing"]);
+        assert_eq!(recovered.status, SmsOverImsStatus::Available);
+        assert!(recovered.reasons.is_empty());
     }
 
     #[tokio::test]
