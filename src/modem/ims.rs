@@ -585,6 +585,7 @@ impl RealImsProbe {
                 "SMS over IMS qmicli capability probe failed: {}",
                 tool_error_code(*error)
             );
+            return detected;
         }
         *self.tool.lock().unwrap() = Some(detected.clone());
         detected
