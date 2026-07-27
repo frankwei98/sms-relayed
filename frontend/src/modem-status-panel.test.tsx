@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { ModemStatusPanel } from "#/components/modem/modem-status-panel";
 
@@ -160,5 +160,29 @@ describe("ModemStatusPanel SMS over IMS", () => {
 			),
 		).toBeTruthy();
 		expect(screen.queryByText("ims_services_output_nonstandard")).toBeNull();
+	});
+
+	test("refresh updates the IMS status without replacing modem details", async () => {
+		mocks.fetchModemStatus.mockResolvedValueOnce(status).mockResolvedValueOnce({
+			...status,
+			sms_over_ims: {
+				...status.sms_over_ims,
+				status: "not_registered",
+				registration: "not_registered",
+				sms_service: "unknown",
+				technology: "unknown",
+				evidence: [],
+			},
+		});
+
+		render(<ModemStatusPanel />);
+		expect(await screen.findByText("Available over WLAN")).toBeTruthy();
+
+		fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+		expect(
+			(await screen.findAllByText("Not Registered")).length,
+		).toBeGreaterThan(0);
+		expect(screen.getByText("+6581234567")).toBeTruthy();
 	});
 });

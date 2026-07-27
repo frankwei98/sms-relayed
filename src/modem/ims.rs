@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -358,20 +359,60 @@ impl QmicliRunner for RealQmicliRunner {
                 .kill_on_drop(true)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
-            let output = tokio::time::timeout(timeout, command.output())
-                .await
-                .map_err(|_| QmicliRunError::Timeout)?
-                .map_err(|error| {
-                    if error.kind() == std::io::ErrorKind::NotFound {
-                        QmicliRunError::Missing
-                    } else if error.kind() == std::io::ErrorKind::PermissionDenied {
-                        QmicliRunError::PermissionDenied
-                    } else {
-                        QmicliRunError::Failed
-                    }
-                })?;
-            let stderr = bounded_text(&output.stderr);
-            if !output.status.success() {
+            let mut child = command.spawn().map_err(map_spawn_error)?;
+            let stdout = child.stdout.take().ok_or(QmicliRunError::Failed)?;
+            let stderr = child.stderr.take().ok_or(QmicliRunError::Failed)?;
+            let (overflow_tx, mut overflow_rx) = tokio::sync::mpsc::channel(1);
+            let mut stdout_task = tokio::spawn(read_capped(stdout, overflow_tx.clone()));
+            let mut stderr_task = tokio::spawn(read_capped(stderr, overflow_tx.clone()));
+            let deadline = tokio::time::Instant::now() + timeout;
+
+            let status = tokio::time::timeout_at(deadline, async {
+                tokio::select! {
+                    status = child.wait() => status.map_err(|_| QmicliRunError::Failed),
+                    Some(()) = overflow_rx.recv() => Err(QmicliRunError::Failed),
+                }
+            })
+            .await;
+            let status = match status {
+                Ok(Ok(status)) => status,
+                Ok(Err(error)) => {
+                    terminate_child(&mut child);
+                    abort_readers(&mut stdout_task, &mut stderr_task).await;
+                    return Err(error);
+                }
+                Err(_) => {
+                    terminate_child(&mut child);
+                    abort_readers(&mut stdout_task, &mut stderr_task).await;
+                    return Err(QmicliRunError::Timeout);
+                }
+            };
+            drop(overflow_tx);
+            let drained = tokio::time::timeout_at(deadline, async {
+                let stdout = (&mut stdout_task)
+                    .await
+                    .map_err(|_| QmicliRunError::Failed)??;
+                let stderr = (&mut stderr_task)
+                    .await
+                    .map_err(|_| QmicliRunError::Failed)??;
+                Ok::<_, QmicliRunError>((stdout, stderr))
+            })
+            .await;
+            let (stdout, stderr) = match drained {
+                Ok(Ok(output)) => output,
+                Ok(Err(error)) => {
+                    terminate_child(&mut child);
+                    abort_readers(&mut stdout_task, &mut stderr_task).await;
+                    return Err(error);
+                }
+                Err(_) => {
+                    terminate_child(&mut child);
+                    abort_readers(&mut stdout_task, &mut stderr_task).await;
+                    return Err(QmicliRunError::Timeout);
+                }
+            };
+            let stderr = String::from_utf8_lossy(&stderr);
+            if !status.success() {
                 let lower = stderr.to_ascii_lowercase();
                 if lower.contains("permission denied") || lower.contains("operation not permitted")
                 {
@@ -382,15 +423,62 @@ impl QmicliRunner for RealQmicliRunner {
                 }
             }
             Ok(QmicliOutput {
-                stdout: bounded_text(&output.stdout),
-                status_success: output.status.success(),
+                stdout: String::from_utf8_lossy(&stdout).to_string(),
+                status_success: status.success(),
             })
         })
     }
 }
 
-fn bounded_text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(&bytes[..bytes.len().min(64 * 1024)]).to_string()
+const MAX_QMICLI_OUTPUT_BYTES: usize = 64 * 1024;
+
+fn map_spawn_error(error: std::io::Error) -> QmicliRunError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        QmicliRunError::Missing
+    } else if error.kind() == std::io::ErrorKind::PermissionDenied {
+        QmicliRunError::PermissionDenied
+    } else {
+        QmicliRunError::Failed
+    }
+}
+
+async fn read_capped<R>(
+    mut reader: R,
+    overflow: tokio::sync::mpsc::Sender<()>,
+) -> Result<Vec<u8>, QmicliRunError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .await
+            .map_err(|_| QmicliRunError::Failed)?;
+        if read == 0 {
+            return Ok(output);
+        }
+        let remaining = MAX_QMICLI_OUTPUT_BYTES.saturating_sub(output.len());
+        output.extend_from_slice(&buffer[..read.min(remaining)]);
+        if read > remaining {
+            let _ = overflow.try_send(());
+            return Err(QmicliRunError::Failed);
+        }
+    }
+}
+
+fn terminate_child(child: &mut tokio::process::Child) {
+    let _ = child.start_kill();
+}
+
+async fn abort_readers(
+    stdout: &mut tokio::task::JoinHandle<Result<Vec<u8>, QmicliRunError>>,
+    stderr: &mut tokio::task::JoinHandle<Result<Vec<u8>, QmicliRunError>>,
+) {
+    stdout.abort();
+    stderr.abort();
+    let _ = tokio::join!(stdout, stderr);
 }
 
 pub trait ImsProbe: Send + Sync {
@@ -420,7 +508,7 @@ impl ImsProbe for NoopImsProbe {
 
 #[derive(Clone)]
 struct ToolCapabilities {
-    version: String,
+    version: Option<String>,
     capabilities: ImsCapabilities,
 }
 
@@ -457,16 +545,6 @@ impl RealImsProbe {
             return cached;
         }
         let detected = async {
-            let version = self
-                .runner
-                .run(
-                    &["--version".to_string()],
-                    remaining_until(deadline).ok_or(QmicliRunError::Timeout)?,
-                )
-                .await?;
-            if !version.status_success {
-                return Err(QmicliRunError::Failed);
-            }
             let help = self
                 .runner
                 .run(
@@ -477,13 +555,21 @@ impl RealImsProbe {
             if !help.status_success {
                 return Err(QmicliRunError::Failed);
             }
+            let version = match remaining_until(deadline) {
+                Some(remaining) => self
+                    .runner
+                    .run(
+                        &["--version".to_string()],
+                        remaining.min(Duration::from_millis(250)),
+                    )
+                    .await
+                    .ok()
+                    .filter(|output| output.status_success)
+                    .and_then(|output| output.stdout.lines().next().map(ToString::to_string)),
+                None => None,
+            };
             Ok(ToolCapabilities {
-                version: version
-                    .stdout
-                    .lines()
-                    .next()
-                    .unwrap_or("qmicli")
-                    .to_string(),
+                version,
                 capabilities: ImsCapabilities {
                     ims_settings: help
                         .stdout
@@ -511,6 +597,10 @@ impl RealImsProbe {
         enabled: Option<bool>,
     ) -> SmsOverIms {
         let mut result = SmsOverIms::default();
+        if enabled == Some(false) {
+            result.reasons = vec!["modem_disabled".to_string()];
+            return result;
+        }
         let selection = if json {
             select_qmi_device_from_modem_json(modem_output)
         } else {
@@ -529,9 +619,6 @@ impl RealImsProbe {
         };
         result.probe.transport = ImsTransport::DirectQmi;
         result.probe.device = Some(device.clone());
-        if enabled == Some(false) {
-            return result;
-        }
         result.reasons.clear();
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -543,7 +630,7 @@ impl RealImsProbe {
             }
         };
         result.probe.available = true;
-        result.probe.version_raw = Some(tool.version);
+        result.probe.version_raw = tool.version;
         result.probe.capabilities = tool.capabilities.clone();
 
         let mut blockers = Vec::new();
@@ -797,9 +884,9 @@ fn qmi_port_basename(port: &str) -> Option<String> {
     if basename.is_empty()
         || basename == "."
         || basename == ".."
-        || basename
-            .chars()
-            .any(|character| character == '/' || character.is_control())
+        || !basename.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
     {
         return None;
     }
@@ -809,6 +896,7 @@ fn qmi_port_basename(port: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -837,15 +925,33 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct ErrorQmicliRunner {
+        error: QmicliRunError,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl QmicliRunner for ErrorQmicliRunner {
+        fn run<'a>(
+            &'a self,
+            _args: &'a [String],
+            _timeout: Duration,
+        ) -> Pin<Box<dyn Future<Output = Result<QmicliOutput, QmicliRunError>> + Send + 'a>>
+        {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { Err(self.error) })
+        }
+    }
+
     #[tokio::test]
     async fn probe_reports_available_from_qmi_runtime_evidence() {
         let outputs = [
-            success("qmicli 1.36.0"),
             success(
                 "--ims-get-ims-services-enabled-setting\n\
                  --imsa-get-ims-registration-status\n\
                  --imsa-get-ims-services-status",
             ),
+            success("qmicli 1.36.0"),
             success("IMS SMS service status: 'available'\nIMS SMS service RAT: 'wwan'"),
             success("IMS registration status: 'registered'"),
             success("IMS SMS service: 'enabled'"),
@@ -872,7 +978,7 @@ mod tests {
     async fn old_qmicli_capabilities_report_unknown_without_running_queries() {
         let probe = RealImsProbe::with_runner(FakeQmicliRunner {
             outputs: Arc::new(Mutex::new(
-                [success("qmicli 1.32.2"), success("--help-wms")].into(),
+                [success("--help-wms"), success("qmicli 1.32.2")].into(),
             )),
         });
 
@@ -895,14 +1001,168 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_requests_share_the_in_flight_probe_result() {
+    async fn version_failure_does_not_block_supported_ims_queries() {
         let outputs = [
-            success("qmicli 1.36.0"),
             success(
                 "--ims-get-ims-services-enabled-setting\n\
                  --imsa-get-ims-registration-status\n\
                  --imsa-get-ims-services-status",
             ),
+            QmicliOutput {
+                stdout: String::new(),
+                status_success: false,
+            },
+            success(
+                "SMS:\n\
+                 \tStatus: 'full service'\n\
+                 \tTechnology: 'wwan'\n",
+            ),
+            success("IMS registration:\n\tStatus: 'registered'\n"),
+            success("SMS service enabled: yes\n"),
+        ];
+        let probe = RealImsProbe::with_runner(FakeQmicliRunner {
+            outputs: Arc::new(Mutex::new(outputs.into())),
+        });
+
+        let status = probe
+            .probe(
+                r#"{"modem":{"generic":{"ports":["wwan0qmi0 (qmi)"]}}}"#,
+                true,
+                Some(true),
+            )
+            .await;
+
+        assert_eq!(status.status, SmsOverImsStatus::Available);
+        assert_eq!(status.probe.version_raw, None);
+    }
+
+    #[tokio::test]
+    async fn disabled_modem_skips_port_selection_and_qmicli() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let probe = RealImsProbe::with_runner(ErrorQmicliRunner {
+            error: QmicliRunError::Failed,
+            calls: calls.clone(),
+        });
+
+        let status = probe.probe("{}", true, Some(false)).await;
+
+        assert_eq!(status.status, SmsOverImsStatus::Unknown);
+        assert_eq!(status.reasons, ["modem_disabled"]);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn capability_failures_return_fixed_safe_codes() {
+        for (error, code) in [
+            (QmicliRunError::Missing, "qmicli_missing"),
+            (
+                QmicliRunError::PermissionDenied,
+                "ims_probe_permission_denied",
+            ),
+            (QmicliRunError::Timeout, "ims_probe_timeout"),
+        ] {
+            let probe = RealImsProbe::with_runner(ErrorQmicliRunner {
+                error,
+                calls: Arc::new(AtomicUsize::new(0)),
+            });
+            let status = probe
+                .probe(
+                    r#"{"modem":{"generic":{"ports":["wwan0qmi0 (qmi)"]}}}"#,
+                    true,
+                    Some(true),
+                )
+                .await;
+
+            assert_eq!(status.status, SmsOverImsStatus::Unknown);
+            assert_eq!(status.reasons, [code]);
+        }
+    }
+
+    #[tokio::test]
+    async fn query_failures_and_unrecognized_output_degrade_to_unknown() {
+        let outputs = [
+            success(
+                "--ims-get-ims-services-enabled-setting\n\
+                 --imsa-get-ims-registration-status\n\
+                 --imsa-get-ims-services-status",
+            ),
+            success("qmicli 1.36.0"),
+            QmicliOutput {
+                stdout: String::new(),
+                status_success: false,
+            },
+            success("unexpected registration output"),
+            QmicliOutput {
+                stdout: String::new(),
+                status_success: false,
+            },
+        ];
+        let probe = RealImsProbe::with_runner(FakeQmicliRunner {
+            outputs: Arc::new(Mutex::new(outputs.into())),
+        });
+
+        let status = probe
+            .probe(
+                r#"{"modem":{"generic":{"ports":["wwan0qmi0 (qmi)"]}}}"#,
+                true,
+                Some(true),
+            )
+            .await;
+
+        assert_eq!(status.status, SmsOverImsStatus::Unknown);
+        assert!(status
+            .reasons
+            .contains(&"ims_services_query_failed".to_string()));
+        assert!(status
+            .reasons
+            .contains(&"ims_registration_output_unrecognized".to_string()));
+        assert!(status
+            .warnings
+            .contains(&"ims_settings_query_failed".to_string()));
+    }
+
+    #[tokio::test]
+    async fn capped_reader_signals_and_retains_only_the_output_limit() {
+        let (mut writer, reader) = tokio::io::duplex(MAX_QMICLI_OUTPUT_BYTES * 2);
+        let payload = vec![b'x'; MAX_QMICLI_OUTPUT_BYTES + 1];
+        let writer_task = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(&payload).await.unwrap();
+        });
+        let (overflow_tx, mut overflow_rx) = tokio::sync::mpsc::channel(1);
+
+        let output = read_capped(reader, overflow_tx).await;
+
+        writer_task.await.unwrap();
+        assert_eq!(output, Err(QmicliRunError::Failed));
+        assert_eq!(overflow_rx.recv().await, Some(()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runner_deadline_includes_pipe_drain_after_child_exit() {
+        let runner = RealQmicliRunner {
+            program: PathBuf::from("/bin/sh"),
+            path_valid: true,
+        };
+        let args = vec!["-c".to_string(), "(sleep 2) & exit 0".to_string()];
+        let started = Instant::now();
+
+        let result = runner.run(&args, Duration::from_millis(50)).await;
+
+        assert!(matches!(result, Err(QmicliRunError::Timeout)));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_share_the_in_flight_probe_result() {
+        let outputs = [
+            success(
+                "--ims-get-ims-services-enabled-setting\n\
+                 --imsa-get-ims-registration-status\n\
+                 --imsa-get-ims-services-status",
+            ),
+            success("qmicli 1.36.0"),
             success("IMS SMS service status: 'available'\nIMS SMS service RAT: 'wwan'"),
             success("IMS registration status: 'registered'"),
             success("IMS SMS service: 'enabled'"),
@@ -966,6 +1226,40 @@ mod tests {
         status.classify();
 
         assert_eq!(status.status, SmsOverImsStatus::Unavailable);
+    }
+
+    #[test]
+    fn classifies_transitional_and_registration_states() {
+        for (registration, sms_service, expected) in [
+            (
+                ImsRegistration::Registering,
+                ImsSmsService::Unknown,
+                SmsOverImsStatus::Registering,
+            ),
+            (
+                ImsRegistration::Limited,
+                ImsSmsService::Available,
+                SmsOverImsStatus::Limited,
+            ),
+            (
+                ImsRegistration::Registered,
+                ImsSmsService::Limited,
+                SmsOverImsStatus::Limited,
+            ),
+            (
+                ImsRegistration::NotRegistered,
+                ImsSmsService::Unknown,
+                SmsOverImsStatus::NotRegistered,
+            ),
+        ] {
+            let mut status = SmsOverIms {
+                registration,
+                sms_service,
+                ..SmsOverIms::default()
+            };
+            status.classify();
+            assert_eq!(status.status, expected);
+        }
     }
 
     #[test]
@@ -1054,6 +1348,28 @@ mod tests {
         assert_eq!(
             select_qmi_device_from_modem_json(raw),
             QmiPortSelection::Ambiguous
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_qmi_basenames_and_non_qmi_transports() {
+        for port in [
+            "wwan 0 (qmi)",
+            "wwan:0 (qmi)",
+            "wwan;0 (qmi)",
+            "../wwan0 (qmi)",
+        ] {
+            let raw = format!(r#"{{"modem":{{"generic":{{"ports":["{port}"]}}}}}}"#);
+            assert_eq!(
+                select_qmi_device_from_modem_json(&raw),
+                QmiPortSelection::Unavailable
+            );
+        }
+        assert_eq!(
+            select_qmi_device_from_modem_json(
+                r#"{"modem":{"generic":{"ports":["cdc-wdm0 (mbim)","ttyUSB2 (at)"]}}}"#
+            ),
+            QmiPortSelection::Unavailable
         );
     }
 }

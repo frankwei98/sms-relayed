@@ -16,6 +16,9 @@ UNINSTALL=0
 BUILD_WORK_DIR=""
 STATE_DIR=""
 BUILT_PAYLOAD=""
+DEPLOYED_NEW=0
+MARKER_NAME=".sms-relayed-private-qmicli"
+MARKER_VALUE="sms-relayed-private-qmicli:$LIBQMI_VERSION"
 
 log() { printf '%s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
@@ -114,7 +117,7 @@ EOF
 
 build_payload() {
   install_build_dependencies
-  BUILD_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/sms-relayed-libqmi.XXXXXX")"
+  BUILD_WORK_DIR="$(mktemp -d "/tmp/sms-relayed-libqmi.XXXXXX")"
   stage="$BUILD_WORK_DIR/stage"
 
   if [ -n "$TEST_ROOT" ]; then
@@ -151,6 +154,8 @@ build_payload() {
   fi
 
   write_wrapper "$payload"
+  printf '%s\n' "$MARKER_VALUE" > "$payload/$MARKER_NAME"
+  chmod 644 "$payload/$MARKER_NAME"
   BUILT_PAYLOAD="$payload"
 }
 
@@ -163,8 +168,58 @@ validate_qmicli() {
   printf '%s\n' "$help_output" | grep -F -- "--imsa-get-ims-services-status" >/dev/null
 }
 
+is_managed_version_dir() {
+  directory="$1"
+  [ -f "$directory/$MARKER_NAME" ] &&
+    [ "$(sed -n '1p' "$directory/$MARKER_NAME")" = "$MARKER_VALUE" ]
+}
+
+managed_drop_in_content() {
+  printf '%s\n' \
+    "# Managed by install-private-qmicli-debian.sh" \
+    "[Service]" \
+    "Environment=SMS_RELAYED_QMICLI_PATH=$LOGICAL_CURRENT/bin/qmicli-wrapper"
+}
+
+is_managed_drop_in() {
+  [ -f "$DROP_IN" ] &&
+    managed_drop_in_content | cmp -s - "$DROP_IN"
+}
+
+adopt_legacy_install() {
+  if [ -d "$VERSION_DIR" ] &&
+    ! is_managed_version_dir "$VERSION_DIR" &&
+    [ -L "$CURRENT_LINK" ] &&
+    [ "$(readlink "$CURRENT_LINK")" = "libqmi-$LIBQMI_VERSION" ] &&
+    is_managed_drop_in &&
+    validate_qmicli "$VERSION_DIR/bin/qmicli-wrapper"; then
+    printf '%s\n' "$MARKER_VALUE" > "$VERSION_DIR/$MARKER_NAME"
+    chmod 644 "$VERSION_DIR/$MARKER_NAME"
+    log "adopted private qmicli installed by an earlier helper revision"
+  fi
+}
+
+preflight_managed_state() {
+  adopt_legacy_install
+  if [ -e "$VERSION_DIR" ] && ! is_managed_version_dir "$VERSION_DIR"; then
+    die "$VERSION_DIR is not managed by this helper; leaving it unchanged"
+  fi
+  if [ -e "$CURRENT_LINK" ] || [ -L "$CURRENT_LINK" ]; then
+    [ -L "$CURRENT_LINK" ] ||
+      die "$CURRENT_LINK exists and is not a managed symlink"
+    [ "$(readlink "$CURRENT_LINK")" = "libqmi-$LIBQMI_VERSION" ] ||
+      die "$CURRENT_LINK points to unmanaged state; leaving it unchanged"
+    is_managed_version_dir "$VERSION_DIR" ||
+      die "$CURRENT_LINK has no helper-managed version directory"
+  fi
+  if [ -e "$DROP_IN" ] && ! is_managed_drop_in; then
+    die "$DROP_IN is not managed by this helper; leaving it unchanged"
+  fi
+}
+
 deploy_version() {
-  if [ -x "$VERSION_DIR/bin/qmicli-wrapper" ] &&
+  if is_managed_version_dir "$VERSION_DIR" &&
+    [ -x "$VERSION_DIR/bin/qmicli-wrapper" ] &&
     validate_qmicli "$VERSION_DIR/bin/qmicli-wrapper"; then
     log "private qmicli $LIBQMI_VERSION is already installed"
     return
@@ -174,30 +229,29 @@ deploy_version() {
   build_payload
   mkdir -p "$DEST_BASE"
   mv "$BUILT_PAYLOAD" "$VERSION_DIR"
+  DEPLOYED_NEW=1
 }
 
 replace_current_link() {
   target="$1"
   temporary_link="$DEST_BASE/.libqmi-link.$$"
-  rm -f "$temporary_link"
-  ln -s "$target" "$temporary_link"
+  rm -f "$temporary_link" || return 1
+  ln -s "$target" "$temporary_link" || return 1
   if ! mv -Tf "$temporary_link" "$CURRENT_LINK" 2>/dev/null; then
-    rm -f "$CURRENT_LINK"
-    mv -f "$temporary_link" "$CURRENT_LINK"
+    rm -f "$CURRENT_LINK" || return 1
+    mv -f "$temporary_link" "$CURRENT_LINK" || return 1
   fi
 }
 
 write_drop_in() {
   drop_in_dir="$(dirname "$DROP_IN")"
-  mkdir -p "$drop_in_dir"
+  mkdir -p "$drop_in_dir" || return 1
   temporary_drop_in="$drop_in_dir/.qmicli.conf.$$"
-  cat > "$temporary_drop_in" <<EOF
-# Managed by install-private-qmicli-debian.sh
-[Service]
-Environment=SMS_RELAYED_QMICLI_PATH=$LOGICAL_CURRENT/bin/qmicli-wrapper
-EOF
-  chmod 644 "$temporary_drop_in"
-  mv "$temporary_drop_in" "$DROP_IN"
+  if ! managed_drop_in_content > "$temporary_drop_in"; then
+    return 1
+  fi
+  chmod 644 "$temporary_drop_in" || return 1
+  mv "$temporary_drop_in" "$DROP_IN" || return 1
 }
 
 restore_previous_state() {
@@ -216,29 +270,54 @@ restore_previous_state() {
   systemctl daemon-reload >/dev/null 2>&1 || true
 }
 
+remove_new_version_after_failure() {
+  if [ "$DEPLOYED_NEW" = "1" ] && is_managed_version_dir "$VERSION_DIR"; then
+    rm -rf "$VERSION_DIR"
+  fi
+}
+
+rollback_install() {
+  old_link="$1"
+  old_drop_in="$2"
+  restore_previous_state "$old_link" "$old_drop_in"
+  remove_new_version_after_failure
+}
+
 install_private_qmicli() {
+  preflight_managed_state
   was_active=0
   service_is_active && was_active=1
   old_link=""
   [ ! -L "$CURRENT_LINK" ] || old_link="$(readlink "$CURRENT_LINK")"
   old_drop_in=""
   if [ -f "$DROP_IN" ]; then
-    STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/sms-relayed-qmicli-state.XXXXXX")"
+    STATE_DIR="$(mktemp -d "/tmp/sms-relayed-qmicli-state.XXXXXX")"
     old_drop_in="$STATE_DIR/qmicli.conf"
     cp "$DROP_IN" "$old_drop_in"
   fi
 
   deploy_version
-  replace_current_link "libqmi-$LIBQMI_VERSION"
-  validate_qmicli "$CURRENT_LINK/bin/qmicli-wrapper" ||
+  if ! validate_qmicli "$VERSION_DIR/bin/qmicli-wrapper"; then
+    remove_new_version_after_failure
     die "installed qmicli does not expose the required IMS actions"
-  write_drop_in
-  systemctl daemon-reload
+  fi
+  if ! replace_current_link "libqmi-$LIBQMI_VERSION"; then
+    rollback_install "$old_link" "$old_drop_in"
+    die "failed to activate the private qmicli symlink"
+  fi
+  if ! write_drop_in; then
+    rollback_install "$old_link" "$old_drop_in"
+    die "failed to write the systemd qmicli binding"
+  fi
+  if ! systemctl daemon-reload; then
+    rollback_install "$old_link" "$old_drop_in"
+    die "systemd daemon-reload failed; restored the previous qmicli binding"
+  fi
 
   if [ "$was_active" = "1" ] && [ "$NO_RESTART" = "0" ]; then
     if ! systemctl restart "$SERVICE"; then
       warn "service restart failed; restoring the previous qmicli binding"
-      restore_previous_state "$old_link" "$old_drop_in"
+      rollback_install "$old_link" "$old_drop_in"
       systemctl restart "$SERVICE" >/dev/null 2>&1 || true
       return 1
     fi
@@ -251,23 +330,79 @@ install_private_qmicli() {
 }
 
 uninstall_private_qmicli() {
+  preflight_managed_state
   was_active=0
   service_is_active && was_active=1
+  staged_link="$DEST_BASE/.libqmi-link.uninstall.$$"
+  staged_version="$DEST_BASE/.libqmi-$LIBQMI_VERSION.uninstall.$$"
+  drop_in_dir="$(dirname "$DROP_IN")"
+  staged_drop_in="$drop_in_dir/.qmicli.conf.uninstall.$$"
+  [ ! -e "$staged_link" ] && [ ! -L "$staged_link" ] ||
+    die "temporary uninstall path already exists: $staged_link"
+  [ ! -e "$staged_version" ] ||
+    die "temporary uninstall path already exists: $staged_version"
+  [ ! -e "$staged_drop_in" ] ||
+    die "temporary uninstall path already exists: $staged_drop_in"
 
-  if [ -L "$CURRENT_LINK" ] &&
+  staged_link_present=0
+  staged_drop_in_present=0
+  staged_version_present=0
+  rollback_uninstall() {
+    if [ "$staged_version_present" = "1" ] && [ ! -e "$VERSION_DIR" ]; then
+      mv "$staged_version" "$VERSION_DIR" || true
+    fi
+    if [ "$staged_drop_in_present" = "1" ] && [ ! -e "$DROP_IN" ]; then
+      mv "$staged_drop_in" "$DROP_IN" || true
+    fi
+    if [ "$staged_link_present" = "1" ] &&
+      [ ! -e "$CURRENT_LINK" ] && [ ! -L "$CURRENT_LINK" ]; then
+      mv "$staged_link" "$CURRENT_LINK" || true
+    fi
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    if [ "$was_active" = "1" ] && [ "$NO_RESTART" = "0" ]; then
+      systemctl restart "$SERVICE" >/dev/null 2>&1 || true
+    fi
+  }
+
+  if is_managed_version_dir "$VERSION_DIR" &&
+    [ -L "$CURRENT_LINK" ] &&
     [ "$(readlink "$CURRENT_LINK")" = "libqmi-$LIBQMI_VERSION" ]; then
-    rm -f "$CURRENT_LINK"
+    if ! mv "$CURRENT_LINK" "$staged_link"; then
+      die "failed to stage the private qmicli symlink for uninstall"
+    fi
+    staged_link_present=1
   fi
-  if [ -f "$DROP_IN" ] &&
-    grep -F "Managed by install-private-qmicli-debian.sh" "$DROP_IN" >/dev/null; then
-    rm -f "$DROP_IN"
+  if is_managed_drop_in; then
+    if ! mv "$DROP_IN" "$staged_drop_in"; then
+      rollback_uninstall
+      die "failed to stage the systemd qmicli binding for uninstall"
+    fi
+    staged_drop_in_present=1
   fi
-  if [ -d "$VERSION_DIR" ]; then
-    rm -rf "$VERSION_DIR"
+  if is_managed_version_dir "$VERSION_DIR"; then
+    if ! mv "$VERSION_DIR" "$staged_version"; then
+      rollback_uninstall
+      die "failed to stage the private qmicli version for uninstall"
+    fi
+    staged_version_present=1
   fi
-  systemctl daemon-reload
-  if [ "$was_active" = "1" ] && [ "$NO_RESTART" = "0" ]; then
-    systemctl restart "$SERVICE"
+  if ! systemctl daemon-reload; then
+    rollback_uninstall
+    die "systemd daemon-reload failed; restored the private qmicli binding"
+  fi
+  if [ "$was_active" = "1" ] && [ "$NO_RESTART" = "0" ] &&
+    ! systemctl restart "$SERVICE"; then
+    warn "service restart failed; restoring the private qmicli binding"
+    rollback_uninstall
+    return 1
+  fi
+
+  [ "$staged_link_present" = "0" ] || rm -f "$staged_link"
+  [ "$staged_drop_in_present" = "0" ] || rm -f "$staged_drop_in"
+  if [ "$staged_version_present" = "1" ]; then
+    is_managed_version_dir "$staged_version" ||
+      die "staged version lost its ownership marker: $staged_version"
+    rm -rf "$staged_version"
   fi
   log "removed private qmicli $LIBQMI_VERSION binding"
 }

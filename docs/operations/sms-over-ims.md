@@ -47,6 +47,8 @@ The helper:
 - builds only direct-QMI support and installs it under
   `/opt/sms-relayed/libqmi-1.36.0`;
 - atomically points `/opt/sms-relayed/libqmi` at that version;
+- marks the version directory as helper-owned and refuses to overwrite
+  conflicting operator-managed paths;
 - writes
   `/etc/systemd/system/sms-relayed.service.d/qmicli.conf` with
   `SMS_RELAYED_QMICLI_PATH`;
@@ -66,6 +68,10 @@ Remove only the private version and managed systemd binding with:
 ```sh
 sudo scripts/install-private-qmicli-debian.sh --uninstall
 ```
+
+Uninstall refuses to recursively remove a version directory without the
+helper's ownership marker. It stages the managed binding and restores it if
+`daemon-reload` or the service restart fails.
 
 ## Verification
 
