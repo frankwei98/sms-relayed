@@ -560,5 +560,9 @@ export const en = {
 		label: "Language",
 		en: "English",
 		zhCN: "简体中文",
+		ja: "日本語",
+		ko: "한국어",
+		fr: "Français",
+		es: "Español",
 	},
 } as const;

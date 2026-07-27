@@ -3,10 +3,14 @@ import LanguageDetector from "i18next-browser-languagedetector";
 import { initReactI18next } from "react-i18next";
 import { en } from "#/locales/en";
 import { zhCN } from "#/locales/zh-CN";
+import { ja } from "#/locales/ja";
+import { ko } from "#/locales/ko";
+import { fr } from "#/locales/fr";
+import { es } from "#/locales/es";
 
 export const DEFAULT_NAMESPACE = "translation";
 export const LANGUAGE_STORAGE_KEY = "sms-relayed.locale";
-export const supportedLanguages = ["en", "zh-CN"] as const;
+export const supportedLanguages = ["en", "zh-CN", "ja", "ko", "fr", "es"] as const;
 
 export type SupportedLanguage = (typeof supportedLanguages)[number];
 
@@ -17,10 +21,33 @@ export const resources = {
 	"zh-CN": {
 		[DEFAULT_NAMESPACE]: zhCN,
 	},
+	ja: {
+		[DEFAULT_NAMESPACE]: ja,
+	},
+	ko: {
+		[DEFAULT_NAMESPACE]: ko,
+	},
+	fr: {
+		[DEFAULT_NAMESPACE]: fr,
+	},
+	es: {
+		[DEFAULT_NAMESPACE]: es,
+	},
 } as const;
 
+const LANGUAGE_ALIASES: Record<string, SupportedLanguage> = {
+	ja: "ja",
+	jp: "ja",
+	ko: "ko",
+	kr: "ko",
+	fr: "fr",
+	es: "es",
+};
+
 export function normalizeLanguage(language: string): SupportedLanguage {
-	return language.toLowerCase().startsWith("zh") ? "zh-CN" : "en";
+	const normalized = language.toLowerCase();
+	if (normalized.startsWith("zh")) return "zh-CN";
+	return LANGUAGE_ALIASES[normalized] ?? "en";
 }
 
 function updateDocumentLanguage(language: string) {

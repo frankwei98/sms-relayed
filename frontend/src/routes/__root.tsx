@@ -14,6 +14,7 @@ import { Button } from "#/components/ui/button";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
+	DropdownMenuGroup,
 	DropdownMenuItem,
 	DropdownMenuLabel,
 	DropdownMenuSeparator,
@@ -24,6 +25,15 @@ import { AuthContext } from "#/lib/auth";
 import i18n, { type SupportedLanguage, supportedLanguages } from "#/lib/i18n";
 
 import "../styles.css";
+
+const languageTranslationKeys = {
+	en: "language.en",
+	"zh-CN": "language.zhCN",
+	ja: "language.ja",
+	ko: "language.ko",
+	fr: "language.fr",
+	es: "language.es",
+} as const satisfies Record<SupportedLanguage, string>;
 
 export const Route = createRootRoute({
 	component: RootComponent,
@@ -156,17 +166,19 @@ function LanguageSwitcher() {
 				<Globe className="size-4" />
 			</DropdownMenuTrigger>
 			<DropdownMenuContent align="end" sideOffset={8}>
-				<DropdownMenuLabel>{t("language.label")}</DropdownMenuLabel>
-				<DropdownMenuSeparator />
-				{supportedLanguages.map((lang) => (
-					<DropdownMenuItem
-						key={lang}
-						disabled={lang === currentLanguage}
-						onClick={() => changeLanguage(lang)}
-					>
-						{t(lang === "en" ? "language.en" : "language.zhCN")}
-					</DropdownMenuItem>
-				))}
+				<DropdownMenuGroup>
+					<DropdownMenuLabel>{t("language.label")}</DropdownMenuLabel>
+					<DropdownMenuSeparator />
+					{supportedLanguages.map((lang) => (
+						<DropdownMenuItem
+							key={lang}
+							disabled={lang === currentLanguage}
+							onClick={() => changeLanguage(lang)}
+						>
+							{t(languageTranslationKeys[lang])}
+						</DropdownMenuItem>
+					))}
+				</DropdownMenuGroup>
 			</DropdownMenuContent>
 		</DropdownMenu>
 	);

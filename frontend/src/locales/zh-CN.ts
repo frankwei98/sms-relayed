@@ -533,5 +533,9 @@ export const zhCN = {
 		label: "语言",
 		en: "English",
 		zhCN: "简体中文",
+		ja: "日本語",
+		ko: "한국어",
+		fr: "Français",
+		es: "Español",
 	},
 } satisfies TranslationShape<typeof en>;
