@@ -15,6 +15,7 @@ dist/
 .DS_Store
 .vscode/
 .idea/
+.pnpm-store/
 
 # OS/editor swap files
 *.swp
