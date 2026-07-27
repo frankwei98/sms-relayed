@@ -380,27 +380,36 @@ function imsDiagnosticMessage(code: string) {
 		modem_disabled: "IMS probing was skipped because the modem is disabled.",
 		qmicli_missing: "qmicli is not installed or could not be executed.",
 		qmicli_path_invalid: "The configured qmicli path is invalid.",
-		qmicli_permission_denied:
+		qmicli_probe_failed: "qmicli capability detection failed.",
+		ims_probe_permission_denied:
 			"qmicli could not be executed due to permissions.",
-		qmi_port_not_found: "No QMI control port was reported by ModemManager.",
+		qmi_port_unavailable: "No QMI control port was reported by ModemManager.",
 		qmi_port_ambiguous: "More than one QMI control port was reported.",
 		qmi_proxy_unavailable: "The QMI proxy is unavailable.",
 		ims_probe_timeout: "The IMS probe exceeded its time budget.",
-		ims_capabilities_missing:
-			"qmicli does not expose the required IMS actions.",
 		ims_services_query_failed: "The IMS service query failed.",
+		ims_services_query_unavailable:
+			"qmicli does not expose the IMS service query.",
 		ims_registration_query_failed: "The IMS registration query failed.",
+		ims_registration_query_unavailable:
+			"qmicli does not expose the IMS registration query.",
 		ims_settings_query_failed: "The IMS settings query failed.",
-		ims_services_unrecognized: "The IMS service response was not recognized.",
-		ims_registration_unrecognized:
+		ims_settings_query_unavailable:
+			"qmicli does not expose the IMS settings query.",
+		ims_services_output_unrecognized:
+			"The IMS service response was not recognized.",
+		ims_registration_output_unrecognized:
 			"The IMS registration response was not recognized.",
-		ims_settings_unrecognized: "The IMS settings response was not recognized.",
-		ims_services_nonstandard:
+		ims_settings_output_unrecognized:
+			"The IMS settings response was not recognized.",
+		ims_services_output_nonstandard:
 			"The IMS service response used a nonstandard label.",
-		ims_registration_nonstandard:
+		ims_registration_output_nonstandard:
 			"The IMS registration response used a nonstandard label.",
-		ims_settings_nonstandard:
+		ims_settings_output_nonstandard:
 			"The IMS settings response used a nonstandard label.",
+		ims_state_inconsistent:
+			"The modem reported inconsistent IMS configuration and runtime state.",
 	};
 	return (
 		messages[code] ?? "Additional IMS diagnostic information is unavailable."
