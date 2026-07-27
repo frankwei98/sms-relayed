@@ -45,6 +45,33 @@ const status = {
 		supported_storages: ["sm"],
 		default_storage: "sm",
 	},
+	sms_over_ims: {
+		status: "available" as const,
+		support: "supported" as const,
+		configured: "enabled" as const,
+		registration: "registered" as const,
+		sms_service: "available" as const,
+		technology: "wlan" as const,
+		probe: {
+			tool: "qmicli",
+			available: true,
+			version_raw: "qmicli 1.36.0",
+			transport: "direct_qmi" as const,
+			device: "/dev/wwan0qmi0",
+			capabilities: {
+				ims_settings: true,
+				imsa_registration: true,
+				imsa_services: true,
+			},
+		},
+		evidence: [
+			"qmi_ims_settings",
+			"qmi_imsa_registration",
+			"qmi_imsa_services",
+		],
+		reasons: [],
+		warnings: [],
+	},
 	diagnostics: {
 		last_error: null,
 		path_drift_candidate: null,
@@ -80,5 +107,58 @@ describe("ModemStatusPanel phone number", () => {
 		expect(
 			screen.queryByRole("button", { name: "Copy phone number" }),
 		).toBeNull();
+	});
+});
+
+describe("ModemStatusPanel SMS over IMS", () => {
+	test("shows available IMS SMS over WLAN with its evidence", async () => {
+		mocks.fetchModemStatus.mockResolvedValue(status);
+
+		render(<ModemStatusPanel />);
+
+		expect(await screen.findByText("SMS over IMS")).toBeTruthy();
+		expect(screen.getByText("Available over WLAN")).toBeTruthy();
+		expect(screen.getByText("QMI IMSA · WLAN")).toBeTruthy();
+	});
+
+	test.each([
+		["available", "wwan", "Available"],
+		["registering", "unknown", "Registering"],
+		["limited", "wwan", "Limited"],
+		["not_registered", "unknown", "Not Registered"],
+		["unavailable", "unknown", "Unavailable"],
+		["unknown", "unknown", "Unknown"],
+	] as const)("shows %s as %s", async (imsStatus, technology, label) => {
+		mocks.fetchModemStatus.mockResolvedValue({
+			...status,
+			sms_over_ims: {
+				...status.sms_over_ims,
+				status: imsStatus,
+				technology,
+			},
+		});
+
+		render(<ModemStatusPanel />);
+
+		expect((await screen.findAllByText(label)).length).toBeGreaterThan(0);
+	});
+
+	test("explains nonstandard modem output without exposing its reason code", async () => {
+		mocks.fetchModemStatus.mockResolvedValue({
+			...status,
+			sms_over_ims: {
+				...status.sms_over_ims,
+				warnings: ["ims_services_nonstandard"],
+			},
+		});
+
+		render(<ModemStatusPanel />);
+
+		expect(
+			await screen.findByText(
+				"The IMS service response used a nonstandard label.",
+			),
+		).toBeTruthy();
+		expect(screen.queryByText("ims_services_nonstandard")).toBeNull();
 	});
 });
