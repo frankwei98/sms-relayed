@@ -103,7 +103,7 @@ describe("ModemStatusPanel phone number", () => {
 
 		render(<ModemStatusPanel />);
 
-		expect(await screen.findByText("not reported")).toBeTruthy();
+		expect(await screen.findByText("Not reported")).toBeTruthy();
 		expect(
 			screen.queryByRole("button", { name: "Copy phone number" }),
 		).toBeNull();

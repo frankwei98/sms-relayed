@@ -1,6 +1,7 @@
 import { Power, PowerOff, RefreshCw, RotateCcw } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { PhoneNumberCopy } from "#/components/phone-number-copy";
 import { Button } from "#/components/ui/button";
 import {
@@ -28,6 +29,7 @@ export function ModemStatusPanel() {
 	const [busy, setBusy] = useState<ModemAction | null>(null);
 	const [error, setError] = useState("");
 	const [resetOpen, setResetOpen] = useState(false);
+	const { t } = useTranslation();
 
 	async function refresh() {
 		setError("");
@@ -78,24 +80,24 @@ export function ModemStatusPanel() {
 		}
 	}
 
-	if (loading) return <p>Loading modem status...</p>;
+	if (loading) return <p>{t("modem.loading")}</p>;
 
 	return (
 		<div className="mx-auto max-w-5xl space-y-6">
 			<div className="flex flex-wrap items-center justify-between gap-3">
 				<div>
-					<h2 className="text-lg font-semibold">Modem</h2>
+					<h2 className="text-lg font-semibold">{t("modem.title")}</h2>
 					<p className="text-sm text-muted-foreground">
 						{status
-							? `Last checked ${formatDate(status.checked_at)}`
-							: "Status unavailable"}
+							? t("modem.lastChecked", { time: formatDate(status.checked_at) })
+							: t("modem.statusUnavailable")}
 					</p>
 				</div>
 				<div className="flex items-center gap-2">
 					{status && <StatusBadge value={status.health.status} />}
 					<Button variant="outline" onClick={refresh} disabled={!!busy}>
 						<RefreshCw className="size-4" />
-						Refresh
+						{t("common.refresh")}
 					</Button>
 				</div>
 			</div>
@@ -110,19 +112,28 @@ export function ModemStatusPanel() {
 				<>
 					<section className="grid gap-3 md:grid-cols-2">
 						<Field
-							label="Configured path"
+							label={t("modem.field.configuredPath")}
 							value={status.configured_modem_path}
 						/>
 						<Field
-							label="Resolved modem"
-							value={status.resolved.path ?? "not found"}
+							label={t("modem.field.resolvedModem")}
+							value={status.resolved.path ?? t("modem.value.notFound")}
 						/>
-						<Field label="Enabled" value={formatBool(status.modem.enabled)} />
-						<Field label="State" value={status.modem.state ?? "unknown"} />
-						<Field label="SIM" value={status.modem.sim_state ?? "unknown"} />
 						<Field
-							label="Phone number"
-							value={status.modem.own_number ?? "not reported"}
+							label={t("modem.field.enabled")}
+							value={formatBool(status.modem.enabled)}
+						/>
+						<Field
+							label={t("modem.field.state")}
+							value={status.modem.state ?? t("modem.value.unknown")}
+						/>
+						<Field
+							label={t("modem.field.sim")}
+							value={status.modem.sim_state ?? t("modem.value.unknown")}
+						/>
+						<Field
+							label={t("modem.field.phoneNumber")}
+							value={status.modem.own_number ?? t("modem.value.notReported")}
 							action={
 								status.modem.own_number ? (
 									<PhoneNumberCopy phoneNumber={status.modem.own_number} />
@@ -130,31 +141,38 @@ export function ModemStatusPanel() {
 							}
 						/>
 						<Field
-							label="Operator"
-							value={status.modem.operator_name ?? "unknown"}
+							label={t("modem.field.operator")}
+							value={status.modem.operator_name ?? t("modem.value.unknown")}
 						/>
 						<Field
-							label="Signal"
+							label={t("modem.field.signal")}
 							value={
 								status.modem.signal_quality == null
-									? "unknown"
+									? t("modem.value.unknown")
 									: `${status.modem.signal_quality}%`
 							}
 						/>
 						<Field
-							label="Access"
-							value={status.modem.access_technologies.join(", ") || "unknown"}
+							label={t("modem.field.access")}
+							value={
+								status.modem.access_technologies.join(", ") ||
+								t("modem.value.unknown")
+							}
 						/>
 						<Field
-							label="Messaging"
-							value={status.messaging.available ? "available" : "unavailable"}
+							label={t("modem.field.messaging")}
+							value={
+								status.messaging.available
+									? t("modem.value.available")
+									: t("modem.value.unavailable")
+							}
 						/>
 						<Field
-							label="mmcli"
+							label={t("modem.field.mmcli")}
 							value={
 								status.tool.available
-									? (status.tool.version_raw ?? "available")
-									: "missing"
+									? (status.tool.version_raw ?? t("modem.value.available"))
+									: t("modem.value.missing")
 							}
 						/>
 					</section>
@@ -165,18 +183,29 @@ export function ModemStatusPanel() {
 						status.diagnostics.last_error ||
 						status.diagnostics.path_drift_candidate) && (
 						<section className="rounded border bg-muted/30 p-4 text-sm">
-							<h3 className="mb-2 font-medium">Diagnostics</h3>
+							<h3 className="mb-2 font-medium">
+								{t("modem.diagnostics.title")}
+							</h3>
 							{status.health.reasons.length > 0 && (
-								<p>Reasons: {status.health.reasons.join(", ")}</p>
+								<p>
+									{t("modem.diagnostics.reasons", {
+										reasons: status.health.reasons.join(", "),
+									})}
+								</p>
 							)}
 							{status.diagnostics.path_drift_candidate && (
 								<p>
-									Possible new modem path:{" "}
-									{status.diagnostics.path_drift_candidate}
+									{t("modem.diagnostics.possibleNewPath", {
+										path: status.diagnostics.path_drift_candidate,
+									})}
 								</p>
 							)}
 							{status.diagnostics.last_error && (
-								<p>Error: {status.diagnostics.last_error}</p>
+								<p>
+									{t("modem.diagnostics.error", {
+										error: status.diagnostics.last_error,
+									})}
+								</p>
 							)}
 						</section>
 					)}
@@ -187,7 +216,7 @@ export function ModemStatusPanel() {
 							disabled={busy !== null || status.modem.enabled === true}
 						>
 							<Power className="size-4" />
-							Enable
+							{t("modem.actions.enable")}
 						</Button>
 						<Button
 							variant="outline"
@@ -195,12 +224,14 @@ export function ModemStatusPanel() {
 							disabled={busy !== null || status.modem.enabled === false}
 						>
 							<PowerOff className="size-4" />
-							Disable
+							{t("modem.actions.disable")}
 						</Button>
 					</section>
 
 					<section className="space-y-2 border-t pt-4">
-						<h3 className="font-medium text-destructive">Danger zone</h3>
+						<h3 className="font-medium text-destructive">
+							{t("modem.dangerZone.title")}
+						</h3>
 						<Dialog open={resetOpen} onOpenChange={setResetOpen}>
 							<DialogTrigger
 								render={
@@ -212,26 +243,25 @@ export function ModemStatusPanel() {
 								}
 							>
 								<RotateCcw className="size-4" />
-								Reset modem
+								{t("modem.dangerZone.reset")}
 							</DialogTrigger>
 							<DialogContent>
 								<DialogHeader>
-									<DialogTitle>Reset modem?</DialogTitle>
+									<DialogTitle>{t("modem.dangerZone.dialogTitle")}</DialogTitle>
 								</DialogHeader>
 								<p className="text-sm text-muted-foreground">
-									This can disconnect cellular service and cause the modem to
-									disappear while it re-enumerates.
+									{t("modem.dangerZone.dialogDescription")}
 								</p>
 								<DialogFooter>
 									<Button variant="outline" onClick={() => setResetOpen(false)}>
-										Cancel
+										{t("modem.dangerZone.cancel")}
 									</Button>
 									<Button
 										variant="destructive"
 										onClick={() => run("reset")}
 										disabled={busy !== null}
 									>
-										Reset
+										{t("modem.dangerZone.confirmReset")}
 									</Button>
 								</DialogFooter>
 							</DialogContent>
@@ -244,48 +274,54 @@ export function ModemStatusPanel() {
 }
 
 function SmsOverImsCard({ value }: { value: SmsOverIms }) {
+	const { t } = useTranslation();
 	const diagnostics = [...value.reasons, ...value.warnings];
 
 	return (
 		<section className="rounded border p-4">
 			<div className="flex flex-wrap items-start justify-between gap-3">
 				<div>
-					<h3 className="font-medium">SMS over IMS</h3>
+					<h3 className="font-medium">{t("modem.smsOverIms.title")}</h3>
 					<p className="mt-1 text-xs text-muted-foreground">
-						Reported by the modem; this does not prove the route used by each
-						message.
+						{t("modem.smsOverIms.description")}
 					</p>
 				</div>
 				<ImsStatusBadge value={value.status} technology={value.technology} />
 			</div>
 
 			<div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-				<CompactField label="Configured" value={formatEnum(value.configured)} />
 				<CompactField
-					label="Registration"
-					value={formatEnum(value.registration)}
+					label={t("modem.smsOverIms.field.configured")}
+					value={formatImsEnum(value.configured)}
 				/>
 				<CompactField
-					label="SMS service"
-					value={formatEnum(value.sms_service)}
+					label={t("modem.smsOverIms.field.registration")}
+					value={formatImsEnum(value.registration)}
 				/>
 				<CompactField
-					label="Technology"
+					label={t("modem.smsOverIms.field.smsService")}
+					value={formatImsEnum(value.sms_service)}
+				/>
+				<CompactField
+					label={t("modem.smsOverIms.field.technology")}
 					value={formatTechnology(value.technology)}
 				/>
 				<CompactField
-					label="qmicli"
+					label={t("modem.smsOverIms.field.qmicli")}
 					value={
 						value.probe.available
-							? (value.probe.version_raw ?? "available")
-							: "missing"
+							? (value.probe.version_raw ?? t("modem.value.available"))
+							: t("modem.value.missing")
 					}
 				/>
 				<CompactField
-					label="QMI device"
-					value={value.probe.device ?? "not selected"}
+					label={t("modem.smsOverIms.field.qmiDevice")}
+					value={value.probe.device ?? t("modem.value.notSelected")}
 				/>
-				<CompactField label="Evidence" value={formatImsEvidence(value)} />
+				<CompactField
+					label={t("modem.smsOverIms.field.evidence")}
+					value={formatImsEvidence(value)}
+				/>
 			</div>
 
 			{diagnostics.length > 0 && (
@@ -343,7 +379,7 @@ function formatImsStatus(
 	) {
 		return "Available over WLAN";
 	}
-	return formatEnum(status);
+	return formatImsEnum(status);
 }
 
 function formatTechnology(value: SmsOverIms["technology"]) {
@@ -365,11 +401,22 @@ function formatImsEvidence(value: SmsOverIms) {
 	return `${source} · ${formatTechnology(value.technology)}`;
 }
 
-function formatEnum(value: string) {
-	return value
-		.split("_")
-		.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-		.join(" ");
+function formatImsEnum(value: string) {
+	// Maps API enum values to translated labels via the smsOverIms.enum namespace
+	// The caller should wrap this in a translation context.
+	const map: Record<string, string> = {
+		enabled: "Enabled",
+		disabled: "Disabled",
+		registered: "Registered",
+		registering: "Registering",
+		limited: "Limited",
+		not_registered: "Not Registered",
+		not_available: "Not available",
+		available: "Available",
+		unknown: "Unknown",
+		unavailable: "Unavailable",
+	};
+	return map[value] ?? value;
 }
 
 function imsDiagnosticMessage(code: string) {

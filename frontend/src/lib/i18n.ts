@@ -29,7 +29,7 @@ function updateDocumentLanguage(language: string) {
 
 i18n.on("languageChanged", updateDocumentLanguage);
 
-void i18n
+export const initPromise = i18n
 	.use(LanguageDetector)
 	.use(initReactI18next)
 	.init({
