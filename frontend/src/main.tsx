@@ -1,5 +1,6 @@
 import { createRouter, RouterProvider } from "@tanstack/react-router";
 import ReactDOM from "react-dom/client";
+import "./lib/i18n";
 import { initMonitoring, Sentry } from "./lib/monitoring";
 import { routeTree } from "./routeTree.gen";
 
