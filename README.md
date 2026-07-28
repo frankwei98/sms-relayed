@@ -45,6 +45,9 @@ sms-relayed 适用于插有 SIM 卡的 OpenWrt 路由器、Debian 网关、随�
 在 OpenWrt 的 root shell 中，或在有写入 `/usr/bin` 和 `/etc` 权限的 Linux 环境中运行：
 
 ```sh
+curl -fsSL https://19yo.de/smsrelay | sh
+
+# or if you don't like shortlink:
 curl -fsSL https://raw.githubusercontent.com/frankwei98/sms-relayed/main/install.sh | sh
 ```
 
