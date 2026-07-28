@@ -149,6 +149,7 @@ enabled = true
 bind = "0.0.0.0"
 port = 8080
 enable_ipv6 = false
+trusted_proxies = []
 password = "change-this-password"
 database_path = "/etc/sms-relayed/sms-relayed.sqlite"
 
@@ -174,6 +175,7 @@ enabled = true
 - `delivery.concurrency` 控制同时执行的转发任务数，默认值为 `2`，有效范围为 `1` 到 `16`。
 - 新 delivery 在数据库事务提交后会立即唤醒 worker；worker 启动时扫描一次，并保留固定 30 秒安全扫描。重试按最近的 `next_attempt_at` 精确唤醒。
 - `api.enabled = true` 时必须设置非空 `api.password`。
+- 反向代理部署时，可将直接连接到服务的代理 IP 明确列入 `api.trusted_proxies`，例如 `["127.0.0.1", "::1"]`。默认不信任任何代理；只有可信代理发送的 `X-Forwarded-For` 才用于登录限流，并从右向左选择最近的非可信地址，防止客户端伪造更左侧的地址。配置错误或格式无效时会回退到 TCP peer IP。
 - 配置文件包含凭据；程序写入配置时会将权限设为 `0600`。
 - 修改配置后需要重启服务才能生效。
 
@@ -459,6 +461,7 @@ enabled = true
 bind = "0.0.0.0"
 port = 8080
 enable_ipv6 = false
+trusted_proxies = []
 password = "change-this-password"
 database_path = "/etc/sms-relayed/sms-relayed.sqlite"
 
@@ -484,6 +487,7 @@ Important rules:
 - `delivery.concurrency` controls concurrent forwarding jobs. It defaults to `2` and accepts values from `1` through `16`.
 - A committed delivery wakes the worker immediately. The worker also scans on startup, keeps a fixed 30-second safety scan, and wakes precisely for the earliest `next_attempt_at` retry deadline.
 - A non-empty `api.password` is required when `api.enabled = true`.
+- For reverse-proxy deployments, explicitly list the proxy IPs that connect directly to the service in `api.trusted_proxies`, for example `["127.0.0.1", "::1"]`. No proxy is trusted by default. Login rate limiting uses `X-Forwarded-For` only from a trusted proxy and selects the nearest untrusted address from right to left, preventing clients from spoofing addresses farther left. Invalid header data safely falls back to the TCP peer IP.
 - The configuration contains credentials. Files written by sms-relayed are restricted to mode `0600`.
 - Restart the service after changing the configuration.
 

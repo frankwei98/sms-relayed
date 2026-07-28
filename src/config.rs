@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -139,6 +140,8 @@ pub struct ApiSection {
     #[serde(default)]
     pub enable_ipv6: bool,
     #[serde(default)]
+    pub trusted_proxies: Vec<IpAddr>,
+    #[serde(default)]
     pub password: String,
     #[serde(default = "default_database_path")]
     pub database_path: String,
@@ -167,6 +170,7 @@ impl Default for ApiSection {
             bind: default_api_bind(),
             port: default_api_port(),
             enable_ipv6: false,
+            trusted_proxies: Vec::new(),
             password: String::new(),
             database_path: default_database_path(),
         }
@@ -1189,7 +1193,20 @@ mod tests {
         assert_eq!(cfg.api.bind, "0.0.0.0");
         assert_eq!(cfg.api.port, 8080);
         assert!(!cfg.api.enable_ipv6);
+        assert!(cfg.api.trusted_proxies.is_empty());
         assert_eq!(cfg.api.database_path, "/etc/sms-relayed/sms-relayed.sqlite");
+    }
+
+    #[test]
+    fn api_config_accepts_explicit_trusted_proxy_addresses() {
+        let mut cfg = AppConfig::default();
+        cfg.api.trusted_proxies =
+            vec!["127.0.0.1".parse().unwrap(), "2001:db8::1".parse().unwrap()];
+
+        let encoded = cfg.canonical_toml().unwrap();
+        let decoded: AppConfig = toml::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded.api.trusted_proxies, cfg.api.trusted_proxies);
     }
 
     #[test]

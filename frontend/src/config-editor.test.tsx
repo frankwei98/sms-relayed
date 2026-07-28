@@ -82,6 +82,7 @@ const baseConfig: AppConfig = {
 		bind: "0.0.0.0",
 		port: 8080,
 		enable_ipv6: false,
+		trusted_proxies: ["127.0.0.1"],
 		password: "old-password",
 		database_path: "/tmp/sms-relayed.sqlite",
 	},
@@ -365,6 +366,7 @@ describe("ConfigEditor workspace", () => {
 		expect(submitted.delivery).toEqual({ concurrency: 2 });
 		expect(submitted.http.request_timeout_secs).toBe(30);
 		expect(submitted.retention.max_age_days).toBe(90);
+		expect(submitted.api.trusted_proxies).toEqual(["127.0.0.1"]);
 
 		fireEvent.change(screen.getByLabelText("Device name"), {
 			target: { value: "relay-three" },

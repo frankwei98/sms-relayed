@@ -41,6 +41,7 @@ export type AppConfig = {
 		bind: string;
 		port: number;
 		enable_ipv6: boolean;
+		trusted_proxies: string[];
 		password: string;
 		database_path: string;
 	};

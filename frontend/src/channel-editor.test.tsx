@@ -37,6 +37,7 @@ const config: AppConfig = {
 		bind: "0.0.0.0",
 		port: 8080,
 		enable_ipv6: false,
+		trusted_proxies: [],
 		password: "password",
 		database_path: "/tmp/sms-relayed.sqlite",
 	},

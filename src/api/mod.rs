@@ -570,6 +570,18 @@ mod route_tests {
         request
     }
 
+    fn proxied_login_request(
+        password: &str,
+        peer: std::net::SocketAddr,
+        forwarded_for: &str,
+    ) -> Request<Body> {
+        let mut request = login_request(password, peer);
+        request
+            .headers_mut()
+            .insert("x-forwarded-for", forwarded_for.parse().unwrap());
+        request
+    }
+
     #[tokio::test]
     async fn login_rate_limits_repeated_failures_per_client() {
         let app = router(test_state());
@@ -594,6 +606,124 @@ mod route_tests {
 
         let response = app
             .oneshot(login_request("secret", other_client))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn login_rate_limit_distinguishes_clients_behind_a_trusted_proxy() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config)
+            .api
+            .trusted_proxies
+            .push("192.0.2.1".parse().unwrap());
+        let app = router(state);
+        let proxy = "192.0.2.1:1234".parse().unwrap();
+
+        for _ in 0..5 {
+            let response = app
+                .clone()
+                .oneshot(proxied_login_request("wrong", proxy, "198.51.100.10"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let response = app
+            .clone()
+            .oneshot(proxied_login_request("wrong", proxy, "198.51.100.10"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let response = app
+            .oneshot(proxied_login_request("secret", proxy, "198.51.100.11"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn login_rate_limit_ignores_forwarded_for_from_an_untrusted_peer() {
+        let app = router(test_state());
+        let peer = "192.0.2.20:1234".parse().unwrap();
+
+        for suffix in 1..=5 {
+            let response = app
+                .clone()
+                .oneshot(proxied_login_request(
+                    "wrong",
+                    peer,
+                    &format!("198.51.100.{suffix}"),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let response = app
+            .oneshot(proxied_login_request("secret", peer, "198.51.100.6"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn trusted_proxy_uses_the_nearest_untrusted_forwarded_address() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config)
+            .api
+            .trusted_proxies
+            .push("192.0.2.1".parse().unwrap());
+        let app = router(state);
+        let proxy = "192.0.2.1:1234".parse().unwrap();
+
+        for suffix in 1..=5 {
+            let response = app
+                .clone()
+                .oneshot(proxied_login_request(
+                    "wrong",
+                    proxy,
+                    &format!("203.0.113.{suffix}, 198.51.100.10"),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let response = app
+            .oneshot(proxied_login_request(
+                "secret",
+                proxy,
+                "203.0.113.6, 198.51.100.10",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn trusted_ipv4_proxy_matches_an_ipv4_mapped_ipv6_peer() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config)
+            .api
+            .trusted_proxies
+            .push("192.0.2.1".parse().unwrap());
+        let app = router(state);
+        let proxy = "[::ffff:192.0.2.1]:1234".parse().unwrap();
+
+        for _ in 0..5 {
+            let response = app
+                .clone()
+                .oneshot(proxied_login_request("wrong", proxy, "198.51.100.10"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let response = app
+            .oneshot(proxied_login_request("secret", proxy, "198.51.100.11"))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
