@@ -16,6 +16,7 @@ export const ja = {
 		ariaBackConfig: "設定に戻る",
 		ariaConfigCategories: "設定カテゴリ",
 		ariaUnsavedChanges: "未保存の変更",
+		logout: "ログアウト",
 	},
 	common: {
 		refresh: "更新",
@@ -309,6 +310,15 @@ export const ja = {
 			noMatching: "一致するメッセージがありません",
 			noMatchingDescription:
 				"フィルターを調整するか、次のSMSイベントを待ってください。",
+		},
+		error: {
+			load: "メッセージを読み込めませんでした。",
+			markRead: "メッセージを既読にできませんでした。もう一度お試しください。",
+			update: "メッセージを更新できませんでした。もう一度お試しください。",
+			delete: "メッセージを削除できませんでした。もう一度お試しください。",
+			loadOlder:
+				"以前のメッセージを読み込めませんでした。もう一度お試しください。",
+			refresh: "メッセージを更新できませんでした。もう一度お試しください。",
 		},
 		thread: {
 			loadingOlder: "古いメッセージを読み込んでいます",

@@ -16,7 +16,10 @@ const mocks = vi.hoisted(() => ({
 	navigate: vi.fn(),
 }));
 
-vi.mock("#/lib/api", () => ({ apiFetch: mocks.apiFetch }));
+vi.mock("#/lib/api", () => ({
+	apiFetch: mocks.apiFetch,
+	AUTH_UNAUTHORIZED_EVENT: "sms-relayed:unauthorized",
+}));
 vi.mock("@tanstack/react-devtools", () => ({
 	TanStackDevtools: () => null,
 }));

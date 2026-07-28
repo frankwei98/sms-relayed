@@ -7,7 +7,7 @@ import {
 	useNavigate,
 } from "@tanstack/react-router";
 import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools";
-import { Globe } from "lucide-react";
+import { Globe, LogOut } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "#/components/ui/button";
@@ -20,7 +20,7 @@ import {
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "#/components/ui/dropdown-menu";
-import { type AuthState, apiFetch } from "#/lib/api";
+import { AUTH_UNAUTHORIZED_EVENT, type AuthState, apiFetch } from "#/lib/api";
 import { AuthContext } from "#/lib/auth";
 import i18n, { type SupportedLanguage, supportedLanguages } from "#/lib/i18n";
 
@@ -52,6 +52,13 @@ function RootComponent() {
 	}, []);
 
 	useEffect(() => {
+		const handleUnauthorized = () => setAuth({ authenticated: false });
+		window.addEventListener(AUTH_UNAUTHORIZED_EVENT, handleUnauthorized);
+		return () =>
+			window.removeEventListener(AUTH_UNAUTHORIZED_EVENT, handleUnauthorized);
+	}, []);
+
+	useEffect(() => {
 		if (auth && !auth.authenticated && location.pathname !== "/login") {
 			navigate({ to: "/login" });
 		}
@@ -74,6 +81,19 @@ function RootComponent() {
 				/>
 			</AuthContext.Provider>
 		);
+	}
+
+	if (!auth.authenticated) return null;
+
+	async function logout() {
+		try {
+			await apiFetch("/api/auth/logout", { method: "POST" });
+		} catch {
+			// Local logout must still hide authenticated data if the server is unreachable.
+		} finally {
+			setAuth({ authenticated: false });
+			navigate({ to: "/login" });
+		}
 	}
 
 	const isWorkspace = ["/", "/forwarding", "/config"].includes(
@@ -124,7 +144,19 @@ function RootComponent() {
 							{t("nav.config")}
 						</Link>
 					</nav>
-					<LanguageSwitcher />
+					<div className="flex shrink-0 items-center gap-1">
+						<LanguageSwitcher />
+						<Button
+							type="button"
+							variant="ghost"
+							size="sm"
+							aria-label={t("header.logout")}
+							onClick={() => void logout()}
+						>
+							<LogOut />
+							<span className="hidden sm:inline">{t("header.logout")}</span>
+						</Button>
+					</div>
 				</header>
 				<main className={mainClassName}>
 					<Outlet />

@@ -16,6 +16,7 @@ export const ko = {
 		ariaBackConfig: "구성으로 돌아가기",
 		ariaConfigCategories: "구성 범주",
 		ariaUnsavedChanges: "저장하지 않은 변경 사항",
+		logout: "로그아웃",
 	},
 	common: {
 		refresh: "새로 고침",
@@ -307,6 +308,14 @@ export const ko = {
 			noMatching: "일치하는 메시지 없음",
 			noMatchingDescription:
 				"필터를 조정하거나 다음 SMS 이벤트를 기다려 주세요.",
+		},
+		error: {
+			load: "메시지를 불러올 수 없습니다.",
+			markRead: "메시지를 읽음으로 표시할 수 없습니다. 다시 시도하세요.",
+			update: "메시지를 업데이트할 수 없습니다. 다시 시도하세요.",
+			delete: "메시지를 삭제할 수 없습니다. 다시 시도하세요.",
+			loadOlder: "이전 메시지를 불러올 수 없습니다. 다시 시도하세요.",
+			refresh: "메시지를 새로 고칠 수 없습니다. 다시 시도하세요.",
 		},
 		thread: {
 			loadingOlder: "이전 메시지를 불러오는 중",

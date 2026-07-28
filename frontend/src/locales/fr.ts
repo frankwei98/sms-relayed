@@ -16,6 +16,7 @@ export const fr = {
 		ariaBackConfig: "Retour à la configuration",
 		ariaConfigCategories: "Catégories de configuration",
 		ariaUnsavedChanges: "Modifications non enregistrées",
+		logout: "Déconnexion",
 	},
 	common: {
 		refresh: "Actualiser",
@@ -318,6 +319,14 @@ export const fr = {
 			noMatching: "Aucun message correspondant",
 			noMatchingDescription:
 				"Ajustez les filtres ou attendez le prochain événement SMS.",
+		},
+		error: {
+			load: "Impossible de charger les messages.",
+			markRead: "Impossible de marquer les messages comme lus. Réessayez.",
+			update: "Impossible de mettre à jour les messages. Réessayez.",
+			delete: "Impossible de supprimer les messages. Réessayez.",
+			loadOlder: "Impossible de charger les messages précédents. Réessayez.",
+			refresh: "Impossible d’actualiser les messages. Réessayez.",
 		},
 		thread: {
 			loadingOlder: "Chargement des messages plus anciens",

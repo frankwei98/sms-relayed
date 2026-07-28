@@ -10,6 +10,7 @@ export const en = {
 		ariaBackConfig: "Back to configuration",
 		ariaConfigCategories: "Config categories",
 		ariaUnsavedChanges: "Unsaved changes",
+		logout: "Logout",
 	},
 	common: {
 		refresh: "Refresh",
@@ -306,6 +307,14 @@ export const en = {
 			messages: "{{count}} messages",
 			noMatching: "No matching messages",
 			noMatchingDescription: "Adjust filters or wait for the next SMS event.",
+		},
+		error: {
+			load: "Messages could not be loaded.",
+			markRead: "Could not mark messages as read. Try again.",
+			update: "Could not update messages. Try again.",
+			delete: "Could not delete messages. Try again.",
+			loadOlder: "Could not load older messages. Try again.",
+			refresh: "Could not refresh messages. Try again.",
 		},
 		thread: {
 			loadingOlder: "Loading older messages",

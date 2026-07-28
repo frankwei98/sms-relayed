@@ -16,6 +16,7 @@ export const zhCN = {
 		ariaBackConfig: "返回配置",
 		ariaConfigCategories: "配置分类",
 		ariaUnsavedChanges: "未保存的更改",
+		logout: "退出登录",
 	},
 	common: {
 		refresh: "刷新",
@@ -294,6 +295,14 @@ export const zhCN = {
 			messages: "{{count}} 条消息",
 			noMatching: "无匹配消息",
 			noMatchingDescription: "调整筛选条件或等待下一条短信。",
+		},
+		error: {
+			load: "无法加载短信。",
+			markRead: "无法将短信标记为已读，请重试。",
+			update: "无法更新短信，请重试。",
+			delete: "无法删除短信，请重试。",
+			loadOlder: "无法加载更早的短信，请重试。",
+			refresh: "无法刷新短信，请重试。",
 		},
 		thread: {
 			loadingOlder: "正在加载更早的消息",
