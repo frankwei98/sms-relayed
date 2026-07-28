@@ -409,6 +409,7 @@ export const zhCN = {
 			passwordChange: "保存并安排重启后，所有会话将被登出。",
 			apiDisable: "重启后仪表盘将不可用。",
 			apiEndpointChange: "重启后仪表盘地址可能更改。",
+			trustedProxiesChange: "重启后，登录限流将使用更新后的可信代理列表。",
 			databasePathChange: "重启后服务将使用不同的消息数据库。",
 			webhookGet: "GET Webhook URL 可能会在访问日志中泄露发送者和短信内容。",
 		},

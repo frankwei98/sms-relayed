@@ -439,6 +439,8 @@ export const fr = {
 			apiDisable: "Le tableau de bord sera indisponible après le redémarrage.",
 			apiEndpointChange:
 				"L'adresse du tableau de bord peut changer après le redémarrage.",
+			trustedProxiesChange:
+				"Après le redémarrage, la limitation des tentatives de connexion utilisera la liste mise à jour des proxys de confiance.",
 			databasePathChange:
 				"Le service utilisera une base de données de messages différente après le redémarrage.",
 			webhookGet:

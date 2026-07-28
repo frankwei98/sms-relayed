@@ -593,6 +593,21 @@ describe("ConfigEditor workspace", () => {
 		expect(await screen.findByText("future_warning")).toBeTruthy();
 	});
 
+	test("describes when trusted proxy changes take effect", async () => {
+		installApi({ warnings: ["trusted_proxies_change"] });
+		render(<EditorHarness />);
+
+		fireEvent.change(await screen.findByLabelText("Device name"), {
+			target: { value: "relay-two" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "Save" }));
+		expect(
+			await screen.findByText(
+				"Login rate limiting will use the updated trusted proxy list after restart.",
+			),
+		).toBeTruthy();
+	});
+
 	test.each([
 		["Stay", "reset"],
 		["Discard and leave", "proceed"],

@@ -464,6 +464,7 @@ function SaveReviewDialog({
 		password_change: t("config.warnings.passwordChange"),
 		api_disable: t("config.warnings.apiDisable"),
 		api_endpoint_change: t("config.warnings.apiEndpointChange"),
+		trusted_proxies_change: t("config.warnings.trustedProxiesChange"),
 		database_path_change: t("config.warnings.databasePathChange"),
 		webhook_get: t("config.warnings.webhookGet"),
 	};

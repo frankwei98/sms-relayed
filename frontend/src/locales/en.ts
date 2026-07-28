@@ -425,6 +425,8 @@ export const en = {
 				"All sessions will be signed out after Save + Restart is scheduled.",
 			apiDisable: "The dashboard will be unavailable after restart.",
 			apiEndpointChange: "The dashboard address may change after restart.",
+			trustedProxiesChange:
+				"Login rate limiting will use the updated trusted proxy list after restart.",
 			databasePathChange:
 				"The service will use a different message database after restart.",
 			webhookGet:
