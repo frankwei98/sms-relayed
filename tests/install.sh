@@ -106,3 +106,26 @@ if [ -n "$(find "$untrusted_tmp" -mindepth 1 -print -quit)" ]; then
   exit 1
 fi
 cmp "$fixture_binary" "$atomic_bin_dir/sms-relayed"
+
+systemd_root="$test_dir/systemd-root"
+ROOT="$systemd_root"
+BIN_DIR="/usr/bin"
+CONFIG_DIR="/etc/sms-relayed"
+write_systemd_service
+systemd_unit="$systemd_root/etc/systemd/system/sms-relayed.service"
+
+for directive in \
+  "NoNewPrivileges=true" \
+  "ProtectHome=true" \
+  "PrivateTmp=true" \
+  "UMask=0077"
+do
+  if ! awk '
+    $0 == "[Service]" { in_service = 1; next }
+    /^\[/ { in_service = 0 }
+    in_service { print }
+  ' "$systemd_unit" | grep -Fqx "$directive"; then
+    echo "expected systemd [Service] section to contain $directive" >&2
+    exit 1
+  fi
+done
