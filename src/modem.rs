@@ -984,7 +984,6 @@ impl ModemService {
 
     pub async fn run_action(
         &self,
-        configured_path: &str,
         session_token: &str,
         action: ModemAction,
     ) -> Result<ActionResponse, ModemError> {
@@ -994,6 +993,12 @@ impl ModemService {
                 "another modem action is running",
             ));
         };
+        let verified_path = self.verified_path().ok_or_else(|| {
+            ModemError::new(
+                "modem_path_unresolved",
+                "no verified modem path is available",
+            )
+        })?;
         if matches!(action, ModemAction::Reset) {
             self.can_reset(session_token).await?;
         }
@@ -1001,8 +1006,7 @@ impl ModemService {
         if !tool.available {
             return Err(ModemError::new("mmcli_missing", "mmcli is not available"));
         }
-        let id = self.resolve_target(configured_path, &tool).await?;
-        let args = ["--modem", id.as_str(), action.flag()];
+        let args = ["--modem", verified_path.as_str(), action.flag()];
         let output = self.runner.run(&args, MMCLI_TIMEOUT).await?;
         if !output.status_success {
             return Err(ModemError::new("modem_action_failed", output.stderr));
@@ -1054,23 +1058,6 @@ impl ModemService {
         };
         *self.capabilities.lock().unwrap() = Some(tool.clone());
         tool
-    }
-
-    async fn resolve_target(
-        &self,
-        configured_path: &str,
-        _tool: &ToolInfo,
-    ) -> Result<String, ModemError> {
-        if self
-            .runner
-            .run(&["--modem", configured_path], MMCLI_TIMEOUT)
-            .await
-            .map(|o| o.status_success)
-            .unwrap_or(false)
-        {
-            return Ok(configured_path.to_string());
-        }
-        self.resolve_id(configured_path).await
     }
 
     async fn resolve_id(&self, configured_path: &str) -> Result<String, ModemError> {
@@ -1767,15 +1754,72 @@ mod service_tests {
         let service = ModemService::new_with_runner(runner);
         let _guard = service.action_lock.try_lock().unwrap();
         let err = service
-            .run_action(
-                "/org/freedesktop/ModemManager1/Modem/0",
-                "session-a",
-                ModemAction::Enable,
-            )
+            .run_action("session-a", ModemAction::Enable)
             .await
             .unwrap_err();
 
         assert_eq!(err.code(), "action_in_progress");
+    }
+
+    #[tokio::test]
+    async fn reset_without_verified_path_is_rejected_without_running_or_rate_limiting() {
+        let verified_path = "/org/freedesktop/ModemManager1/Modem/7";
+        let runner = FakeRunner::new(vec![
+            Ok(out("mmcli 1.22.0\n")),
+            Ok(out("successfully reset the modem\n")),
+        ]);
+        let service = ModemService::new_with_runner(runner.clone());
+
+        let err = service
+            .run_action("session-a", ModemAction::Reset)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), "modem_path_unresolved");
+        assert!(runner.calls().is_empty());
+
+        service.set_verified_path(Some(verified_path.to_string()));
+        assert!(
+            service
+                .run_action("session-a", ModemAction::Reset)
+                .await
+                .is_ok(),
+            "an unverified reset request must not consume the session rate limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn action_runs_only_against_the_verified_path() {
+        let configured_path = "/org/freedesktop/ModemManager1/Modem/0";
+        let verified_path = "/org/freedesktop/ModemManager1/Modem/7";
+        let runner = FakeRunner::new(vec![
+            Ok(out("mmcli 1.22.0\n")),
+            Ok(out("successfully disabled the modem\n")),
+        ]);
+        let service = ModemService::new_with_runner(runner.clone());
+        service.set_verified_path(Some(verified_path.to_string()));
+
+        service
+            .run_action("session-a", ModemAction::Disable)
+            .await
+            .unwrap();
+
+        let calls = runner.calls();
+        assert_eq!(
+            calls,
+            vec![
+                vec!["--version".to_string()],
+                vec![
+                    "--modem".to_string(),
+                    verified_path.to_string(),
+                    "--disable".to_string(),
+                ],
+            ]
+        );
+        assert!(
+            calls.iter().flatten().all(|arg| arg != configured_path),
+            "a drifted configured path must never be used for a modem action"
+        );
     }
 
     #[tokio::test]

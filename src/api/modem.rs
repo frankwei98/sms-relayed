@@ -62,7 +62,7 @@ async fn run_action(
     let token = auth::session_token(&headers);
     state
         .modem
-        .run_action(&state.config.app.modem_path, &token, action)
+        .run_action(&token, action)
         .await
         .map(Json)
         .map_err(map_modem_error)
