@@ -194,6 +194,7 @@ mod scripted {
         Success,
         SuccessAfter(Duration),
         TransientFailure(String),
+        TransientFailureAfter(Duration, String),
         PermanentFailure(String),
         ProfileMissing,
         Hang,
@@ -300,6 +301,10 @@ mod scripted {
                         DispatchResult::Attempted(DispatchOutcome::Success)
                     }
                     ScriptedAction::TransientFailure(code) => {
+                        DispatchResult::Attempted(DispatchOutcome::TransientFailure(code))
+                    }
+                    ScriptedAction::TransientFailureAfter(delay, code) => {
+                        tokio::time::sleep(delay).await;
                         DispatchResult::Attempted(DispatchOutcome::TransientFailure(code))
                     }
                     ScriptedAction::PermanentFailure(code) => {

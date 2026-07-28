@@ -345,7 +345,6 @@ async fn process_delivery_inner(
     }
 
     let retry_after = compute_retry_delay(row.id, row.attempt_count + 1);
-    let retry_at = OffsetDateTime::now_utc() + time::Duration::try_from(retry_after)?;
 
     if delivery_age(row.created_at) > RETRY_MAX_AGE {
         error!("delivery {}: max age exceeded, permanent failure", row.id);
@@ -379,11 +378,13 @@ async fn process_delivery_inner(
         }
     };
     let latency_us = start.elapsed().as_micros() as i64;
+    let attempt_completed_at = OffsetDateTime::now_utc();
+    let retry_at = attempt_completed_at + time::Duration::try_from(retry_after)?;
 
     let error_code = map_outcome_to_delivery_state(&outcome);
     let sample = DeliveryAttempt {
         started_at: attempt_started_at,
-        completed_at: OffsetDateTime::now_utc(),
+        completed_at: attempt_completed_at,
         latency: Duration::from_micros(latency_us.max(1) as u64),
         dispatch_delay: Duration::from_millis(dispatch_delay_ms.max(0) as u64),
         outcome: map_outcome_to_attempt(&outcome),
@@ -792,6 +793,38 @@ mod tests {
             crate::storage::ForwardAttemptOutcome::TransientFailure
         ));
         assert_eq!(samples[0].error_code.as_deref(), Some("http_timeout"));
+    }
+
+    #[tokio::test]
+    async fn transient_failure_after_slow_dispatch_keeps_full_retry_delay() {
+        let store = memory_store().await;
+        let mut row = setup_claimed_delivery(&store, "bark.primary", 0).await;
+        row.created_at =
+            DeliveryTime::Valid(OffsetDateTime::now_utc() - time::Duration::seconds(1));
+        let retry_after = compute_retry_delay(row.id, row.attempt_count + 1);
+        let dispatcher = ScriptedDispatcher::new([ScriptedAction::TransientFailureAfter(
+            Duration::from_secs(1),
+            "http_timeout".to_string(),
+        )]);
+
+        process_delivery_inner(&store, &dispatcher, row)
+            .await
+            .unwrap();
+
+        let due = store.next_delivery_due().await.unwrap().unwrap();
+        let samples = store
+            .forwarding_attempts("bark.primary".to_string(), 1)
+            .await
+            .unwrap();
+        let attempt_completed_at = OffsetDateTime::parse(
+            &samples[0].completed_at,
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert_eq!(
+            due,
+            attempt_completed_at + time::Duration::try_from(retry_after).unwrap()
+        );
     }
 
     #[tokio::test]
