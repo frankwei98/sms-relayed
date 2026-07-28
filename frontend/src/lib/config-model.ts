@@ -45,6 +45,9 @@ export type AppConfig = {
 		max_age_days: number;
 		batch_size: number;
 	};
+	monitoring?: {
+		enabled: boolean;
+	};
 };
 
 export type StatusResponse = {

@@ -11,10 +11,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
-use axum::routing::Router;
+use axum::routing::{get, Router};
 use axum::Json;
 use serde::Serialize;
 
@@ -152,6 +153,17 @@ impl IntoResponse for ApiError {
 
 pub type ApiResult<T> = Result<T, ApiError>;
 
+#[derive(Serialize)]
+struct MonitoringPreference {
+    enabled: bool,
+}
+
+async fn monitoring_preference(State(state): State<ApiState>) -> Json<MonitoringPreference> {
+    Json(MonitoringPreference {
+        enabled: state.config.monitoring.enabled,
+    })
+}
+
 pub fn router(state: ApiState) -> Router {
     let sessions = state.sessions.clone();
     let auth_routes = auth::routes();
@@ -183,6 +195,7 @@ pub fn router(state: ApiState) -> Router {
         ));
 
     Router::new()
+        .route("/api/monitoring", get(monitoring_preference))
         .merge(health::routes())
         .merge(auth_routes)
         .merge(protected)
@@ -584,6 +597,51 @@ mod route_tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn monitoring_preference_is_public_and_disabled_by_default() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/monitoring")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"enabled": false})
+        );
+    }
+
+    #[tokio::test]
+    async fn monitoring_preference_reports_enabled_config() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).monitoring.enabled = true;
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/monitoring")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"enabled": true})
+        );
     }
 
     #[tokio::test]

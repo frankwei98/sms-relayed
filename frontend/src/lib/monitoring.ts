@@ -67,11 +67,26 @@ function safeBasename(value: string | undefined): string | undefined {
 	}
 }
 
-export function initMonitoring(): void {
+export async function loadMonitoringPreference(): Promise<boolean> {
+	try {
+		const response = await fetch("/api/monitoring", {
+			credentials: "same-origin",
+		});
+		if (!response.ok) return false;
+		const body = (await response.json()) as { enabled?: unknown };
+		return body.enabled === true;
+	} catch {
+		return false;
+	}
+}
+
+export function initMonitoring(configEnabled = false): void {
 	Sentry.init({
 		dsn: import.meta.env.VITE_SENTRY_DSN || DEFAULT_DSN,
 		enabled:
-			import.meta.env.PROD && import.meta.env.VITE_SENTRY_ENABLED !== "false",
+			configEnabled &&
+			import.meta.env.PROD &&
+			import.meta.env.VITE_SENTRY_ENABLED !== "false",
 		// React reports crashes explicitly below; disabling browser defaults also
 		// prevents session, navigation, request, and breadcrumb telemetry.
 		defaultIntegrations: false,

@@ -17,6 +17,10 @@ const WEB_BIND_PROMPT: &str = "Web bind address";
 const WEB_PORT_PROMPT: &str = "Web port";
 const WEB_IPV6_PROMPT: &str = "Enable IPv6 listener?";
 const WEB_DATABASE_PROMPT: &str = "SMS history database path";
+const ENABLE_MONITORING_PROMPT: &str = "Enable privacy-scrubbed error monitoring?";
+const ENABLE_MONITORING_HELP: &str =
+    "Reports fixed error codes and scrubbed stack identity without SMS bodies, phone numbers, or credentials.";
+const DEFAULT_MONITORING_ENABLED_IN_WIZARD: bool = true;
 const DEVICE_NAME_PROMPT: &str = "Device display name";
 const DEVICE_NAME_HELP: &str = "Use *Host*Name* to show the current system hostname.";
 const MODEM_PATH_PROMPT: &str = "ModemManager modem path";
@@ -72,6 +76,10 @@ pub fn run_setup_wizard(existing: Option<AppConfig>) -> Result<Option<AppConfig>
             .with_default(&cfg.api.database_path)
             .prompt()?;
     }
+    cfg.monitoring.enabled = Confirm::new(ENABLE_MONITORING_PROMPT)
+        .with_default(DEFAULT_MONITORING_ENABLED_IN_WIZARD)
+        .with_help_message(ENABLE_MONITORING_HELP)
+        .prompt()?;
 
     cfg.app.device_name = Text::new(DEVICE_NAME_PROMPT)
         .with_default(&cfg.app.device_name)
@@ -245,6 +253,8 @@ fn setup_prompt_texts() -> &'static [&'static str] {
         WEB_PORT_PROMPT,
         WEB_IPV6_PROMPT,
         WEB_DATABASE_PROMPT,
+        ENABLE_MONITORING_PROMPT,
+        ENABLE_MONITORING_HELP,
         DEVICE_NAME_PROMPT,
         DEVICE_NAME_HELP,
         MODEM_PATH_PROMPT,
@@ -257,7 +267,7 @@ fn setup_prompt_texts() -> &'static [&'static str] {
 
 #[cfg(test)]
 mod tests {
-    use super::setup_prompt_texts;
+    use super::{setup_prompt_texts, DEFAULT_MONITORING_ENABLED_IN_WIZARD};
 
     #[test]
     fn setup_prompt_texts_do_not_reference_planned_runtime_targets() {
@@ -267,5 +277,7 @@ mod tests {
         assert!(!all_text.contains("planned for P2"));
         assert!(all_text.contains("Enable Web API and frontend?"));
         assert!(all_text.contains("Serves the browser dashboard and HTTP API"));
+        assert!(all_text.contains("Enable privacy-scrubbed error monitoring?"));
+        assert!(DEFAULT_MONITORING_ENABLED_IN_WIZARD);
     }
 }

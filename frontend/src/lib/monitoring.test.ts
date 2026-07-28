@@ -1,11 +1,45 @@
 import { describe, expect, it, vi } from "vitest";
-import { captureFailure, scrubEvent } from "./monitoring";
+import {
+	captureFailure,
+	initMonitoring,
+	loadMonitoringPreference,
+	scrubEvent,
+} from "./monitoring";
 
-const mocks = vi.hoisted(() => ({ captureEvent: vi.fn() }));
+const mocks = vi.hoisted(() => ({ captureEvent: vi.fn(), init: vi.fn() }));
 
-vi.mock("@sentry/react", () => ({ captureEvent: mocks.captureEvent }));
+vi.mock("@sentry/react", () => ({
+	captureEvent: mocks.captureEvent,
+	init: mocks.init,
+}));
 
 describe("Sentry event privacy", () => {
+	it("keeps browser reporting disabled when runtime monitoring is disabled", () => {
+		initMonitoring(false);
+
+		expect(mocks.init).toHaveBeenCalledWith(
+			expect.objectContaining({ enabled: false }),
+		);
+	});
+
+	it("loads the public runtime monitoring preference", async () => {
+		const fetchMock = vi
+			.fn()
+			.mockResolvedValueOnce(
+				new Response(JSON.stringify({ enabled: true }), { status: 200 }),
+			)
+			.mockRejectedValueOnce(new Error("offline"));
+		vi.stubGlobal("fetch", fetchMock);
+
+		await expect(loadMonitoringPreference()).resolves.toBe(true);
+		await expect(loadMonitoringPreference()).resolves.toBe(false);
+
+		expect(fetchMock).toHaveBeenCalledWith("/api/monitoring", {
+			credentials: "same-origin",
+		});
+		vi.unstubAllGlobals();
+	});
+
 	it("removes user-controlled payloads while keeping exception identity", () => {
 		const event = scrubEvent({
 			message: "SMS body 123456",

@@ -26,7 +26,10 @@ impl Drop for Guard {
     }
 }
 
-pub fn init() -> Option<Guard> {
+pub fn init(enabled: bool) -> Option<Guard> {
+    if !enabled {
+        return None;
+    }
     let dsn = configured_dsn()?;
     let sentry_http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(1))
@@ -192,7 +195,12 @@ mod tests {
         Breadcrumb, Event, Exception, Frame, Request, Stacktrace, User, Values,
     };
 
-    use super::{parse_configured_dsn, scrub_event};
+    use super::{init, parse_configured_dsn, scrub_event};
+
+    #[test]
+    fn disabled_config_does_not_initialize_sentry() {
+        assert!(init(false).is_none());
+    }
 
     #[test]
     fn scrub_event_removes_sensitive_payloads_and_keeps_stack_identity() {

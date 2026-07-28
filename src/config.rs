@@ -27,6 +27,14 @@ pub struct AppConfig {
     pub http: HttpSection,
     #[serde(default)]
     pub retention: RetentionSection,
+    #[serde(default)]
+    pub monitoring: MonitoringSection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct MonitoringSection {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -323,6 +331,7 @@ impl Default for AppConfig {
             api: ApiSection::default(),
             http: HttpSection::default(),
             retention: RetentionSection::default(),
+            monitoring: MonitoringSection::default(),
         }
     }
 }
@@ -893,6 +902,21 @@ mod tests {
         assert_eq!(cfg.sms.ignore_storage, vec!["sm"]);
         assert!(cfg.sms.code_keywords.contains(&"验证码".to_string()));
         assert_eq!(cfg.delivery.concurrency, 2);
+        assert!(!cfg.monitoring.enabled);
+    }
+
+    #[test]
+    fn legacy_config_keeps_error_monitoring_disabled() {
+        let serialized = toml::to_string(&AppConfig::default()).unwrap();
+        let without_monitoring = serialized
+            .lines()
+            .take_while(|line| *line != "[monitoring]")
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let cfg: AppConfig = toml::from_str(&without_monitoring).unwrap();
+
+        assert!(!cfg.monitoring.enabled);
     }
 
     #[test]
