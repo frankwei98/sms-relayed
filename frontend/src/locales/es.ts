@@ -441,6 +441,8 @@ export const es = {
 			apiDisable: "El panel no estará disponible tras el reinicio.",
 			apiEndpointChange:
 				"La dirección del panel puede cambiar tras el reinicio.",
+			trustedProxiesChange:
+				"Tras el reinicio, la limitación de intentos de inicio de sesión usará la lista de proxies de confianza actualizada.",
 			databasePathChange:
 				"El servicio utilizará una base de datos de mensajes diferente tras el reinicio.",
 			webhookGet:

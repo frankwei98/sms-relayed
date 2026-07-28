@@ -1108,6 +1108,50 @@ mod route_tests {
     }
 
     #[tokio::test]
+    async fn config_preview_describes_trusted_proxy_changes_without_endpoint_warning() {
+        let mut state = test_state();
+        let (config_path, base_revision) =
+            write_config_file(&state.config, "trusted-proxies-preview");
+        state.config_path = config_path.clone();
+        let token = state.sessions.create_session().await.unwrap();
+        let mut candidate = (*state.config).clone();
+        candidate
+            .api
+            .trusted_proxies
+            .push("127.0.0.1".parse().unwrap());
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/config/preview")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .header("content-type", "application/json")
+                    .header("if-match", base_revision)
+                    .body(Body::from(serde_json::to_vec(&candidate).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            body["warnings"],
+            serde_json::json!(["trusted_proxies_change"])
+        );
+        assert_eq!(body["requires_restart"], true);
+
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
     async fn config_save_rejects_a_stale_preview_without_writing() {
         let mut state = test_state();
         let (config_path, base_revision) = write_config_file(&state.config, "config-stale");

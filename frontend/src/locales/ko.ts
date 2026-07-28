@@ -425,6 +425,8 @@ export const ko = {
 			passwordChange: "저장 및 재시작 예약 후 모든 세션에서 로그아웃됩니다.",
 			apiDisable: "재시작 후 대시보드를 사용할 수 없습니다.",
 			apiEndpointChange: "재시작 후 대시보드 주소가 변경될 수 있습니다.",
+			trustedProxiesChange:
+				"재시작 후 로그인 요청 제한에 업데이트된 신뢰할 수 있는 프록시 목록이 사용됩니다.",
 			databasePathChange:
 				"재시작 후 서비스가 다른 메시지 데이터베이스를 사용합니다.",
 			webhookGet:

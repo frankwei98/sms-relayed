@@ -11,6 +11,7 @@ export type ConfigWarning =
 	| "password_change"
 	| "api_disable"
 	| "api_endpoint_change"
+	| "trusted_proxies_change"
 	| "database_path_change"
 	| "webhook_get";
 

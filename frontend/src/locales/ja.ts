@@ -431,6 +431,8 @@ export const ja = {
 			apiDisable: "再起動後、ダッシュボードは利用できなくなります。",
 			apiEndpointChange:
 				"再起動後、ダッシュボードのアドレスが変更される場合があります。",
+			trustedProxiesChange:
+				"再起動後、ログインのレート制限には更新された信頼済みプロキシ一覧が使用されます。",
 			databasePathChange:
 				"再起動後、サービスは異なるメッセージデータベースを使用します。",
 			webhookGet:
