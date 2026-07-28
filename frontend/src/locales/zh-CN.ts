@@ -309,6 +309,7 @@ export const zhCN = {
 			composerPlaceholder: "消息",
 			sendMessage: "发送",
 			sendingMessage: "发送中…",
+			sendFailed: "消息发送失败，请重试。",
 		},
 		direction: {
 			sent: "已发送",

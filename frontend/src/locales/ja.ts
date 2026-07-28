@@ -324,6 +324,7 @@ export const ja = {
 			composerPlaceholder: "メッセージ",
 			sendMessage: "送信",
 			sendingMessage: "送信中…",
+			sendFailed: "メッセージを送信できませんでした。もう一度お試しください。",
 		},
 		direction: {
 			sent: "送信済み",

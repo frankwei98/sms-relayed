@@ -322,6 +322,7 @@ export const ko = {
 			composerPlaceholder: "메시지",
 			sendMessage: "보내기",
 			sendingMessage: "전송 중…",
+			sendFailed: "메시지를 보내지 못했습니다. 다시 시도하세요.",
 		},
 		direction: {
 			sent: "전송됨",
