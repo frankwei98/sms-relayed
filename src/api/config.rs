@@ -334,6 +334,7 @@ fn config_warnings(running: &AppConfig, candidate: &AppConfig) -> Vec<&'static s
     if candidate.api.bind != running.api.bind
         || candidate.api.port != running.api.port
         || candidate.api.enable_ipv6 != running.api.enable_ipv6
+        || candidate.api.trusted_proxies != running.api.trusted_proxies
     {
         warnings.push("api_endpoint_change");
     }

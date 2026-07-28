@@ -311,9 +311,10 @@ async fn login(
     headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> Result<(StatusCode, HeaderMap, Json<AuthResponse>), ApiError> {
+    let client_ip = login_client_ip(peer.ip(), &headers, &state.config.api.trusted_proxies);
     match state
         .sessions
-        .authenticate(peer.ip(), &req.password, &state.config.api.password)
+        .authenticate(client_ip, &req.password, &state.config.api.password)
     {
         LoginResult::Authenticated => {}
         LoginResult::Rejected => return Err(ApiError::unauthorized("invalid password")),
@@ -342,6 +343,57 @@ async fn login(
             authenticated: true,
         }),
     ))
+}
+
+fn login_client_ip(peer: IpAddr, headers: &HeaderMap, trusted_proxies: &[IpAddr]) -> IpAddr {
+    let peer = canonical_ip(peer);
+    if !trusted_proxies
+        .iter()
+        .copied()
+        .map(canonical_ip)
+        .any(|trusted| trusted == peer)
+    {
+        return peer;
+    }
+
+    let mut forwarded = Vec::new();
+    for value in headers.get_all("x-forwarded-for") {
+        let Ok(value) = value.to_str() else {
+            return peer;
+        };
+        for address in value.split(',') {
+            let Ok(address) = address.trim().parse::<IpAddr>() else {
+                return peer;
+            };
+            forwarded.push(canonical_ip(address));
+        }
+    }
+    if forwarded.is_empty() {
+        return peer;
+    }
+
+    forwarded
+        .iter()
+        .rev()
+        .find(|address| {
+            !trusted_proxies
+                .iter()
+                .copied()
+                .map(canonical_ip)
+                .any(|trusted| trusted == **address)
+        })
+        .copied()
+        .unwrap_or(forwarded[0])
+}
+
+fn canonical_ip(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V6(address) => address
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(address)),
+        address => address,
+    }
 }
 
 async fn logout(
