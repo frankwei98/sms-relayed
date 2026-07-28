@@ -301,6 +301,7 @@ export const zhCN = {
 			markRead: "无法将短信标记为已读，请重试。",
 			update: "无法更新短信，请重试。",
 			delete: "无法删除短信，请重试。",
+			export: "无法导出短信，请重试。",
 			loadOlder: "无法加载更早的短信，请重试。",
 			refresh: "无法刷新短信，请重试。",
 		},

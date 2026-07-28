@@ -50,7 +50,12 @@ import {
 	SelectValue,
 } from "#/components/ui/select";
 import { Textarea } from "#/components/ui/textarea";
-import { apiFetch, type ConversationSummary, type Message } from "#/lib/api";
+import {
+	apiFetch,
+	type ConversationSummary,
+	downloadFile,
+	type Message,
+} from "#/lib/api";
 import { subscribeEvents } from "#/lib/events";
 import { fetchModemStatus } from "#/lib/modem-api";
 import { cn } from "#/lib/utils";
@@ -69,6 +74,7 @@ type MessageOperationError =
 	| "markRead"
 	| "update"
 	| "delete"
+	| "export"
 	| "loadOlder"
 	| "refresh";
 
@@ -570,11 +576,17 @@ export function MessageConsole() {
 					}),
 				),
 			);
-			setSelectedIds(new Set());
-			setSelectionMode(false);
-			await reloadActiveViews();
 		} catch (err) {
 			setOperationError("update");
+			console.error(err);
+			return;
+		}
+		setSelectedIds(new Set());
+		setSelectionMode(false);
+		try {
+			await reloadActiveViews();
+		} catch (err) {
+			setOperationError("refresh");
 			console.error(err);
 		}
 	}
@@ -587,18 +599,32 @@ export function MessageConsole() {
 				method: "POST",
 				body: JSON.stringify({ ids: Array.from(selectedIds) }),
 			});
-			setSelectedIds(new Set());
-			setSelectionMode(false);
-			await reloadActiveViews();
 		} catch (err) {
 			setOperationError("delete");
+			console.error(err);
+			return;
+		}
+		setSelectedIds(new Set());
+		setSelectionMode(false);
+		try {
+			await reloadActiveViews();
+		} catch (err) {
+			setOperationError("refresh");
 			console.error(err);
 		}
 	}
 
-	function exportMessages(format: "csv" | "json") {
+	async function exportMessages(format: "csv" | "json") {
 		const p = buildParams(selectedPhone);
-		window.location.href = `/api/messages/export?format=${format}&${p.toString()}`;
+		try {
+			await downloadFile(
+				`/api/messages/export?format=${format}&${p.toString()}`,
+				`sms-relayed-messages.${format}`,
+			);
+		} catch (err) {
+			setOperationError("export");
+			console.error(err);
+		}
 	}
 
 	return (
@@ -629,8 +655,8 @@ export function MessageConsole() {
 								setStatusFilter={setStatusFilter}
 								unreadOnly={unreadOnly}
 								setUnreadOnly={setUnreadOnly}
-								onExportCsv={() => exportMessages("csv")}
-								onExportJson={() => exportMessages("json")}
+								onExportCsv={() => void exportMessages("csv")}
+								onExportJson={() => void exportMessages("json")}
 							/>
 						}
 					/>
@@ -943,6 +969,7 @@ function MessageOperationErrorBanner({
 		markRead: t("messages.error.markRead"),
 		update: t("messages.error.update"),
 		delete: t("messages.error.delete"),
+		export: t("messages.error.export"),
 		loadOlder: t("messages.error.loadOlder"),
 		refresh: t("messages.error.refresh"),
 	} satisfies Record<MessageOperationError, string>;

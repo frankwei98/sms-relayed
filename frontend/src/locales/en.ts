@@ -313,6 +313,7 @@ export const en = {
 			markRead: "Could not mark messages as read. Try again.",
 			update: "Could not update messages. Try again.",
 			delete: "Could not delete messages. Try again.",
+			export: "Could not export messages. Try again.",
 			loadOlder: "Could not load older messages. Try again.",
 			refresh: "Could not refresh messages. Try again.",
 		},

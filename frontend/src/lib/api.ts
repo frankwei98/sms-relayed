@@ -2,6 +2,12 @@ import { captureFailure } from "./monitoring";
 
 export const AUTH_UNAUTHORIZED_EVENT = "sms-relayed:unauthorized";
 
+export function notifyUnauthorized(): void {
+	if (typeof window !== "undefined") {
+		window.dispatchEvent(new Event(AUTH_UNAUTHORIZED_EVENT));
+	}
+}
+
 export type ApiErrorBody = { error: { code: string; message: string } };
 
 export class ApiRequestError extends Error {
@@ -41,9 +47,7 @@ export async function apiRequest<T>(
 		throw error;
 	}
 	if (!response.ok) {
-		if (response.status === 401 && typeof window !== "undefined") {
-			window.dispatchEvent(new Event(AUTH_UNAUTHORIZED_EVENT));
-		}
+		if (response.status === 401) notifyUnauthorized();
 		if (response.status >= 500) {
 			captureFailure("api.request_failed", {
 				status: response.status.toString(),
@@ -63,6 +67,43 @@ export async function apiRequest<T>(
 		data: body.trim().length === 0 ? (undefined as T) : (JSON.parse(body) as T),
 		response,
 	};
+}
+
+export async function apiDownload(input: RequestInfo | URL): Promise<Blob> {
+	let response: Response;
+	try {
+		response = await fetch(input, { credentials: "include" });
+	} catch (error) {
+		captureFailure("api.request_failed", { status: "network_error" });
+		throw error;
+	}
+	if (!response.ok) {
+		if (response.status === 401) notifyUnauthorized();
+		if (response.status >= 500) {
+			captureFailure("api.request_failed", {
+				status: response.status.toString(),
+			});
+		}
+		throw new ApiRequestError(
+			response.status,
+			"request_failed",
+			`Request failed: ${response.status}`,
+		);
+	}
+	return response.blob();
+}
+
+export async function downloadFile(
+	input: RequestInfo | URL,
+	filename: string,
+): Promise<void> {
+	const blob = await apiDownload(input);
+	const url = URL.createObjectURL(blob);
+	const link = document.createElement("a");
+	link.href = url;
+	link.download = filename;
+	link.click();
+	URL.revokeObjectURL(url);
 }
 
 export async function apiFetch<T>(

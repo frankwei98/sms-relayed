@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiRequestError, apiFetch, apiRequest } from "./api";
+import { ApiRequestError, apiDownload, apiFetch, apiRequest } from "./api";
 
 const mocks = vi.hoisted(() => ({ captureFailure: vi.fn() }));
 
@@ -70,6 +70,21 @@ describe("apiFetch monitoring", () => {
 
 		await expect(apiFetch("/api/auth/me")).rejects.toThrow("unauthorized");
 		expect(mocks.captureFailure).not.toHaveBeenCalled();
+		expect(unauthorized).toHaveBeenCalledOnce();
+		window.removeEventListener("sms-relayed:unauthorized", unauthorized);
+	});
+
+	it("broadcasts unauthorized responses from file downloads", async () => {
+		const unauthorized = vi.fn();
+		window.addEventListener("sms-relayed:unauthorized", unauthorized);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn().mockResolvedValue(new Response(null, { status: 401 })),
+		);
+
+		await expect(apiDownload("/api/messages/export")).rejects.toThrow(
+			"Request failed: 401",
+		);
 		expect(unauthorized).toHaveBeenCalledOnce();
 		window.removeEventListener("sms-relayed:unauthorized", unauthorized);
 	});

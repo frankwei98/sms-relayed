@@ -327,6 +327,7 @@ export const es = {
 				"No se pudieron marcar los mensajes como leídos. Inténtalo de nuevo.",
 			update: "No se pudieron actualizar los mensajes. Inténtalo de nuevo.",
 			delete: "No se pudieron eliminar los mensajes. Inténtalo de nuevo.",
+			export: "No se pudieron exportar los mensajes. Inténtalo de nuevo.",
 			loadOlder:
 				"No se pudieron cargar los mensajes anteriores. Inténtalo de nuevo.",
 			refresh: "No se pudieron actualizar los mensajes. Inténtalo de nuevo.",
