@@ -340,5 +340,13 @@ fn config_warnings(running: &AppConfig, candidate: &AppConfig) -> Vec<&'static s
     if candidate.api.database_path != running.api.database_path {
         warnings.push("database_path_change");
     }
+    if candidate
+        .channels
+        .webhook
+        .values()
+        .any(|profile| profile.method == crate::config::WebhookMethod::Get)
+    {
+        warnings.push("webhook_get");
+    }
     warnings
 }

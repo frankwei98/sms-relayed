@@ -427,6 +427,8 @@ export const ko = {
 			apiEndpointChange: "재시작 후 대시보드 주소가 변경될 수 있습니다.",
 			databasePathChange:
 				"재시작 후 서비스가 다른 메시지 데이터베이스를 사용합니다.",
+			webhookGet:
+				"GET Webhook URL은 액세스 로그에 발신자와 메시지를 노출할 수 있습니다.",
 		},
 		leaveDialog: {
 			title: "저장하지 않은 변경 사항을 두고 나가시겠습니까?",
@@ -445,7 +447,7 @@ export const ko = {
 			api: "Web API",
 			apiDescription: "대시보드 접근 및 영속성",
 			timeouts: "시간 제한",
-			timeoutsDescription: "HTTP 및 Shell 실행 제한",
+			timeoutsDescription: "HTTP 연결 및 요청 제한",
 			retention: "보존",
 			retentionDescription: "자동 메시지 정리",
 		},
@@ -500,12 +502,11 @@ export const ko = {
 			timeouts: {
 				sectionTitle: "시간 제한",
 				sectionDescription:
-					"연결 설정, 공급자 요청 및 Shell 프로필 실행을 제한합니다. 모든 값은 초 단위입니다.",
+					"연결 설정과 공급자 또는 Webhook 요청을 제한합니다. 모든 값은 초 단위입니다.",
 				connectTimeout: "연결 시간 제한",
 				connectTimeoutDescription:
 					"양수여야 하며 요청 시간 제한보다 클 수 없습니다.",
 				requestTimeout: "요청 시간 제한",
-				shellTimeout: "Shell 시간 제한",
 			},
 			retention: {
 				sectionTitle: "보존",
@@ -537,6 +538,21 @@ export const ko = {
 			profileName: "프로필 이름",
 			addProfile: "{{channel}} 프로필 추가",
 			duplicateName: "해당 프로필 이름이 이미 존재합니다.",
+			webhookMethod: "메서드",
+			webhookGetWarning:
+				"경고: GET URL은 프록시, 서버 및 모니터링 액세스 로그에 발신자와 메시지를 노출할 수 있습니다.",
+			webhookUrl: "URL 템플릿",
+			webhookContentType: "Content-Type",
+			webhookBody: "Body 템플릿",
+			webhookHeaders: "정적 헤더",
+			webhookHeaderName: "헤더 이름",
+			webhookHeaderValue: "{{name}} 값",
+			webhookRemoveHeader: "제거",
+			webhookAddHeader: "헤더 추가",
+			webhookHeaderDuplicate: "해당 헤더 이름이 이미 존재합니다.",
+			webhookHeaderRequired: "헤더 이름은 필수입니다.",
+			webhookVariables:
+				"변수: {MESSAGE}, {SENDER}, {DATETIME}. 퍼센트 인코딩에는 _URL을, 완전한 JSON 문자열 리터럴에는 _JSON을 추가합니다.",
 			enableAria: "{{ref}}에 대한 전달 활성화",
 			removeAria: "{{ref}} 제거",
 			removeDialog: {

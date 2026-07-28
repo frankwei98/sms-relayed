@@ -530,18 +530,15 @@ fn map_outcome_to_delivery_state(outcome: &DispatchOutcome) -> Option<String> {
 
 fn standardize_failure(msg: &str) -> String {
     if msg == "http_timeout"
-        || msg == "shell_timeout"
         || msg.starts_with("http_status_")
         || msg.starts_with("http_")
         || msg.starts_with("provider_")
-        || msg.starts_with("shell_")
+        || msg.starts_with("webhook_")
         || msg == "message_not_found"
         || msg == "profile_missing"
         || msg == "max_age_exceeded"
     {
         msg.to_string()
-    } else if msg.contains("shell timeout") {
-        "shell_timeout".to_string()
     } else {
         "unknown_error".to_string()
     }

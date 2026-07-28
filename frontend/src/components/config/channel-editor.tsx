@@ -11,6 +11,7 @@ import {
 } from "#/components/ui/dialog";
 import { Input } from "#/components/ui/input";
 import { Switch } from "#/components/ui/switch";
+import { Textarea } from "#/components/ui/textarea";
 import type { AppConfig } from "#/lib/config-model";
 
 const CHANNEL_FIELDS: Record<
@@ -64,7 +65,7 @@ const CHANNEL_FIELDS: Record<
 			sensitive: true,
 		},
 	],
-	shell: [{ key: "path", label: "Path", defaultValue: "" }],
+	webhook: [],
 };
 
 const CHANNELS = [
@@ -73,7 +74,7 @@ const CHANNELS = [
 	"wecom",
 	"dingtalk",
 	"lark",
-	"shell",
+	"webhook",
 ] as const;
 
 type Props = {
@@ -118,11 +119,21 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 			channel as keyof AppConfig["channels"]
 		] as Record<string, unknown>;
 		if (!name || name in profiles) return;
-		const fields = CHANNEL_FIELDS[channel];
-		const profile: Record<string, string> = {};
-		for (const f of fields) {
-			profile[f.key] = f.defaultValue;
-		}
+		const profile: Record<string, unknown> =
+			channel === "webhook"
+				? {
+						method: "post",
+						url: "",
+						content_type: "application/json",
+						body: '{\n  "sender": {SENDER_JSON},\n  "message": {MESSAGE_JSON},\n  "datetime": {DATETIME_JSON}\n}',
+						headers: {},
+					}
+				: Object.fromEntries(
+						CHANNEL_FIELDS[channel].map((field) => [
+							field.key,
+							field.defaultValue,
+						]),
+					);
 		const updated = { ...config };
 		updated.channels = {
 			...updated.channels,
@@ -194,6 +205,39 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 		};
 		updated.channels = { ...updated.channels, [channel]: profiles };
 		onUpdate(updated);
+	}
+
+	function updateWebhookHeader(
+		profileName: string,
+		oldName: string,
+		name: string,
+		value: string,
+	) {
+		const profile = config.channels.webhook[profileName];
+		const headers = { ...profile.headers };
+		delete headers[oldName];
+		if (name) headers[name] = value;
+		onUpdate({
+			...config,
+			channels: {
+				...config.channels,
+				webhook: {
+					...config.channels.webhook,
+					[profileName]: { ...profile, headers },
+				},
+			},
+		});
+	}
+
+	function addWebhookHeader(profileName: string) {
+		const profile = config.channels.webhook[profileName];
+		let index = 1;
+		let name = "X-Custom-Header";
+		while (name in profile.headers) {
+			index += 1;
+			name = `X-Custom-Header-${index}`;
+		}
+		updateWebhookHeader(profileName, "", name, "");
 	}
 
 	return (
@@ -324,41 +368,55 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 											</Button>
 										</div>
 									</div>
-									{CHANNEL_FIELDS[channel].map((field) => {
-										const fieldId = `channel-${encodeURIComponent(profileRef)}-${field.key}`;
-										return (
-											<div
-												key={field.key}
-												className="mt-2 grid gap-1.5 sm:grid-cols-[7rem_minmax(0,1fr)] sm:items-center"
-											>
-												<label
-													htmlFor={fieldId}
-													className="text-xs text-muted-foreground"
+									{channel === "webhook" ? (
+										<WebhookFields
+											profileName={name}
+											profile={config.channels.webhook[name]}
+											onFieldChange={(field, value) =>
+												updateProfileField(channel, name, field, value)
+											}
+											onHeaderChange={(oldName, headerName, value) =>
+												updateWebhookHeader(name, oldName, headerName, value)
+											}
+											onAddHeader={() => addWebhookHeader(name)}
+										/>
+									) : (
+										CHANNEL_FIELDS[channel].map((field) => {
+											const fieldId = `channel-${encodeURIComponent(profileRef)}-${field.key}`;
+											return (
+												<div
+													key={field.key}
+													className="mt-2 grid gap-1.5 sm:grid-cols-[7rem_minmax(0,1fr)] sm:items-center"
 												>
-													{field.label}
-												</label>
-												<Input
-													id={fieldId}
-													value={
-														(profiles[name] as Record<string, string>)[
-															field.key
-														] ?? ""
-													}
-													onChange={(event) =>
-														updateProfileField(
-															channel,
-															name,
-															field.key,
-															event.target.value,
-														)
-													}
-													className="h-8 text-xs"
-													type={field.sensitive ? "password" : "text"}
-													autoComplete={field.sensitive ? "off" : undefined}
-												/>
-											</div>
-										);
-									})}
+													<label
+														htmlFor={fieldId}
+														className="text-xs text-muted-foreground"
+													>
+														{field.label}
+													</label>
+													<Input
+														id={fieldId}
+														value={
+															(profiles[name] as Record<string, string>)[
+																field.key
+															] ?? ""
+														}
+														onChange={(event) =>
+															updateProfileField(
+																channel,
+																name,
+																field.key,
+																event.target.value,
+															)
+														}
+														className="h-8 text-xs"
+														type={field.sensitive ? "password" : "text"}
+														autoComplete={field.sensitive ? "off" : undefined}
+													/>
+												</div>
+											);
+										})
+									)}
 								</div>
 							);
 						})}
@@ -437,6 +495,201 @@ export function ChannelEditor({ config, onUpdate }: Props) {
 					</DialogFooter>
 				</DialogContent>
 			</Dialog>
+		</div>
+	);
+}
+
+function WebhookFields({
+	profileName,
+	profile,
+	onFieldChange,
+	onHeaderChange,
+	onAddHeader,
+}: {
+	profileName: string;
+	profile: AppConfig["channels"]["webhook"][string];
+	onFieldChange: (field: string, value: string) => void;
+	onHeaderChange: (oldName: string, name: string, value: string) => void;
+	onAddHeader: () => void;
+}) {
+	const { t } = useTranslation();
+	const prefix = `channel-webhook.${profileName}`;
+	return (
+		<div className="space-y-2">
+			<div className="grid gap-1.5 sm:grid-cols-[7rem_minmax(0,1fr)] sm:items-center">
+				<label
+					htmlFor={`${prefix}-method`}
+					className="text-xs text-muted-foreground"
+				>
+					{t("config.channel.webhookMethod")}
+				</label>
+				<select
+					id={`${prefix}-method`}
+					value={profile.method}
+					onChange={(event) => {
+						const method = event.target.value;
+						onFieldChange("method", method);
+					}}
+					className="h-8 rounded-md border bg-background px-2 text-xs"
+				>
+					<option value="post">POST</option>
+					<option value="get">GET</option>
+				</select>
+			</div>
+			{profile.method === "get" ? (
+				<p className="rounded-md border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-xs text-amber-950 dark:text-amber-100">
+					{t("config.channel.webhookGetWarning")}
+				</p>
+			) : null}
+			<WebhookTextField
+				id={`${prefix}-url`}
+				label={t("config.channel.webhookUrl")}
+				value={profile.url}
+				onChange={(value) => onFieldChange("url", value)}
+			/>
+			{profile.method === "post" ? (
+				<>
+					<WebhookTextField
+						id={`${prefix}-content-type`}
+						label={t("config.channel.webhookContentType")}
+						value={profile.content_type}
+						onChange={(value) => onFieldChange("content_type", value)}
+					/>
+					<div className="grid gap-1.5 sm:grid-cols-[7rem_minmax(0,1fr)]">
+						<label
+							htmlFor={`${prefix}-body`}
+							className="pt-2 text-xs text-muted-foreground"
+						>
+							{t("config.channel.webhookBody")}
+						</label>
+						<Textarea
+							id={`${prefix}-body`}
+							value={profile.body}
+							onChange={(event) => onFieldChange("body", event.target.value)}
+							className="min-h-28 font-mono text-xs"
+						/>
+					</div>
+				</>
+			) : null}
+			<div className="grid gap-1.5 sm:grid-cols-[7rem_minmax(0,1fr)]">
+				<span className="pt-2 text-xs text-muted-foreground">
+					{t("config.channel.webhookHeaders")}
+				</span>
+				<div className="space-y-2">
+					{Object.entries(profile.headers).map(([name, value]) => (
+						<WebhookHeaderRow
+							key={name}
+							name={name}
+							value={value}
+							allNames={Object.keys(profile.headers)}
+							onChange={onHeaderChange}
+						/>
+					))}
+					<Button
+						type="button"
+						variant="outline"
+						size="sm"
+						onClick={onAddHeader}
+					>
+						{t("config.channel.webhookAddHeader")}
+					</Button>
+				</div>
+			</div>
+			<p className="text-xs text-muted-foreground">
+				{t("config.channel.webhookVariables")}
+			</p>
+		</div>
+	);
+}
+
+function WebhookHeaderRow({
+	name,
+	value,
+	allNames,
+	onChange,
+}: {
+	name: string;
+	value: string;
+	allNames: string[];
+	onChange: (oldName: string, name: string, value: string) => void;
+}) {
+	const { t } = useTranslation();
+	const [draftName, setDraftName] = useState(name);
+	const missing = draftName.length === 0;
+	const duplicate =
+		draftName.toLowerCase() !== name.toLowerCase() &&
+		allNames.some(
+			(existingName) => existingName.toLowerCase() === draftName.toLowerCase(),
+		);
+	const invalid = missing || duplicate;
+
+	return (
+		<div>
+			<div className="grid grid-cols-[1fr_1fr_auto] gap-2">
+				<Input
+					aria-label={t("config.channel.webhookHeaderName")}
+					aria-invalid={invalid}
+					value={draftName}
+					onChange={(event) => setDraftName(event.target.value)}
+					onBlur={() => {
+						if (!invalid && draftName !== name) {
+							onChange(name, draftName, value);
+						}
+					}}
+					className="h-8 font-mono text-xs"
+				/>
+				<Input
+					aria-label={t("config.channel.webhookHeaderValue", { name })}
+					type="password"
+					autoComplete="off"
+					value={value}
+					onChange={(event) => onChange(name, name, event.target.value)}
+					className="h-8 text-xs"
+				/>
+				<Button
+					type="button"
+					variant="outline"
+					size="sm"
+					onClick={() => onChange(name, "", "")}
+				>
+					{t("config.channel.webhookRemoveHeader")}
+				</Button>
+			</div>
+			{invalid ? (
+				<p className="mt-1 text-xs text-destructive">
+					{t(
+						duplicate
+							? "config.channel.webhookHeaderDuplicate"
+							: "config.channel.webhookHeaderRequired",
+					)}
+				</p>
+			) : null}
+		</div>
+	);
+}
+
+function WebhookTextField({
+	id,
+	label,
+	value,
+	onChange,
+}: {
+	id: string;
+	label: string;
+	value: string;
+	onChange: (value: string) => void;
+}) {
+	return (
+		<div className="grid gap-1.5 sm:grid-cols-[7rem_minmax(0,1fr)] sm:items-center">
+			<label htmlFor={id} className="text-xs text-muted-foreground">
+				{label}
+			</label>
+			<Input
+				id={id}
+				value={value}
+				onChange={(event) => onChange(event.target.value)}
+				className="h-8 font-mono text-xs"
+			/>
 		</div>
 	);
 }

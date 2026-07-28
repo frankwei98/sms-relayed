@@ -465,6 +465,7 @@ function SaveReviewDialog({
 		api_disable: t("config.warnings.apiDisable"),
 		api_endpoint_change: t("config.warnings.apiEndpointChange"),
 		database_path_change: t("config.warnings.databasePathChange"),
+		webhook_get: t("config.warnings.webhookGet"),
 	};
 
 	return (

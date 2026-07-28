@@ -443,6 +443,8 @@ export const es = {
 				"La dirección del panel puede cambiar tras el reinicio.",
 			databasePathChange:
 				"El servicio utilizará una base de datos de mensajes diferente tras el reinicio.",
+			webhookGet:
+				"Las URL de webhook GET pueden exponer el remitente y el mensaje en los registros de acceso.",
 		},
 		leaveDialog: {
 			title: "¿Salir con cambios sin guardar?",
@@ -461,7 +463,7 @@ export const es = {
 			api: "Web API",
 			apiDescription: "Acceso al panel y persistencia",
 			timeouts: "Tiempos de espera",
-			timeoutsDescription: "Límites de ejecución de HTTP y shell",
+			timeoutsDescription: "Límites de conexión y solicitud HTTP",
 			retention: "Retención",
 			retentionDescription: "Limpieza automática de mensajes",
 		},
@@ -517,12 +519,11 @@ export const es = {
 			timeouts: {
 				sectionTitle: "Tiempos de espera",
 				sectionDescription:
-					"Limite el establecimiento de la conexión, las solicitudes al proveedor y la ejecución del perfil shell. Todos los valores son en segundos.",
+					"Limite el establecimiento de la conexión y las solicitudes al proveedor o webhook. Todos los valores son en segundos.",
 				connectTimeout: "Tiempo de espera de conexión",
 				connectTimeoutDescription:
 					"Debe ser positivo y no mayor que el tiempo de espera de la solicitud.",
 				requestTimeout: "Tiempo de espera de la solicitud",
-				shellTimeout: "Tiempo de espera de shell",
 			},
 			retention: {
 				sectionTitle: "Retención",
@@ -555,6 +556,21 @@ export const es = {
 			profileName: "Nombre del perfil",
 			addProfile: "Añadir perfil de {{channel}}",
 			duplicateName: "Ese nombre de perfil ya existe.",
+			webhookMethod: "Método",
+			webhookGetWarning:
+				"Advertencia: las URL GET pueden exponer el remitente y el mensaje en los registros de acceso del proxy, servidor y monitorización.",
+			webhookUrl: "Plantilla de URL",
+			webhookContentType: "Content-Type",
+			webhookBody: "Plantilla del cuerpo",
+			webhookHeaders: "Cabeceras estáticas",
+			webhookHeaderName: "Nombre de cabecera",
+			webhookHeaderValue: "Valor de {{name}}",
+			webhookRemoveHeader: "Eliminar",
+			webhookAddHeader: "Añadir cabecera",
+			webhookHeaderDuplicate: "Ese nombre de cabecera ya existe.",
+			webhookHeaderRequired: "El nombre de cabecera es obligatorio.",
+			webhookVariables:
+				"Variables: {MESSAGE}, {SENDER}, {DATETIME}. Añada _URL para codificación porcentual o _JSON para un literal de cadena JSON completo.",
 			enableAria: "Habilitar reenvío para {{ref}}",
 			removeAria: "Eliminar {{ref}}",
 			removeDialog: {

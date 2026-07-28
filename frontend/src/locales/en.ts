@@ -427,6 +427,8 @@ export const en = {
 			apiEndpointChange: "The dashboard address may change after restart.",
 			databasePathChange:
 				"The service will use a different message database after restart.",
+			webhookGet:
+				"GET webhook URLs may expose sender and message data in access logs.",
 		},
 		leaveDialog: {
 			title: "Leave with unsaved changes?",
@@ -445,7 +447,7 @@ export const en = {
 			api: "Web API",
 			apiDescription: "Dashboard access and persistence",
 			timeouts: "Timeouts",
-			timeoutsDescription: "HTTP and shell execution limits",
+			timeoutsDescription: "HTTP connection and request limits",
 			retention: "Retention",
 			retentionDescription: "Automatic message cleanup",
 		},
@@ -501,12 +503,11 @@ export const en = {
 			timeouts: {
 				sectionTitle: "Timeouts",
 				sectionDescription:
-					"Bound connection setup, provider requests, and shell-profile execution. All values are seconds.",
+					"Bound connection setup and provider or webhook requests. All values are seconds.",
 				connectTimeout: "Connect timeout",
 				connectTimeoutDescription:
 					"Must be positive and no greater than the request timeout.",
 				requestTimeout: "Request timeout",
-				shellTimeout: "Shell timeout",
 			},
 			retention: {
 				sectionTitle: "Retention",
@@ -538,6 +539,21 @@ export const en = {
 			profileName: "Profile name",
 			addProfile: "Add {{channel}} profile",
 			duplicateName: "That profile name already exists.",
+			webhookMethod: "Method",
+			webhookGetWarning:
+				"Warning: GET URLs may expose sender and message data in proxy, server, and monitoring access logs.",
+			webhookUrl: "URL template",
+			webhookContentType: "Content-Type",
+			webhookBody: "Body template",
+			webhookHeaders: "Static headers",
+			webhookHeaderName: "Header name",
+			webhookHeaderValue: "{{name}} value",
+			webhookRemoveHeader: "Remove",
+			webhookAddHeader: "Add header",
+			webhookHeaderDuplicate: "That header name already exists.",
+			webhookHeaderRequired: "Header name is required.",
+			webhookVariables:
+				"Variables: {MESSAGE}, {SENDER}, {DATETIME}. Add _URL for percent encoding or _JSON for a complete JSON string literal.",
 			enableAria: "Enable forwarding for {{ref}}",
 			removeAria: "Remove {{ref}}",
 			removeDialog: {

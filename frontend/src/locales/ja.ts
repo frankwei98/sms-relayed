@@ -433,6 +433,8 @@ export const ja = {
 				"再起動後、ダッシュボードのアドレスが変更される場合があります。",
 			databasePathChange:
 				"再起動後、サービスは異なるメッセージデータベースを使用します。",
+			webhookGet:
+				"GET Webhook URL はアクセスログに送信者とメッセージを記録する可能性があります。",
 		},
 		leaveDialog: {
 			title: "未保存の変更を破棄して離れますか？",
@@ -451,7 +453,7 @@ export const ja = {
 			api: "Web API",
 			apiDescription: "ダッシュボードのアクセスと永続化",
 			timeouts: "タイムアウト",
-			timeoutsDescription: "HTTPとシェル実行の制限",
+			timeoutsDescription: "HTTP接続とリクエストの制限",
 			retention: "保持",
 			retentionDescription: "自動メッセージクリーンアップ",
 		},
@@ -511,7 +513,6 @@ export const ja = {
 				connectTimeoutDescription:
 					"正の値であり、リクエストタイムアウト以下である必要があります。",
 				requestTimeout: "リクエストタイムアウト",
-				shellTimeout: "シェルタイムアウト",
 			},
 			retention: {
 				sectionTitle: "保持",
@@ -543,6 +544,21 @@ export const ja = {
 			profileName: "プロファイル名",
 			addProfile: "{{channel}}プロファイルを追加",
 			duplicateName: "そのプロファイル名はすでに存在します。",
+			webhookMethod: "メソッド",
+			webhookGetWarning:
+				"警告：GET URL はプロキシ、サーバー、監視のアクセスログに送信者とメッセージを記録する可能性があります。",
+			webhookUrl: "URL テンプレート",
+			webhookContentType: "Content-Type",
+			webhookBody: "Body テンプレート",
+			webhookHeaders: "静的ヘッダー",
+			webhookHeaderName: "ヘッダー名",
+			webhookHeaderValue: "{{name}} の値",
+			webhookRemoveHeader: "削除",
+			webhookAddHeader: "ヘッダーを追加",
+			webhookHeaderDuplicate: "そのヘッダー名はすでに存在します。",
+			webhookHeaderRequired: "ヘッダー名は必須です。",
+			webhookVariables:
+				"変数：{MESSAGE}、{SENDER}、{DATETIME}。パーセントエンコードには _URL、完全な JSON 文字列リテラルには _JSON を追加します。",
 			enableAria: "{{ref}}の転送を有効にする",
 			removeAria: "{{ref}}を削除",
 			removeDialog: {

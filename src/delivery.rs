@@ -8,7 +8,6 @@ use tokio::sync::Notify;
 
 use crate::config::AppConfig;
 use crate::persistence::Store;
-use crate::runner::ProcessRunner;
 
 mod dispatcher;
 mod worker;
@@ -19,12 +18,7 @@ impl DeliverySettings {
     pub(crate) fn from_app_config(config: &AppConfig) -> Self {
         Self {
             concurrency: config.delivery.concurrency,
-            channel_timeout: Duration::from_secs(
-                config
-                    .http
-                    .request_timeout_secs
-                    .max(config.http.shell_timeout_secs),
-            ),
+            channel_timeout: Duration::from_secs(config.http.request_timeout_secs),
         }
     }
 }
@@ -60,13 +54,13 @@ impl DeliveryWorker {
         settings: DeliverySettings,
         forwarding_config: AppConfig,
         client: Arc<reqwest::Client>,
-        shell_runner: Arc<dyn ProcessRunner>,
+        webhook_client: Arc<reqwest::Client>,
         wakeup: DeliveryWakeup,
     ) -> Result<Self> {
         let dispatcher = Arc::new(dispatcher::ProductionDispatcher::new(
             forwarding_config,
             client,
-            shell_runner,
+            webhook_client,
         )?);
         Ok(Self::with_dispatcher(store, settings, dispatcher, wakeup))
     }
@@ -81,11 +75,10 @@ mod tests {
         let mut config = AppConfig::default();
         config.delivery.concurrency = 7;
         config.http.request_timeout_secs = 11;
-        config.http.shell_timeout_secs = 13;
 
         let settings = DeliverySettings::from_app_config(&config);
 
         assert_eq!(settings.concurrency, 7);
-        assert_eq!(settings.channel_timeout, Duration::from_secs(13));
+        assert_eq!(settings.channel_timeout, Duration::from_secs(11));
     }
 }

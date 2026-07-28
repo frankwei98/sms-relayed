@@ -71,8 +71,8 @@ pub struct HttpSection {
     pub connect_timeout_secs: u64,
     #[serde(default = "default_http_request_timeout")]
     pub request_timeout_secs: u64,
-    #[serde(default = "default_shell_timeout")]
-    pub shell_timeout_secs: u64,
+    #[serde(default, rename = "shell_timeout_secs", skip_serializing)]
+    legacy_shell_timeout_secs: Option<u64>,
 }
 
 fn default_http_connect_timeout() -> u64 {
@@ -83,16 +83,12 @@ fn default_http_request_timeout() -> u64 {
     30
 }
 
-fn default_shell_timeout() -> u64 {
-    30
-}
-
 impl Default for HttpSection {
     fn default() -> Self {
         Self {
             connect_timeout_secs: default_http_connect_timeout(),
             request_timeout_secs: default_http_request_timeout(),
-            shell_timeout_secs: default_shell_timeout(),
+            legacy_shell_timeout_secs: None,
         }
     }
 }
@@ -190,7 +186,9 @@ pub struct ChannelsSection {
     #[serde(default)]
     pub lark: BTreeMap<String, LarkConfig>,
     #[serde(default)]
-    pub shell: BTreeMap<String, ShellConfig>,
+    pub webhook: BTreeMap<String, WebhookConfig>,
+    #[serde(default, rename = "shell", skip_serializing)]
+    legacy_shell: BTreeMap<String, LegacyShellConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -230,8 +228,50 @@ pub struct LarkConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct ShellConfig {
+struct LegacyShellConfig {
     pub path: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WebhookMethod {
+    Get,
+    #[default]
+    Post,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebhookConfig {
+    #[serde(default)]
+    pub method: WebhookMethod,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default = "default_webhook_content_type")]
+    pub content_type: String,
+    #[serde(default = "default_webhook_body")]
+    pub body: String,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+fn default_webhook_content_type() -> String {
+    "application/json".to_string()
+}
+
+fn default_webhook_body() -> String {
+    "{\n  \"sender\": {SENDER_JSON},\n  \"message\": {MESSAGE_JSON},\n  \"datetime\": {DATETIME_JSON}\n}".to_string()
+}
+
+impl Default for WebhookConfig {
+    fn default() -> Self {
+        Self {
+            method: WebhookMethod::Post,
+            url: String::new(),
+            content_type: default_webhook_content_type(),
+            body: default_webhook_body(),
+            headers: BTreeMap::new(),
+        }
+    }
 }
 
 fn default_telegram_api_base() -> String {
@@ -270,7 +310,7 @@ pub enum ChannelType {
     WeCom,
     DingTalk,
     Lark,
-    Shell,
+    Webhook,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,9 +341,9 @@ pub enum ChannelProfile {
         name: String,
         config: LarkConfig,
     },
-    Shell {
+    Webhook {
         name: String,
-        config: ShellConfig,
+        config: WebhookConfig,
     },
 }
 
@@ -347,7 +387,10 @@ impl ProfileRef {
             "wecom" => ChannelType::WeCom,
             "dingtalk" => ChannelType::DingTalk,
             "lark" => ChannelType::Lark,
-            "shell" => ChannelType::Shell,
+            "webhook" => ChannelType::Webhook,
+            "shell" => {
+                bail!("shell forwarding has been removed; replace shell.<name> with webhook.<name>")
+            }
             other => bail!("unknown channel type: {}", other),
         };
         if name.trim().is_empty() {
@@ -368,7 +411,7 @@ impl ChannelProfile {
             ChannelProfile::WeCom { name, .. } => format!("wecom.{}", name),
             ChannelProfile::DingTalk { name, .. } => format!("dingtalk.{}", name),
             ChannelProfile::Lark { name, .. } => format!("lark.{}", name),
-            ChannelProfile::Shell { name, .. } => format!("shell.{}", name),
+            ChannelProfile::Webhook { name, .. } => format!("webhook.{}", name),
         }
     }
 
@@ -409,8 +452,16 @@ impl ChannelProfile {
                     redact(&config.secret)
                 )
             }
-            ChannelProfile::Shell { name, config } => {
-                format!("shell.{} path={}", name, config.path)
+            ChannelProfile::Webhook { name, config } => {
+                format!(
+                    "webhook.{} method={} url=**** headers={}",
+                    name,
+                    match config.method {
+                        WebhookMethod::Get => "get",
+                        WebhookMethod::Post => "post",
+                    },
+                    config.headers.len()
+                )
             }
         }
     }
@@ -647,11 +698,15 @@ impl AppConfig {
                 bail!("api.database_path is required when api.enabled is true");
             }
         }
-        if self.http.connect_timeout_secs == 0
-            || self.http.request_timeout_secs == 0
-            || self.http.shell_timeout_secs == 0
-        {
-            bail!("http and shell timeouts must be greater than zero");
+        if !self.channels.legacy_shell.is_empty() || self.http.legacy_shell_timeout_secs.is_some() {
+            bail!("shell forwarding has been removed; replace shell.<name> with webhook.<name>");
+        }
+        for (name, profile) in &self.channels.webhook {
+            crate::forward::webhook::validate_profile(profile)
+                .map_err(|error| anyhow::anyhow!("invalid channels.webhook.{name}: {error}"))?;
+        }
+        if self.http.connect_timeout_secs == 0 || self.http.request_timeout_secs == 0 {
+            bail!("http timeouts must be greater than zero");
         }
         if self.http.connect_timeout_secs > self.http.request_timeout_secs {
             bail!("http.connect_timeout_secs must not exceed request_timeout_secs");
@@ -688,9 +743,9 @@ impl AppConfig {
         keys.extend(self.channels.lark.keys().map(|name| format!("lark.{name}")));
         keys.extend(
             self.channels
-                .shell
+                .webhook
                 .keys()
-                .map(|name| format!("shell.{name}")),
+                .map(|name| format!("webhook.{name}")),
         );
         keys
     }
@@ -796,12 +851,14 @@ impl AppConfig {
                     config: cfg.clone(),
                 })
             }
-            ChannelType::Shell => {
-                let cfg = self.channels.shell.get(&reference.name).ok_or_else(|| {
-                    anyhow::anyhow!("enabled profile shell.{} does not exist", reference.name)
+            ChannelType::Webhook => {
+                let cfg = self.channels.webhook.get(&reference.name).ok_or_else(|| {
+                    anyhow::anyhow!("enabled profile webhook.{} does not exist", reference.name)
                 })?;
-                require("channels.shell", &reference.name, "path", &cfg.path)?;
-                Ok(ChannelProfile::Shell {
+                crate::forward::webhook::validate_profile(cfg).map_err(|error| {
+                    anyhow::anyhow!("invalid channels.webhook.{}: {error}", reference.name)
+                })?;
+                Ok(ChannelProfile::Webhook {
                     name: reference.name.clone(),
                     config: cfg.clone(),
                 })
@@ -959,6 +1016,62 @@ mod tests {
         let r = ProfileRef::parse("bark.personal").unwrap();
         assert_eq!(r.channel_type, ChannelType::Bark);
         assert_eq!(r.name, "personal");
+    }
+
+    #[test]
+    fn rejects_removed_shell_configuration_with_migration_message() {
+        let config: AppConfig = toml::from_str(
+            r#"
+                [app]
+                device_name = "router"
+                modem_path = "/org/freedesktop/ModemManager1/Modem/0"
+
+                [sms]
+                ignore_storage = []
+                code_keywords = []
+
+                [forward]
+                enabled = []
+
+                [channels.shell.default]
+                path = "/usr/local/bin/forward"
+
+                [http]
+                shell_timeout_secs = 30
+            "#,
+        )
+        .unwrap();
+
+        let error = config.validate().unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "shell forwarding has been removed; replace shell.<name> with webhook.<name>"
+        );
+        assert!(!config.canonical_toml().unwrap().contains("[channels.shell"));
+    }
+
+    #[test]
+    fn validates_webhook_templates_and_redacts_url_and_headers() {
+        let mut config = AppConfig::default();
+        config.channels.webhook.insert(
+            "custom".to_string(),
+            WebhookConfig {
+                url: "http://lan.example/{TITLE}".to_string(),
+                headers: BTreeMap::from([("X-Api-Key".to_string(), "secret-value".to_string())]),
+                ..WebhookConfig::default()
+            },
+        );
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("unknown webhook template variable {TITLE}"));
+
+        config.channels.webhook.get_mut("custom").unwrap().url =
+            "http://lan.example/{MESSAGE_URL}".to_string();
+        config.forward.enabled = vec!["webhook.custom".to_string()];
+        assert!(config.validate().is_ok());
+        let summary = config.redacted_summary();
+        assert!(summary.contains("webhook.custom method=post url=**** headers=1"));
+        assert!(!summary.contains("lan.example"));
+        assert!(!summary.contains("secret-value"));
     }
 
     #[test]

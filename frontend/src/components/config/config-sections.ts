@@ -66,7 +66,7 @@ export const CONFIG_SECTION_DEFINITIONS: ConfigSectionDefinition[] = [
 	{
 		id: "timeouts",
 		label: "Timeouts",
-		description: "HTTP and shell execution limits",
+		description: "HTTP connection and request limits",
 		labelTKey: "config.sections.timeouts",
 		descriptionTKey: "config.sections.timeoutsDescription",
 		icon: Clock3,
