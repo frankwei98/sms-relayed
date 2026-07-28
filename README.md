@@ -149,6 +149,9 @@ shell_timeout_secs = 30
 enabled = false
 max_age_days = 90
 batch_size = 500
+
+[monitoring]
+enabled = true
 ```
 
 配置说明：
@@ -286,8 +289,9 @@ pnpm build
 
 ### 错误监测与隐私
 
-正式后端服务和生产前端默认启用独立的 Sentry 错误项目。上报会移除请求、用户、breadcrumb、主机名、上下文变量和异常正文，不发送短信正文、电话号码或配置凭据；重复运行时错误会限流。
+Sentry 错误监测在缺少配置时默认关闭；配置向导会询问是否启用，并默认选择 `yes`。后端服务和生产前端使用独立项目。上报会移除请求、用户、breadcrumb、主机名、上下文变量和异常正文，不发送短信正文、电话号码或配置凭据；重复运行时错误会限流。
 
+- 运行时：设置 `[monitoring] enabled = true` 同时允许后端和生产前端上报。
 - 后端：设置 `SMS_RELAYED_SENTRY_DSN` 可覆盖 DSN，设为空字符串可关闭。
 - 前端：构建时设置 `VITE_SENTRY_DSN` 可覆盖 DSN，设置 `VITE_SENTRY_ENABLED=false` 可关闭。
 - 前端开发模式不发送 Sentry 事件。
@@ -437,6 +441,9 @@ shell_timeout_secs = 30
 enabled = false
 max_age_days = 90
 batch_size = 500
+
+[monitoring]
+enabled = true
 ```
 
 Important rules:
@@ -567,8 +574,9 @@ If `frontend/dist` is missing, `build.rs` creates a fallback page for Rust devel
 
 ### Error monitoring and privacy
 
-The production backend and frontend use separate Sentry projects by default. Reports strip requests, users, breadcrumbs, host names, contextual variables, and exception text. SMS bodies, phone numbers, and configuration credentials are not sent, and repeated operational errors are rate-limited.
+Sentry error monitoring defaults to off when the setting is absent. The setup wizard asks whether to enable it and defaults that answer to `yes`. The backend and production frontend use separate projects. Reports strip requests, users, breadcrumbs, host names, contextual variables, and exception text. SMS bodies, phone numbers, and configuration credentials are not sent, and repeated operational errors are rate-limited.
 
+- Runtime: set `[monitoring] enabled = true` to allow both backend and production frontend reporting.
 - Backend: override with `SMS_RELAYED_SENTRY_DSN`, or set it to an empty string to disable reporting.
 - Frontend: override at build time with `VITE_SENTRY_DSN`, or set `VITE_SENTRY_ENABLED=false` to disable reporting.
 - Frontend development mode does not send Sentry events.

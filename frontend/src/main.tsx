@@ -1,10 +1,12 @@
 import { createRouter, RouterProvider } from "@tanstack/react-router";
 import ReactDOM from "react-dom/client";
 import "./lib/i18n";
-import { initMonitoring, Sentry } from "./lib/monitoring";
+import {
+	initMonitoring,
+	loadMonitoringPreference,
+	Sentry,
+} from "./lib/monitoring";
 import { routeTree } from "./routeTree.gen";
-
-initMonitoring();
 
 const router = createRouter({
 	routeTree,
@@ -20,7 +22,10 @@ declare module "@tanstack/react-router" {
 
 const rootElement = document.getElementById("app") as HTMLElement;
 
-if (!rootElement.innerHTML) {
+async function start(): Promise<void> {
+	initMonitoring(await loadMonitoringPreference());
+	if (rootElement.innerHTML) return;
+
 	const root = ReactDOM.createRoot(rootElement, {
 		onUncaughtError: Sentry.reactErrorHandler(),
 		onRecoverableError: Sentry.reactErrorHandler(),
@@ -37,3 +42,5 @@ if (!rootElement.innerHTML) {
 		</Sentry.ErrorBoundary>,
 	);
 }
+
+void start();

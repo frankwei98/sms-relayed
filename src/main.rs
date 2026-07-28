@@ -34,7 +34,9 @@ async fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
     let is_service = matches!(args.command.as_ref(), Some(Command::Run));
-    let _sentry = is_service.then(monitoring::init).flatten();
+    let monitoring_enabled =
+        is_service && AppConfig::load(&args.config).is_ok_and(|config| config.monitoring.enabled);
+    let _sentry = monitoring::init(monitoring_enabled);
     let result = run(args).await;
     if is_service && result.is_err() {
         monitoring::capture_failure("process", "process.exit_error");
