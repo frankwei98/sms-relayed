@@ -1,6 +1,7 @@
 import { Button } from "#/components/ui/button";
 import { Checkbox } from "#/components/ui/checkbox";
 import { Input } from "#/components/ui/input";
+import { downloadFile } from "#/lib/api";
 
 type FiltersProps = {
 	q: string;
@@ -80,7 +81,10 @@ export function MessageFilters({
 				variant="outline"
 				size="sm"
 				onClick={() => {
-					window.location.href = `/api/messages/export?format=csv&${buildParams().toString()}`;
+					void downloadFile(
+						`/api/messages/export?format=csv&${buildParams().toString()}`,
+						"sms-relayed-messages.csv",
+					);
 				}}
 			>
 				CSV
@@ -89,7 +93,10 @@ export function MessageFilters({
 				variant="outline"
 				size="sm"
 				onClick={() => {
-					window.location.href = `/api/messages/export?format=json&${buildParams().toString()}`;
+					void downloadFile(
+						`/api/messages/export?format=json&${buildParams().toString()}`,
+						"sms-relayed-messages.json",
+					);
 				}}
 			>
 				JSON

@@ -325,6 +325,7 @@ export const fr = {
 			markRead: "Impossible de marquer les messages comme lus. Réessayez.",
 			update: "Impossible de mettre à jour les messages. Réessayez.",
 			delete: "Impossible de supprimer les messages. Réessayez.",
+			export: "Impossible d’exporter les messages. Réessayez.",
 			loadOlder: "Impossible de charger les messages précédents. Réessayez.",
 			refresh: "Impossible d’actualiser les messages. Réessayez.",
 		},
