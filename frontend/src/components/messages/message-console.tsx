@@ -1,5 +1,11 @@
 import dayjs from "dayjs";
+import "dayjs/locale/es";
+import "dayjs/locale/fr";
+import "dayjs/locale/ja";
+import "dayjs/locale/ko";
+import "dayjs/locale/zh-cn";
 import relativeTime from "dayjs/plugin/relativeTime";
+import type { TFunction } from "i18next";
 import {
 	Archive,
 	CheckCheck,
@@ -57,11 +63,11 @@ import {
 	type Message,
 } from "#/lib/api";
 import { subscribeEvents } from "#/lib/events";
+import { normalizeLanguage } from "#/lib/i18n";
 import { fetchModemStatus } from "#/lib/modem-api";
 import { cn } from "#/lib/utils";
 
 dayjs.extend(relativeTime);
-dayjs.locale(navigator.language.toLowerCase());
 
 const ALL_DIRECTIONS = "all-directions";
 const ALL_STATUSES = "all-statuses";
@@ -996,7 +1002,8 @@ function ConversationCard({
 	active: boolean;
 	onClick: () => void;
 }) {
-	const { t } = useTranslation();
+	const { t, i18n } = useTranslation();
+	const language = i18n.resolvedLanguage ?? i18n.language;
 	const last = conversation.last_message;
 	return (
 		<button
@@ -1040,8 +1047,11 @@ function ConversationCard({
 							)}
 						>
 							{active
-								? formatAbsoluteLocalTime(messageDisplayTimestamp(last))
-								: formatRelativeTime(messageDisplayTimestamp(last))}
+								? formatAbsoluteLocalTime(
+										messageDisplayTimestamp(last),
+										language,
+									)
+								: formatRelativeTime(messageDisplayTimestamp(last), language)}
 						</span>
 						{conversation.unread_count > 0 && (
 							<Badge
@@ -1446,7 +1456,8 @@ function MessageThread({
 	selectedIds: Set<number>;
 	onToggleSelect: (id: number) => void;
 }) {
-	const { t } = useTranslation();
+	const { t, i18n } = useTranslation();
+	const language = i18n.resolvedLanguage ?? i18n.language;
 	if (messages.length === 0) {
 		return (
 			<div className="grid h-full place-items-center text-center">
@@ -1466,7 +1477,11 @@ function MessageThread({
 	return (
 		<div className="mx-auto flex max-w-3xl flex-col gap-2">
 			{messages.map((message) => {
-				const day = formatRelativeDay(messageDisplayTimestamp(message));
+				const day = formatRelativeDay(
+					messageDisplayTimestamp(message),
+					language,
+					t,
+				);
 				const showDay = day !== lastDay;
 				lastDay = day;
 				return (
@@ -1502,6 +1517,8 @@ function MessageBubble({
 	selected: boolean;
 	onToggle: () => void;
 }) {
+	const { i18n } = useTranslation();
+	const language = i18n.resolvedLanguage ?? i18n.language;
 	const outbound = message.direction === "outbound";
 	return (
 		<div
@@ -1529,7 +1546,9 @@ function MessageBubble({
 						outbound ? "text-primary-foreground/70" : "text-muted-foreground",
 					)}
 				>
-					<span>{formatRelativeTime(messageDisplayTimestamp(message))}</span>
+					<span>
+						{formatRelativeTime(messageDisplayTimestamp(message), language)}
+					</span>
 					<span>{message.status}</span>
 					{message.error && (
 						<span
@@ -1607,26 +1626,33 @@ function parseTime(value: string) {
 	return time.isValid() ? time : null;
 }
 
-function formatRelativeTime(value: string) {
-	return parseTime(value)?.fromNow() ?? value;
+function dayjsLocale(language: string) {
+	const normalized = normalizeLanguage(language);
+	return normalized === "zh-CN" ? "zh-cn" : normalized;
 }
 
-function formatRelativeDay(value: string) {
+function formatRelativeTime(value: string, language: string) {
+	return parseTime(value)?.locale(dayjsLocale(language)).fromNow() ?? value;
+}
+
+function formatRelativeDay(value: string, language: string, t: TFunction) {
 	const time = parseTime(value);
 	if (!time) return value;
 	const today = dayjs().startOf("day");
 	const day = time.startOf("day");
 	const dayDiff = today.diff(day, "day");
-	if (dayDiff === 0) return "Today";
-	if (dayDiff === 1) return "Yesterday";
-	if (dayDiff > 1) return `${dayDiff} days ago`;
-	return day.fromNow();
+	if (dayDiff === 0) return t("messages.relativeDay.today");
+	if (dayDiff === 1) return t("messages.relativeDay.yesterday");
+	if (dayDiff > 1) {
+		return t("messages.relativeDay.daysAgo", { count: dayDiff });
+	}
+	return day.locale(dayjsLocale(language)).fromNow();
 }
 
-function formatAbsoluteLocalTime(value: string) {
+function formatAbsoluteLocalTime(value: string, language: string) {
 	const time = parseTime(value);
 	if (!time) return value;
-	return new Intl.DateTimeFormat(undefined, {
+	return new Intl.DateTimeFormat(normalizeLanguage(language), {
 		dateStyle: "medium",
 		timeStyle: "short",
 	}).format(time.toDate());
