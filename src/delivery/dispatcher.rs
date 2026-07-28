@@ -1,12 +1,10 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 
 use crate::config::{AppConfig, ChannelProfile};
-use crate::runner::ProcessRunner;
 
 pub(super) use crate::forward::ForwardOutcome as DispatchOutcome;
 
@@ -32,24 +30,21 @@ pub(super) struct ProductionDispatcher {
     config: AppConfig,
     profiles: Vec<ChannelProfile>,
     client: Arc<reqwest::Client>,
-    shell_runner: Arc<dyn ProcessRunner>,
-    shell_timeout: Duration,
+    webhook_client: Arc<reqwest::Client>,
 }
 
 impl ProductionDispatcher {
     pub(super) fn new(
         config: AppConfig,
         client: Arc<reqwest::Client>,
-        shell_runner: Arc<dyn ProcessRunner>,
+        webhook_client: Arc<reqwest::Client>,
     ) -> Result<Self> {
         let profiles = config.enabled_profiles()?;
-        let shell_timeout = Duration::from_secs(config.http.shell_timeout_secs);
         Ok(Self {
             config,
             profiles,
             client,
-            shell_runner,
-            shell_timeout,
+            webhook_client,
         })
     }
 }
@@ -67,8 +62,7 @@ impl Dispatcher for ProductionDispatcher {
             DispatchResult::Attempted(
                 forward_to_profile(
                     &self.client,
-                    &*self.shell_runner,
-                    self.shell_timeout,
+                    &self.webhook_client,
                     profile,
                     request,
                     &self.config,
@@ -81,8 +75,7 @@ impl Dispatcher for ProductionDispatcher {
 
 async fn forward_to_profile(
     client: &reqwest::Client,
-    shell_runner: &dyn ProcessRunner,
-    shell_timeout: Duration,
+    webhook_client: &reqwest::Client,
     profile: &ChannelProfile,
     request: DispatchRequest<'_>,
     config: &AppConfig,
@@ -161,18 +154,15 @@ async fn forward_to_profile(
             )
             .await
         }
-        ChannelProfile::Shell { config: pc, .. } => {
-            crate::forward::shell::send(
-                shell_runner,
-                shell_timeout,
-                crate::forward::shell::ShellMessage {
-                    tel_number,
-                    sms_text: body,
-                    sms_date: timestamp,
-                    device_name: &device_name,
+        ChannelProfile::Webhook { config: pc, .. } => {
+            crate::forward::webhook::send(
+                webhook_client,
+                crate::forward::webhook::WebhookMessage {
+                    sender: tel_number,
+                    message: body,
+                    datetime: timestamp,
                 },
                 pc,
-                config,
             )
             .await
         }
@@ -343,77 +333,14 @@ pub(super) use scripted::{ScriptedAction, ScriptedDispatcher};
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
-    use std::os::unix::process::ExitStatusExt;
-    use std::pin::Pin;
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::sync::Arc;
 
-    use crate::config::{AppConfig, ShellConfig};
-    use crate::runner::ProcessRunner;
+    use crate::config::AppConfig;
 
     use super::{
-        DispatchOutcome, DispatchRequest, DispatchResult, Dispatcher, ProductionDispatcher,
-        ScriptedAction, ScriptedDispatcher,
+        DispatchRequest, DispatchResult, Dispatcher, ProductionDispatcher, ScriptedAction,
+        ScriptedDispatcher,
     };
-
-    struct RecordedCommand {
-        arguments: Vec<String>,
-        timeout: Duration,
-    }
-
-    struct CapturingRunner {
-        commands: Mutex<Vec<RecordedCommand>>,
-        fail_with_timeout: bool,
-    }
-
-    impl CapturingRunner {
-        fn new(fail_with_timeout: bool) -> Self {
-            Self {
-                commands: Mutex::new(Vec::new()),
-                fail_with_timeout,
-            }
-        }
-    }
-
-    impl ProcessRunner for CapturingRunner {
-        fn run_command<'a>(
-            &'a self,
-            _program: &'a str,
-            arguments: &'a [&'a str],
-            timeout: Duration,
-        ) -> Pin<Box<dyn Future<Output = anyhow::Result<std::process::ExitStatus>> + Send + 'a>>
-        {
-            self.commands.lock().unwrap().push(RecordedCommand {
-                arguments: arguments
-                    .iter()
-                    .map(|argument| argument.to_string())
-                    .collect(),
-                timeout,
-            });
-            Box::pin(async move {
-                if self.fail_with_timeout {
-                    Err(anyhow::anyhow!("shell timeout"))
-                } else {
-                    Ok(std::process::ExitStatus::from_raw(0))
-                }
-            })
-        }
-    }
-
-    fn shell_config(device_name: &str) -> AppConfig {
-        let mut config = AppConfig::default();
-        config.app.device_name = device_name.to_string();
-        config.http.shell_timeout_secs = 17;
-        config.forward.enabled.push("shell.test".to_string());
-        config.channels.shell.insert(
-            "test".to_string(),
-            ShellConfig {
-                path: "/bin/true".to_string(),
-            },
-        );
-        config
-    }
 
     #[tokio::test]
     async fn scripted_dispatcher_returns_the_next_action_and_captures_the_request() {
@@ -446,17 +373,16 @@ mod tests {
 
     #[tokio::test]
     async fn production_dispatcher_reports_missing_profile_without_attempting() {
-        let runner = Arc::new(CapturingRunner::new(false));
         let dispatcher = ProductionDispatcher::new(
             AppConfig::default(),
             Arc::new(reqwest::Client::new()),
-            runner.clone(),
+            Arc::new(reqwest::Client::new()),
         )
         .unwrap();
 
         let result = dispatcher
             .dispatch(DispatchRequest {
-                profile_key: "shell.missing",
+                profile_key: "webhook.missing",
                 phone_number: "+15550000000",
                 body: "hello",
                 timestamp: "2026-07-25T00:00:00Z",
@@ -464,7 +390,6 @@ mod tests {
             .await;
 
         assert!(matches!(result, DispatchResult::ProfileMissing));
-        assert!(runner.commands.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -475,69 +400,9 @@ mod tests {
         let result = ProductionDispatcher::new(
             config,
             Arc::new(reqwest::Client::new()),
-            Arc::new(CapturingRunner::new(false)),
+            Arc::new(reqwest::Client::new()),
         );
 
         assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn production_dispatcher_preserves_shell_timeout_and_explicit_device_name() {
-        let runner = Arc::new(CapturingRunner::new(true));
-        let dispatcher = ProductionDispatcher::new(
-            shell_config("router-a"),
-            Arc::new(reqwest::Client::new()),
-            runner.clone(),
-        )
-        .unwrap();
-
-        let result = dispatcher
-            .dispatch(DispatchRequest {
-                profile_key: "shell.test",
-                phone_number: "+15550000000",
-                body: "hello",
-                timestamp: "2026-07-25T00:00:00Z",
-            })
-            .await;
-
-        assert!(matches!(
-            result,
-            DispatchResult::Attempted(DispatchOutcome::TransientFailure(code))
-                if code == "shell_timeout"
-        ));
-        let commands = runner.commands.lock().unwrap();
-        assert_eq!(commands[0].timeout, Duration::from_secs(17));
-        assert_eq!(commands[0].arguments[5], "router-a");
-    }
-
-    #[tokio::test]
-    async fn production_dispatcher_resolves_hostname_sentinel_and_empty_name() {
-        for configured_name in ["*Host*Name*", ""] {
-            let runner = Arc::new(CapturingRunner::new(false));
-            let dispatcher = ProductionDispatcher::new(
-                shell_config(configured_name),
-                Arc::new(reqwest::Client::new()),
-                runner.clone(),
-            )
-            .unwrap();
-
-            let result = dispatcher
-                .dispatch(DispatchRequest {
-                    profile_key: "shell.test",
-                    phone_number: "+15550000000",
-                    body: "hello",
-                    timestamp: "2026-07-25T00:00:00Z",
-                })
-                .await;
-
-            assert!(matches!(
-                result,
-                DispatchResult::Attempted(DispatchOutcome::Success)
-            ));
-            assert_eq!(
-                runner.commands.lock().unwrap()[0].arguments[5],
-                crate::util::hostname()
-            );
-        }
     }
 }

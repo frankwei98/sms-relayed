@@ -25,7 +25,16 @@ export type AppConfig = {
 		>;
 		dingtalk: Record<string, { access_token: string; secret: string }>;
 		lark: Record<string, { webhook_url: string; secret: string }>;
-		shell: Record<string, { path: string }>;
+		webhook: Record<
+			string,
+			{
+				method: "get" | "post";
+				url: string;
+				content_type: string;
+				body: string;
+				headers: Record<string, string>;
+			}
+		>;
 	};
 	api: {
 		enabled: boolean;
@@ -38,7 +47,6 @@ export type AppConfig = {
 	http: {
 		connect_timeout_secs: number;
 		request_timeout_secs: number;
-		shell_timeout_secs: number;
 	};
 	retention: {
 		enabled: boolean;

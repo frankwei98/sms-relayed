@@ -4,7 +4,8 @@ use anyhow::{bail, Result};
 use inquire::{Confirm, MultiSelect, Password, Select, Text};
 
 use crate::config::{
-    AppConfig, BarkConfig, DingTalkConfig, LarkConfig, ShellConfig, TelegramConfig, WeComConfig,
+    AppConfig, BarkConfig, DingTalkConfig, LarkConfig, TelegramConfig, WeComConfig, WebhookConfig,
+    WebhookMethod,
 };
 
 const EXISTING_CONFIG_PROMPT: &str = "Existing config found";
@@ -92,7 +93,7 @@ pub fn run_setup_wizard(existing: Option<AppConfig>) -> Result<Option<AppConfig>
 
     let selected = MultiSelect::new(
         PUSH_CHANNELS_PROMPT,
-        vec!["Bark", "Telegram", "WeCom", "DingTalk", "Lark", "Shell"],
+        vec!["Bark", "Telegram", "WeCom", "DingTalk", "Lark", "Webhook"],
     )
     .prompt()?;
 
@@ -211,12 +212,22 @@ fn add_profiles_for_channel(cfg: &mut AppConfig, label: &str) -> Result<()> {
                 );
                 cfg.forward.enabled.push(format!("lark.{}", name));
             }
-            "Shell" => {
-                let path = Text::new("Shell script path").prompt()?;
-                cfg.channels
-                    .shell
-                    .insert(name.clone(), ShellConfig { path });
-                cfg.forward.enabled.push(format!("shell.{}", name));
+            "Webhook" => {
+                let method = Select::new("Webhook method", vec!["POST", "GET"]).prompt()?;
+                let url = Text::new("Webhook URL template").prompt()?;
+                let mut profile = WebhookConfig {
+                    url,
+                    ..WebhookConfig::default()
+                };
+                if method == "GET" {
+                    profile.method = WebhookMethod::Get;
+                    profile.body.clear();
+                    eprintln!(
+                        "Warning: GET webhook URLs may expose sender and message data in access logs."
+                    );
+                }
+                cfg.channels.webhook.insert(name.clone(), profile);
+                cfg.forward.enabled.push(format!("webhook.{}", name));
             }
             other => anyhow::bail!("unknown wizard channel: {}", other),
         }
@@ -236,7 +247,7 @@ fn profile_count(cfg: &AppConfig, label: &str) -> usize {
         "WeCom" => cfg.channels.wecom.len(),
         "DingTalk" => cfg.channels.dingtalk.len(),
         "Lark" => cfg.channels.lark.len(),
-        "Shell" => cfg.channels.shell.len(),
+        "Webhook" => cfg.channels.webhook.len(),
         _ => 0,
     }
 }

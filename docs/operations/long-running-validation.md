@@ -53,16 +53,16 @@ Each fault test requires operator supervision.  Record pass/fail for each row.
 1. Configure a `bark` profile pointing to a non-routable address (e.g., `10.255.255.1`).
 2. Send a test SMS.
 3. Verify the delivery reaches `retry_wait` after the HTTP timeout.
-4. Verify `mmcli` and `sh` children are zero 2 seconds after timeout.
+4. Verify no unexpected child process remains 2 seconds after timeout.
 5. Restore the correct profile URL.
 
-### 3.2 Shell Child Timeout
+### 3.2 Webhook Redirect Classification
 
-1. Configure a `shell` profile whose script runs `sleep 120`.
+1. Configure a GET `webhook` profile pointing to a supervised test endpoint that returns `302` with a `Location` header.
 2. Send a test SMS.
-3. Verify the delivery enters `retry_wait` after the shell timeout (30s default).
-4. Verify no child process survives (`pgrep -P $(pidof sms-relayed)`).
-5. Restore the correct shell script or remove the profile.
+3. Verify the delivery is marked as a permanent `http_status_302` failure.
+4. Verify the redirect destination received no request.
+5. Restore the correct Webhook URL or remove the profile.
 
 ### 3.3 ModemManager Restart and Path Drift
 
@@ -122,7 +122,7 @@ wait
 | Baseline | | | | |
 | 24h idle | | | | |
 | Black-hole HTTP | | | | |
-| Shell timeout | | | | |
+| Webhook redirect | | | | |
 | ModemManager restart | | | | |
 | Outage + restart | | | | |
 | Health concurrency | | | | |

@@ -410,6 +410,7 @@ export const zhCN = {
 			apiDisable: "重启后仪表盘将不可用。",
 			apiEndpointChange: "重启后仪表盘地址可能更改。",
 			databasePathChange: "重启后服务将使用不同的消息数据库。",
+			webhookGet: "GET Webhook URL 可能会在访问日志中泄露发送者和短信内容。",
 		},
 		leaveDialog: {
 			title: "离开并放弃未保存的更改？",
@@ -427,7 +428,7 @@ export const zhCN = {
 			api: "Web API",
 			apiDescription: "仪表盘访问和持久化",
 			timeouts: "超时",
-			timeoutsDescription: "HTTP 和 Shell 执行限制",
+			timeoutsDescription: "HTTP 连接和请求限制",
 			retention: "保留",
 			retentionDescription: "自动消息清理",
 		},
@@ -477,11 +478,10 @@ export const zhCN = {
 			timeouts: {
 				sectionTitle: "超时",
 				sectionDescription:
-					"限制连接建立、提供者请求和 Shell 配置执行。所有值以秒为单位。",
+					"限制连接建立以及提供者或 Webhook 请求。所有值以秒为单位。",
 				connectTimeout: "连接超时",
 				connectTimeoutDescription: "必须为正数且不大于请求超时。",
 				requestTimeout: "请求超时",
-				shellTimeout: "Shell 超时",
 			},
 			retention: {
 				sectionTitle: "保留",
@@ -511,6 +511,21 @@ export const zhCN = {
 			profileName: "配置名称",
 			addProfile: "添加 {{channel}} 配置",
 			duplicateName: "该配置名称已存在。",
+			webhookMethod: "方法",
+			webhookGetWarning:
+				"警告：GET URL 可能会在代理、服务端和监控系统的访问日志中泄露发送者和短信内容。",
+			webhookUrl: "URL 模板",
+			webhookContentType: "Content-Type",
+			webhookBody: "Body 模板",
+			webhookHeaders: "静态 Header",
+			webhookHeaderName: "Header 名称",
+			webhookHeaderValue: "{{name}} 的值",
+			webhookRemoveHeader: "删除",
+			webhookAddHeader: "添加 Header",
+			webhookHeaderDuplicate: "该 Header 名称已存在。",
+			webhookHeaderRequired: "Header 名称不能为空。",
+			webhookVariables:
+				"变量：{MESSAGE}、{SENDER}、{DATETIME}。追加 _URL 可进行百分号编码，追加 _JSON 可生成完整 JSON 字符串字面量。",
 			enableAria: "为 {{ref}} 启用转发",
 			removeAria: "删除 {{ref}}",
 			removeDialog: {

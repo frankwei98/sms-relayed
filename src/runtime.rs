@@ -16,7 +16,7 @@ use crate::message::MessageSource;
 use crate::messaging::{Messaging, SendMessage, SendOutcome};
 use crate::modem::ModemService;
 use crate::persistence::Store;
-use crate::runner::{build_http_client, RealProcessRunner};
+use crate::runner::{build_http_client, build_webhook_http_client};
 
 pub async fn run_forwarding(config_path: &Path) -> Result<()> {
     let config = AppConfig::load(config_path)?;
@@ -38,7 +38,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
     .with_verified_modem(modem_service.clone());
 
     let client = Arc::new(build_http_client(&config.http));
-    let shell_runner = RealProcessRunner;
+    let webhook_client = Arc::new(build_webhook_http_client(&config.http));
 
     // Recover expired delivery leases
     let recovered = store.recover_expired_delivery_leases().await?;
@@ -58,7 +58,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
         delivery_settings,
         config.clone(),
         client.clone(),
-        Arc::new(shell_runner),
+        webhook_client,
         delivery_wakeup.clone(),
     )?;
     let retention_worker = run_retention_worker(store.clone(), config.clone());

@@ -30,7 +30,7 @@ const config: AppConfig = {
 		wecom: {},
 		dingtalk: {},
 		lark: {},
-		shell: {},
+		webhook: {},
 	},
 	api: {
 		enabled: true,
@@ -43,7 +43,6 @@ const config: AppConfig = {
 	http: {
 		connect_timeout_secs: 5,
 		request_timeout_secs: 10,
-		shell_timeout_secs: 30,
 	},
 	retention: { enabled: true, max_age_days: 30, batch_size: 100 },
 };
@@ -150,6 +149,71 @@ describe("ChannelEditor forwarding controls", () => {
 		expect(updated.channels.bark["team/ops.v2"]).toEqual({
 			server_url: "",
 			key: "",
+		});
+	});
+
+	test("creates a small POST webhook template and warns when switched to GET", () => {
+		const onUpdate = vi.fn();
+		const view = render(<ChannelEditor config={config} onUpdate={onUpdate} />);
+
+		fireEvent.change(screen.getByLabelText("Add webhook profile"), {
+			target: { value: "custom" },
+		});
+		const addButtons = screen.getAllByRole("button", { name: "Add" });
+		fireEvent.click(addButtons[addButtons.length - 1]);
+
+		const withWebhook = onUpdate.mock.calls[0][0] as AppConfig;
+		expect(withWebhook.channels.webhook.custom).toMatchObject({
+			method: "post",
+			content_type: "application/json",
+			headers: {},
+		});
+		expect(withWebhook.channels.webhook.custom.body).toContain(
+			"{MESSAGE_JSON}",
+		);
+
+		view.rerender(<ChannelEditor config={withWebhook} onUpdate={onUpdate} />);
+		fireEvent.change(screen.getByLabelText("Method"), {
+			target: { value: "get" },
+		});
+		const getWebhook = onUpdate.mock.calls[1][0] as AppConfig;
+		expect(getWebhook.channels.webhook.custom.method).toBe("get");
+		expect(getWebhook.channels.webhook.custom.body).toContain("{MESSAGE_JSON}");
+		view.rerender(<ChannelEditor config={getWebhook} onUpdate={onUpdate} />);
+		expect(screen.getByText(/GET URLs may expose sender/)).toBeTruthy();
+	});
+
+	test("renames webhook headers on blur without overwriting a collision", () => {
+		const configWithHeaders: AppConfig = {
+			...config,
+			channels: {
+				...config.channels,
+				webhook: {
+					custom: {
+						method: "post",
+						url: "https://example.com/message",
+						content_type: "application/json",
+						body: "{}",
+						headers: { "X-One": "one", "X-Two": "two" },
+					},
+				},
+			},
+		};
+		const onUpdate = vi.fn();
+		render(<ChannelEditor config={configWithHeaders} onUpdate={onUpdate} />);
+		const firstName = screen.getAllByLabelText("Header name")[0];
+
+		fireEvent.change(firstName, { target: { value: "x-two" } });
+		fireEvent.blur(firstName);
+		expect(onUpdate).not.toHaveBeenCalled();
+		expect(screen.getByText("That header name already exists.")).toBeTruthy();
+
+		fireEvent.change(firstName, { target: { value: "X-Renamed" } });
+		fireEvent.blur(firstName);
+		const updated = onUpdate.mock.calls[0][0] as AppConfig;
+		expect(updated.channels.webhook.custom.headers).toEqual({
+			"X-Renamed": "one",
+			"X-Two": "two",
 		});
 	});
 

@@ -418,19 +418,6 @@ function TimeoutsSection({
 					}
 				/>
 			</Field>
-			<Field
-				id="shell-timeout"
-				label={t("config.fields.timeouts.shellTimeout")}
-			>
-				<NumberInput
-					id="shell-timeout"
-					min={1}
-					value={config.http.shell_timeout_secs}
-					onValueChange={(value) =>
-						onPathChange("http.shell_timeout_secs", value)
-					}
-				/>
-			</Field>
 		</>
 	);
 }

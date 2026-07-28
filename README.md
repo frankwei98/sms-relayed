@@ -20,7 +20,7 @@ sms-relayed 适用于插有 SIM 卡的 OpenWrt 路由器、Debian 网关、随�
 ### 功能
 
 - 实时接收 ModemManager 的新短信，持久化到 SQLite，并避免重复入库。
-- 将短信转发到 Bark、Telegram、企业微信、钉钉、Lark 自定义机器人或自定义 Shell 脚本。
+- 将短信转发到 Bark、Telegram、企业微信、钉钉、Lark 自定义机器人或自定义 HTTP Webhook。
 - 支持多个命名 profile，同一条短信可投递到多个渠道，并记录投递结果、重试和延迟。
 - 从常见验证码短信中提取 4–7 位字母数字验证码；Bark 通知可自动复制验证码。
 - 通过 CLI 或密码保护的 Web 控制台发送短信。
@@ -129,8 +129,20 @@ secret = "..."
 webhook_url = "https://open.larksuite.com/open-apis/bot/v2/hook/..."
 secret = "..."
 
-[channels.shell.default]
-path = "/etc/sms-relayed/forward.sh"
+[channels.webhook.default]
+method = "post"
+url = "https://example.com/api/message"
+content_type = "application/json"
+body = """
+{
+  "sender": {SENDER_JSON},
+  "message": {MESSAGE_JSON},
+  "datetime": {DATETIME_JSON}
+}
+"""
+
+[channels.webhook.default.headers]
+Authorization = "Bearer ..."
 
 [api]
 enabled = true
@@ -143,7 +155,6 @@ database_path = "/etc/sms-relayed/sms-relayed.sqlite"
 [http]
 connect_timeout_secs = 10
 request_timeout_secs = 30
-shell_timeout_secs = 30
 
 [retention]
 enabled = false
@@ -157,7 +168,7 @@ enabled = true
 配置说明：
 
 - `forward.enabled` 使用 `渠道类型.profile名称`，例如 `telegram.main`。同一渠道可定义多个 profile。
-- 支持的渠道类型为 `bark`、`telegram`、`wecom`、`dingtalk`、`lark` 和 `shell`。
+- 支持的渠道类型为 `bark`、`telegram`、`wecom`、`dingtalk`、`lark` 和 `webhook`。
 - Bark 使用 [API v2](https://github.com/Finb/bark-server/blob/master/docs/API_V2.md)：将 `server_url` 设为服务根地址，程序会向 `<server_url>/push` 发送 JSON 请求。
 - Lark 使用群聊自定义机器人的完整 `webhook_url` 发送文本消息；启用签名校验时填写 `secret`，未启用时可留空。Webhook URL 和签名密钥都属于敏感凭据。Lark 返回限流错误时会进入现有投递重试流程。
 - `delivery.concurrency` 控制同时执行的转发任务数，默认值为 `2`，有效范围为 `1` 到 `16`。
@@ -245,20 +256,27 @@ systemctl status sms-relayed
 journalctl -u sms-relayed
 ```
 
-### Shell 转发参数
+### 自定义 Webhook
 
-Shell profile 会直接执行配置的可执行脚本，并依次传入：
+Webhook 是一个刻意保持小巧、自由的 HTTP 模板模块，仅支持 GET 和 POST。可在 URL 和 POST body 中使用 `MESSAGE`、`SENDER`、`DATETIME`：
 
-```text
-1. 发信号码
-2. 短信时间
-3. 短信正文
-4. 识别出的验证码；没有则为空
-5. 验证码来源；没有则为空
-6. 设备名称
+- `{MESSAGE}`：原文替换；`{MESSAGE_URL}`：百分号编码；`{MESSAGE_JSON}`：包含外层引号的完整 JSON 字符串字面量。
+- `SENDER`、`DATETIME` 支持相同的 `_URL` 和 `_JSON` 后缀。
+- 替换只执行一次。短信内容里的 `{SENDER}` 等文字不会被再次展开。
+- `headers` 是静态键值；所有 header 值和 Webhook URL 在配置摘要及日志中都会脱敏。
+
+表单 POST 可直接配置：
+
+```toml
+content_type = "application/x-www-form-urlencoded"
+body = "sender={SENDER_URL}&message={MESSAGE_URL}&datetime={DATETIME_URL}"
 ```
 
-脚本必须安全处理参数和凭据，并在 `http.shell_timeout_secs` 内结束。每个值均作为独立的命令行参数传入，不会由 shell 再次解析。
+GET 可把变量放进 URL，例如 `https://example.com/send/{SENDER_URL}/{MESSAGE_URL}`，但发送者和短信内容可能出现在代理、服务端或监控系统的访问日志中。首个版本不生成 `multipart/form-data`。
+
+2xx 表示成功；408、425、429 和 5xx 会重试；其他 4xx 及所有 3xx 为永久失败，重定向不会自动跟随；连接、DNS 和超时错误会重试。投递采用至少一次语义，重试可能造成重复请求，接收 API 如有需要应自行实现幂等。Webhook 可访问 HTTP、局域网、localhost 和私网地址；兼容性及目标 API 的安全策略由用户负责。
+
+Shell 转发已移除。旧 `shell.<name>` 或 `[channels.shell.*]` 配置会明确报错，需迁移为 `webhook.<name>`。
 
 ### 构建与开发
 
@@ -321,7 +339,7 @@ The project consists of a Rust backend and a React frontend embedded in the bina
 ### Features
 
 - Receive new messages from ModemManager, persist them in SQLite, and suppress duplicate inserts.
-- Forward messages to Bark, Telegram, WeCom, DingTalk, Lark custom bots, or a custom shell script.
+- Forward messages to Bark, Telegram, WeCom, DingTalk, Lark custom bots, or a custom HTTP webhook.
 - Configure multiple named profiles, deliver one message to multiple channels, and record outcomes, retries, and latency.
 - Extract 4–7 character alphanumeric codes from common verification messages; Bark can copy detected codes automatically.
 - Send SMS from the CLI or the password-protected web dashboard.
@@ -421,8 +439,20 @@ secret = "..."
 webhook_url = "https://open.larksuite.com/open-apis/bot/v2/hook/..."
 secret = "..."
 
-[channels.shell.default]
-path = "/etc/sms-relayed/forward.sh"
+[channels.webhook.default]
+method = "post"
+url = "https://example.com/api/message"
+content_type = "application/json"
+body = """
+{
+  "sender": {SENDER_JSON},
+  "message": {MESSAGE_JSON},
+  "datetime": {DATETIME_JSON}
+}
+"""
+
+[channels.webhook.default.headers]
+Authorization = "Bearer ..."
 
 [api]
 enabled = true
@@ -435,7 +465,6 @@ database_path = "/etc/sms-relayed/sms-relayed.sqlite"
 [http]
 connect_timeout_secs = 10
 request_timeout_secs = 30
-shell_timeout_secs = 30
 
 [retention]
 enabled = false
@@ -449,7 +478,7 @@ enabled = true
 Important rules:
 
 - `forward.enabled` contains `channel.profile` references such as `telegram.main`; multiple profiles of the same channel are supported.
-- Channel types are `bark`, `telegram`, `wecom`, `dingtalk`, `lark`, and `shell`.
+- Channel types are `bark`, `telegram`, `wecom`, `dingtalk`, `lark`, and `webhook`.
 - Bark uses [API v2](https://github.com/Finb/bark-server/blob/master/docs/API_V2.md): set `server_url` to the server root and sms-relayed sends JSON to `<server_url>/push`.
 - Lark sends text messages to the complete custom bot `webhook_url`. Set `secret` when signature verification is enabled, or leave it empty otherwise. Treat both values as credentials. Lark rate-limit responses use the existing delivery retry flow.
 - `delivery.concurrency` controls concurrent forwarding jobs. It defaults to `2` and accepts values from `1` through `16`.
@@ -530,20 +559,27 @@ systemctl status sms-relayed
 journalctl -u sms-relayed
 ```
 
-### Shell forwarding arguments
+### Custom webhooks
 
-A shell profile directly executes the configured executable script with these positional arguments:
+Webhook is deliberately a small, free-form HTTP template module supporting GET and POST only. URL and POST body templates can use `MESSAGE`, `SENDER`, and `DATETIME`:
 
-```text
-1. Sender phone number
-2. Message timestamp
-3. Message body
-4. Detected verification code, or empty
-5. Detected code source, or empty
-6. Device name
+- `{MESSAGE}` inserts the raw value, `{MESSAGE_URL}` percent-encodes it, and `{MESSAGE_JSON}` inserts a complete JSON string literal including its outer quotes.
+- `SENDER` and `DATETIME` support the same `_URL` and `_JSON` suffixes.
+- Replacement is one pass. Token-like text inside an SMS is never expanded again.
+- `headers` are static key/value pairs. Header values and webhook URLs are redacted from configuration summaries and logs.
+
+For a form POST:
+
+```toml
+content_type = "application/x-www-form-urlencoded"
+body = "sender={SENDER_URL}&message={MESSAGE_URL}&datetime={DATETIME_URL}"
 ```
 
-The script is responsible for safely handling arguments and credentials, and must finish within `http.shell_timeout_secs`. Each value is passed as a separate command-line argument and is never reparsed by a shell.
+A GET can place variables in its URL, for example `https://example.com/send/{SENDER_URL}/{MESSAGE_URL}`, but sender and message data may then appear in proxy, server, or monitoring access logs. The first version does not generate `multipart/form-data`.
+
+2xx is success; 408, 425, 429, and 5xx are retried; other 4xx and every 3xx are permanent failures, and redirects are not followed. Connection, DNS, and timeout failures are retried. Delivery is at least once, so retries can duplicate requests; receiving APIs should implement idempotency when needed. Webhooks may target HTTP, LAN, localhost, and private addresses. Compatibility and the target API's security policy remain the user's responsibility.
+
+Shell forwarding has been removed. Old `shell.<name>` or `[channels.shell.*]` configurations fail with an explicit migration error and must be replaced with `webhook.<name>`.
 
 ### Build and development
 

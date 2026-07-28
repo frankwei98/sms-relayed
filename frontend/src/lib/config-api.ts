@@ -11,7 +11,8 @@ export type ConfigWarning =
 	| "password_change"
 	| "api_disable"
 	| "api_endpoint_change"
-	| "database_path_change";
+	| "database_path_change"
+	| "webhook_get";
 
 export type ConfigPreviewResponse = {
 	base_revision: string;

@@ -75,7 +75,7 @@ const baseConfig: AppConfig = {
 		wecom: {},
 		dingtalk: {},
 		lark: {},
-		shell: {},
+		webhook: {},
 	},
 	api: {
 		enabled: true,
@@ -88,7 +88,6 @@ const baseConfig: AppConfig = {
 	http: {
 		connect_timeout_secs: 5,
 		request_timeout_secs: 30,
-		shell_timeout_secs: 30,
 	},
 	retention: {
 		enabled: false,

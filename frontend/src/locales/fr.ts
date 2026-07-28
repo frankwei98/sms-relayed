@@ -441,6 +441,8 @@ export const fr = {
 				"L'adresse du tableau de bord peut changer après le redémarrage.",
 			databasePathChange:
 				"Le service utilisera une base de données de messages différente après le redémarrage.",
+			webhookGet:
+				"Les URL de webhook GET peuvent exposer l'expéditeur et le message dans les journaux d'accès.",
 		},
 		leaveDialog: {
 			title: "Quitter avec des modifications non enregistrées ?",
@@ -459,7 +461,7 @@ export const fr = {
 			api: "Web API",
 			apiDescription: "Accès au tableau de bord et persistance",
 			timeouts: "Délais d'attente",
-			timeoutsDescription: "Limites d'exécution HTTP et shell",
+			timeoutsDescription: "Limites de connexion et de requête HTTP",
 			retention: "Rétention",
 			retentionDescription: "Nettoyage automatique des messages",
 		},
@@ -515,12 +517,11 @@ export const fr = {
 			timeouts: {
 				sectionTitle: "Délais d'attente",
 				sectionDescription:
-					"Limitez l'établissement de la connexion, les requêtes au fournisseur et l'exécution du profil shell. Toutes les valeurs sont en secondes.",
+					"Limitez l'établissement de la connexion et les requêtes au fournisseur ou au webhook. Toutes les valeurs sont en secondes.",
 				connectTimeout: "Délai de connexion",
 				connectTimeoutDescription:
 					"Doit être positif et inférieur ou égal au délai de requête.",
 				requestTimeout: "Délai de requête",
-				shellTimeout: "Délai shell",
 			},
 			retention: {
 				sectionTitle: "Rétention",
@@ -554,6 +555,21 @@ export const fr = {
 			profileName: "Nom du profil",
 			addProfile: "Ajouter un profil {{channel}}",
 			duplicateName: "Ce nom de profil existe déjà.",
+			webhookMethod: "Méthode",
+			webhookGetWarning:
+				"Attention : les URL GET peuvent exposer l'expéditeur et le message dans les journaux d'accès du proxy, du serveur et de la supervision.",
+			webhookUrl: "Modèle d'URL",
+			webhookContentType: "Content-Type",
+			webhookBody: "Modèle du corps",
+			webhookHeaders: "En-têtes statiques",
+			webhookHeaderName: "Nom de l'en-tête",
+			webhookHeaderValue: "Valeur de {{name}}",
+			webhookRemoveHeader: "Supprimer",
+			webhookAddHeader: "Ajouter un en-tête",
+			webhookHeaderDuplicate: "Ce nom d'en-tête existe déjà.",
+			webhookHeaderRequired: "Le nom de l'en-tête est obligatoire.",
+			webhookVariables:
+				"Variables : {MESSAGE}, {SENDER}, {DATETIME}. Ajoutez _URL pour l'encodage en pourcentage ou _JSON pour un littéral de chaîne JSON complet.",
 			enableAria: "Activer le transfert pour {{ref}}",
 			removeAria: "Supprimer {{ref}}",
 			removeDialog: {
