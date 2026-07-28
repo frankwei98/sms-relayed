@@ -269,6 +269,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=$BIN_DIR/sms-relayed run --config $CONFIG_DIR/config.toml
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true
+UMask=0077
 Restart=always
 RestartSec=5
 
