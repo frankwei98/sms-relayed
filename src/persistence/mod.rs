@@ -455,6 +455,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -467,6 +468,20 @@ mod tests {
         DeliveryAttemptOutcome, DeliveryDisposition, Store,
     };
 
+    fn sqlite_file_paths(path: &Path) -> [PathBuf; 3] {
+        ["", "-wal", "-shm"].map(|suffix| {
+            let mut candidate = path.as_os_str().to_os_string();
+            candidate.push(suffix);
+            PathBuf::from(candidate)
+        })
+    }
+
+    fn remove_sqlite_test_files(path: &Path) {
+        for candidate in sqlite_file_paths(path) {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
     #[tokio::test]
     async fn open_initializes_storage_through_the_async_interface() {
         let path = std::env::temp_dir().join(format!(
@@ -478,7 +493,150 @@ mod tests {
 
         store.health_check().await.unwrap();
         drop(store);
-        std::fs::remove_file(path).unwrap();
+        remove_sqlite_test_files(&path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_restricts_new_database_and_sidecar_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "sms-relayed-permissions-new-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Store::open(&path).await.unwrap();
+
+        for database_path in sqlite_file_paths(&path) {
+            let mode = std::fs::metadata(&database_path)
+                .unwrap_or_else(|error| panic!("{}: {error}", database_path.display()))
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "{} must not be accessible by group or other",
+                database_path.display()
+            );
+        }
+
+        drop(store);
+        remove_sqlite_test_files(&path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_repairs_existing_database_and_sidecar_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "sms-relayed-permissions-existing-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let first = Store::open(&path).await.unwrap();
+        let database_paths = sqlite_file_paths(&path);
+        for database_path in &database_paths {
+            std::fs::set_permissions(database_path, std::fs::Permissions::from_mode(0o666))
+                .unwrap();
+        }
+
+        let second = Store::open(&path).await.unwrap();
+
+        for database_path in &database_paths {
+            let mode = std::fs::metadata(database_path)
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "{} must not be accessible by group or other",
+                database_path.display()
+            );
+        }
+
+        drop(second);
+        drop(first);
+        remove_sqlite_test_files(&path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_rejects_database_symlink_without_changing_target() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let directory = std::env::temp_dir().join(format!(
+            "sms-relayed-permissions-symlink-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let target = directory.join("target");
+        let database_path = directory.join("messages.sqlite");
+        std::fs::write(&target, b"not a database").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&target, &database_path).unwrap();
+
+        let result = Store::open(&database_path).await;
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"not a database");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_dir(&directory);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_rejects_sidecar_symlink_without_changing_target() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let path = std::env::temp_dir().join(format!(
+            "sms-relayed-permissions-sidecar-symlink-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Store::open(&path).await.unwrap();
+        drop(store);
+
+        let target = path.with_extension("unrelated");
+        std::fs::write(&target, b"unrelated").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let wal_path = sqlite_file_paths(&path)[1].clone();
+        symlink(&target, &wal_path).unwrap();
+
+        let result = Store::open(&path).await;
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"unrelated");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        remove_sqlite_test_files(&path);
+        let _ = std::fs::remove_file(&target);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn relative_database_path_remains_usable_for_export() {
+        let path = PathBuf::from(format!(
+            "sms-relayed-permissions-relative-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Store::open(&path).await.unwrap();
+        store.health_check().await.unwrap();
+
+        let mut messages =
+            store.stream_messages(MessageFilter::default(), |message| Ok(message.body));
+
+        assert!(messages.recv().await.is_none());
+        drop(store);
+        remove_sqlite_test_files(&path);
     }
 
     #[tokio::test]

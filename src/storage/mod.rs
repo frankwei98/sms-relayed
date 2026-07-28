@@ -32,6 +32,68 @@ use messages::{build_message_query, resolve_message_cursor};
 
 const CONVERSATION_SUMMARIES_BACKFILL_META_KEY: &str = "conversation_summaries_backfilled";
 
+#[cfg(unix)]
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    PathBuf::from(sidecar)
+}
+
+#[cfg(unix)]
+fn resolved_sqlite_path(path: &Path) -> Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .with_context(|| format!("database path has no file name: {}", path.display()))?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent = std::fs::canonicalize(parent)
+        .with_context(|| format!("failed to resolve database directory {}", parent.display()))?;
+    Ok(parent.join(file_name))
+}
+
+#[cfg(unix)]
+fn restrict_sqlite_file(path: &Path, create: bool) -> Result<()> {
+    use std::fs::{OpenOptions, Permissions};
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create(create)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+
+    match options.open(path) {
+        Ok(file) => {
+            if !file
+                .metadata()
+                .with_context(|| format!("failed to inspect {}", path.display()))?
+                .file_type()
+                .is_file()
+            {
+                anyhow::bail!("sqlite path is not a regular file: {}", path.display());
+            }
+            file.set_permissions(Permissions::from_mode(0o600))
+                .with_context(|| format!("failed to restrict permissions on {}", path.display()))
+        }
+        Err(error) if !create && error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to securely open {}", path.display()))
+        }
+    }
+}
+
+#[cfg(unix)]
+fn restrict_sqlite_sidecars(path: &Path) -> Result<()> {
+    for suffix in ["-wal", "-shm"] {
+        restrict_sqlite_file(&sqlite_sidecar_path(path, suffix), false)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryRow {
     pub id: i64,
@@ -247,16 +309,34 @@ impl MessageStore {
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
         }
+        #[cfg(unix)]
+        let path = resolved_sqlite_path(path)?;
+        #[cfg(unix)]
+        {
+            restrict_sqlite_file(&path, true)?;
+            restrict_sqlite_sidecars(&path)?;
+        }
+        #[cfg(unix)]
+        let conn = Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .with_context(|| format!("failed to open sqlite database {}", path.display()))?;
+        #[cfg(not(unix))]
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open sqlite database {}", path.display()))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        #[cfg(unix)]
+        restrict_sqlite_sidecars(&path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
             path: Some(Arc::new(path.to_path_buf())),
         };
         store.migrate()?;
+        #[cfg(unix)]
+        restrict_sqlite_sidecars(&path)?;
         Ok(store)
     }
 
