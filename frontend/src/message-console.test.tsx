@@ -10,6 +10,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { MessageConsole } from "#/components/messages/message-console";
+import i18n from "#/lib/i18n";
 
 const mocks = vi.hoisted(() => ({
 	apiFetch: vi.fn(),
@@ -39,12 +40,13 @@ const unreadMessage = {
 	updated_at: "2026-07-11T00:00:00Z",
 };
 
-afterEach(() => {
+afterEach(async () => {
 	cleanup();
 	vi.useRealTimers();
 	vi.restoreAllMocks();
 	vi.clearAllMocks();
 	mocks.handlers = {};
+	await i18n.changeLanguage("en");
 });
 
 describe("MessageConsole SIM phone number", () => {
@@ -251,6 +253,92 @@ describe("MessageConsole refresh fallback", () => {
 			await vi.advanceTimersByTimeAsync(30_100);
 		});
 		expect(conversationLoads).toBe(2);
+	});
+});
+
+describe("MessageConsole localized time labels", () => {
+	test("updates relative day and time labels for every supported interface language", async () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(new Date(2026, 6, 28, 12));
+		const now = new Date();
+		const atLocalTime = (daysAgo: number, hour: number) => {
+			const date = new Date(
+				now.getFullYear(),
+				now.getMonth(),
+				now.getDate() - daysAgo,
+				hour,
+			);
+			return date.toISOString();
+		};
+		const twoMinutesAgo = new Date(now.getTime() - 2 * 60_000).toISOString();
+		const messages = [
+			{
+				...unreadMessage,
+				id: 3,
+				body: "today message",
+				timestamp: twoMinutesAgo,
+				created_at: twoMinutesAgo,
+			},
+			{
+				...unreadMessage,
+				id: 2,
+				body: "yesterday message",
+				timestamp: atLocalTime(1, 10),
+				created_at: atLocalTime(1, 10),
+			},
+			{
+				...unreadMessage,
+				id: 1,
+				body: "older message",
+				timestamp: atLocalTime(3, 10),
+				created_at: atLocalTime(3, 10),
+			},
+		];
+		mocks.apiFetch.mockImplementation((input: string) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: unreadMessage.phone_number,
+						last_message: messages[0],
+						unread_count: 0,
+						total_count: messages.length,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?")) {
+				return Promise.resolve(messages);
+			}
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+		fireEvent.click(
+			await screen.findByRole("button", { name: /\+15550000001/ }),
+		);
+
+		expect(await screen.findByText("Today")).toBeTruthy();
+		expect(screen.getByText("Yesterday")).toBeTruthy();
+		expect(screen.getAllByText("3 days ago").length).toBeGreaterThan(0);
+		expect(screen.getByText("2 minutes ago")).toBeTruthy();
+
+		for (const [language, today, yesterday, daysAgo, minutesAgo] of [
+			["zh-CN", "今天", "昨天", "3 天前", "2 分钟前"],
+			["ja", "今日", "昨日", "3日前", "2分前"],
+			["ko", "오늘", "어제", "3일 전", "2분 전"],
+			["fr", "Aujourd'hui", "Hier", "Il y a 3 jours", "il y a 2 minutes"],
+			["es", "Hoy", "Ayer", "Hace 3 días", "hace 2 minutos"],
+		] as const) {
+			await i18n.changeLanguage(language);
+
+			expect(await screen.findByText(today)).toBeTruthy();
+			expect(screen.getByText(yesterday)).toBeTruthy();
+			expect(screen.getAllByText(daysAgo).length).toBeGreaterThan(0);
+			expect(screen.getByText(minutesAgo)).toBeTruthy();
+		}
+
+		expect(screen.queryByText("Today")).toBeNull();
+		expect(screen.queryByText("Yesterday")).toBeNull();
+		expect(screen.queryAllByText("3 days ago")).toHaveLength(0);
 	});
 });
 
