@@ -66,6 +66,13 @@ const FALLBACK_REFRESH_INTERVAL_MS = 30_000;
 const SQLITE_TIMESTAMP_PATTERN =
 	/^(?:\d{4}-\d{2}-\d{2}|\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))$/;
 
+function createIdempotencyKey() {
+	const bytes = crypto.getRandomValues(new Uint8Array(16));
+	return `web-${Array.from(bytes, (byte) =>
+		byte.toString(16).padStart(2, "0"),
+	).join("")}`;
+}
+
 function messageDisplayTimestamp(
 	message: Pick<Message, "created_at" | "timestamp">,
 ) {
@@ -117,11 +124,17 @@ export function MessageConsole() {
 	const [phoneNumber, setPhoneNumber] = useState("");
 	const [body, setBody] = useState("");
 	const [sending, setSending] = useState(false);
+	const [sendFailed, setSendFailed] = useState(false);
 	const [hasOlderMessages, setHasOlderMessages] = useState(false);
 	const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
 	const [ownNumber, setOwnNumber] = useState<string | null>(null);
 	const markingReadPhonesRef = useRef<Set<string>>(new Set());
 	const loadedMessageCountRef = useRef(0);
+	const pendingSendRef = useRef<{
+		phoneNumber: string;
+		body: string;
+		idempotencyKey: string;
+	} | null>(null);
 	const messageWindowGenerationRef = useRef(0);
 	const messageReloadVersionRef = useRef(0);
 	const messageRefreshEpochRef = useRef(0);
@@ -458,12 +471,27 @@ export function MessageConsole() {
 	async function handleSend() {
 		const recipient = activePhone?.trim();
 		if (!recipient || !body.trim()) return;
+		const pendingSend = pendingSendRef.current;
+		const idempotencyKey =
+			pendingSend?.phoneNumber === recipient && pendingSend.body === body
+				? pendingSend.idempotencyKey
+				: createIdempotencyKey();
+		pendingSendRef.current = {
+			phoneNumber: recipient,
+			body,
+			idempotencyKey,
+		};
+		setSendFailed(false);
 		setSending(true);
+		let sendCompleted = false;
 		try {
 			await apiFetch<Message>("/api/messages/send", {
 				method: "POST",
+				headers: { "Idempotency-Key": idempotencyKey },
 				body: JSON.stringify({ phone_number: recipient, body }),
 			});
+			sendCompleted = true;
+			pendingSendRef.current = null;
 			setBody("");
 			setSelectedPhone(recipient);
 			setPhoneNumber(recipient);
@@ -477,6 +505,7 @@ export function MessageConsole() {
 				loadConversations(),
 			]);
 		} catch (err) {
+			if (!sendCompleted) setSendFailed(true);
 			console.error(err);
 		} finally {
 			setSending(false);
@@ -588,6 +617,7 @@ export function MessageConsole() {
 						body={body}
 						setBody={setBody}
 						sending={sending}
+						sendFailed={sendFailed}
 						selectionMode={selectionMode}
 						setSelectionMode={setSelectionMode}
 						selectedIds={selectedIds}
@@ -961,6 +991,7 @@ function ThreadPanel({
 	body,
 	setBody,
 	sending,
+	sendFailed,
 	selectionMode,
 	setSelectionMode,
 	selectedIds,
@@ -983,6 +1014,7 @@ function ThreadPanel({
 	body: string;
 	setBody: (value: string) => void;
 	sending: boolean;
+	sendFailed: boolean;
 	selectionMode: boolean;
 	setSelectionMode: (value: boolean) => void;
 	selectedIds: Set<number>;
@@ -1160,6 +1192,7 @@ function ThreadPanel({
 						setBody={setBody}
 						onSend={onSend}
 						sending={sending}
+						sendFailed={sendFailed}
 						disabled={isComposingNew ? !phoneNumber.trim() : !conversation}
 					/>
 				</>
@@ -1401,12 +1434,14 @@ function MessageComposer({
 	setBody,
 	onSend,
 	sending,
+	sendFailed,
 	disabled,
 }: {
 	body: string;
 	setBody: (value: string) => void;
 	onSend: () => void;
 	sending: boolean;
+	sendFailed: boolean;
 	disabled: boolean;
 }) {
 	const { t } = useTranslation();
@@ -1434,6 +1469,14 @@ function MessageComposer({
 					<Send />
 				</Button>
 			</div>
+			{sendFailed && (
+				<p
+					role="alert"
+					className="mx-auto mt-2 max-w-3xl text-sm text-destructive"
+				>
+					{t("messages.thread.sendFailed")}
+				</p>
+			)}
 		</div>
 	);
 }

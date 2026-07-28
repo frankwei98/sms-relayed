@@ -90,6 +90,84 @@ describe("MessageConsole SIM phone number", () => {
 	});
 });
 
+describe("MessageConsole sending", () => {
+	test("sends an idempotency key and reuses it after an ambiguous failure", async () => {
+		const sendRequests: RequestInit[] = [];
+		const consoleError = vi
+			.spyOn(console, "error")
+			.mockImplementation(() => {});
+		mocks.apiFetch.mockImplementation((input: string, init?: RequestInit) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: unreadMessage.phone_number,
+						last_message: unreadMessage,
+						unread_count: 1,
+						total_count: 1,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?")) {
+				if (sendRequests.length === 2) {
+					return Promise.reject(new Error("refresh failed"));
+				}
+				return Promise.resolve([unreadMessage]);
+			}
+			if (input === "/api/messages/send") {
+				sendRequests.push(init ?? {});
+				if (sendRequests.length === 1) {
+					return Promise.reject(new TypeError("connection closed"));
+				}
+				return Promise.resolve({
+					...unreadMessage,
+					id: 2,
+					direction: "outbound",
+					body: "reply",
+					status: "sent",
+					source: "web",
+				});
+			}
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+		fireEvent.click(
+			await screen.findByRole("button", { name: /\+15550000001/ }),
+		);
+		fireEvent.change(screen.getByPlaceholderText("Message"), {
+			target: { value: "reply" },
+		});
+
+		const sendButton = screen.getByRole("button", { name: "Send message" });
+		fireEvent.click(sendButton);
+		await waitFor(() => expect(sendRequests).toHaveLength(1));
+		expect((await screen.findByRole("alert")).textContent).toBe(
+			"Message could not be sent. Try again.",
+		);
+		const errorsAfterSendFailure = consoleError.mock.calls.length;
+		await waitFor(() =>
+			expect((sendButton as HTMLButtonElement).disabled).toBe(false),
+		);
+		fireEvent.click(sendButton);
+		await waitFor(() => expect(sendRequests).toHaveLength(2));
+		await waitFor(() =>
+			expect(consoleError.mock.calls.length).toBeGreaterThan(
+				errorsAfterSendFailure,
+			),
+		);
+		expect(screen.queryByRole("alert")).toBeNull();
+
+		const firstKey = new Headers(sendRequests[0].headers).get(
+			"Idempotency-Key",
+		);
+		const secondKey = new Headers(sendRequests[1].headers).get(
+			"Idempotency-Key",
+		);
+		expect(firstKey).toMatch(/^web-[0-9a-f]{32}$/);
+		expect(secondKey).toBe(firstKey);
+	});
+});
+
 describe("MessageConsole refresh fallback", () => {
 	test("periodically reloads conversations when SSE events are missed", async () => {
 		vi.useFakeTimers();

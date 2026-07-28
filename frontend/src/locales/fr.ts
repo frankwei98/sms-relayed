@@ -334,6 +334,7 @@ export const fr = {
 			composerPlaceholder: "Message",
 			sendMessage: "Envoyer",
 			sendingMessage: "Envoi…",
+			sendFailed: "Le message n’a pas pu être envoyé. Réessayez.",
 		},
 		direction: {
 			sent: "Envoyé",
