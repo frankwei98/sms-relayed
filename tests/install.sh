@@ -106,6 +106,14 @@ if [ -n "$(find "$untrusted_tmp" -mindepth 1 -print -quit)" ]; then
   exit 1
 fi
 cmp "$fixture_binary" "$atomic_bin_dir/sms-relayed"
+installed_mode=$(
+  stat -c '%a' "$atomic_bin_dir/sms-relayed" 2>/dev/null ||
+    stat -f '%Lp' "$atomic_bin_dir/sms-relayed"
+)
+if [ "$installed_mode" != "755" ]; then
+  echo "expected installed binary mode 0755, got 0$installed_mode" >&2
+  exit 1
+fi
 
 systemd_root="$test_dir/systemd-root"
 ROOT="$systemd_root"

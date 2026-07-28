@@ -215,9 +215,9 @@ install_binary() {
     die "release binary verification failed"
   fi
   rm -f "$checksum_tmp"
-  if ! chmod +x "$download_tmp"; then
+  if ! chmod 0755 "$download_tmp"; then
     rm -f "$download_tmp"
-    die "failed to mark downloaded binary executable"
+    die "failed to set downloaded binary permissions"
   fi
 
   if [ -e "$real_bin" ]; then
