@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiRequestError, apiFetch, apiRequest } from "./api";
 
@@ -54,6 +56,8 @@ describe("apiFetch monitoring", () => {
 	});
 
 	it("does not report expected client errors", async () => {
+		const unauthorized = vi.fn();
+		window.addEventListener("sms-relayed:unauthorized", unauthorized);
 		vi.stubGlobal(
 			"fetch",
 			vi.fn().mockResolvedValue(
@@ -66,6 +70,8 @@ describe("apiFetch monitoring", () => {
 
 		await expect(apiFetch("/api/auth/me")).rejects.toThrow("unauthorized");
 		expect(mocks.captureFailure).not.toHaveBeenCalled();
+		expect(unauthorized).toHaveBeenCalledOnce();
+		window.removeEventListener("sms-relayed:unauthorized", unauthorized);
 	});
 
 	it("reports network failures without sending the request URL", async () => {

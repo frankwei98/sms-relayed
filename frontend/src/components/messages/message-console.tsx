@@ -65,6 +65,12 @@ const SERVER_MESSAGE_PAGE_LIMIT = 500;
 const FALLBACK_REFRESH_INTERVAL_MS = 30_000;
 const SQLITE_TIMESTAMP_PATTERN =
 	/^(?:\d{4}-\d{2}-\d{2}|\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))$/;
+type MessageOperationError =
+	| "markRead"
+	| "update"
+	| "delete"
+	| "loadOlder"
+	| "refresh";
 
 function createIdempotencyKey() {
 	const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -128,7 +134,11 @@ export function MessageConsole() {
 	const [hasOlderMessages, setHasOlderMessages] = useState(false);
 	const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
 	const [ownNumber, setOwnNumber] = useState<string | null>(null);
+	const [conversationLoadFailed, setConversationLoadFailed] = useState(false);
+	const [operationError, setOperationError] =
+		useState<MessageOperationError | null>(null);
 	const markingReadPhonesRef = useRef<Set<string>>(new Set());
+	const hasLoadedConversationsRef = useRef(false);
 	const loadedMessageCountRef = useRef(0);
 	const pendingSendRef = useRef<{
 		phoneNumber: string;
@@ -258,6 +268,7 @@ export function MessageConsole() {
 			return;
 		}
 
+		setOperationError(null);
 		setLoadingOlderMessages(true);
 		const generation = messageWindowGenerationRef.current;
 		const refreshEpoch = messageRefreshEpochRef.current;
@@ -277,6 +288,7 @@ export function MessageConsole() {
 			});
 			setHasOlderMessages(data.length === MESSAGE_PAGE_SIZE);
 		} catch (err) {
+			setOperationError("loadOlder");
 			console.error(err);
 		} finally {
 			setLoadingOlderMessages(false);
@@ -290,8 +302,19 @@ export function MessageConsole() {
 	]);
 
 	const loadConversations = useCallback(async () => {
-		const data = await apiFetch<ConversationSummary[]>("/api/conversations");
-		setConversations(data);
+		try {
+			const data = await apiFetch<ConversationSummary[]>("/api/conversations");
+			hasLoadedConversationsRef.current = true;
+			setConversationLoadFailed(false);
+			setConversations(data);
+		} catch (error) {
+			if (hasLoadedConversationsRef.current) {
+				setOperationError("refresh");
+			} else {
+				setConversationLoadFailed(true);
+			}
+			throw error;
+		}
 	}, []);
 
 	const reloadActiveViews = useCallback(
@@ -309,7 +332,7 @@ export function MessageConsole() {
 	);
 
 	useEffect(() => {
-		loadConversations();
+		void loadConversations().catch(() => {});
 	}, [loadConversations]);
 
 	useEffect(() => {
@@ -319,7 +342,7 @@ export function MessageConsole() {
 	}, []);
 
 	useEffect(() => {
-		loadMessages();
+		void loadMessages().catch(() => setOperationError("refresh"));
 	}, [loadMessages]);
 
 	const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -335,6 +358,7 @@ export function MessageConsole() {
 				const additionalMessages = pendingCreatedMessagesRef.current;
 				pendingCreatedMessagesRef.current = 0;
 				void reloadActiveViews(additionalMessages).catch((err) => {
+					setOperationError("refresh");
 					console.error(err);
 				});
 				refreshTimeoutRef.current = null;
@@ -396,6 +420,7 @@ export function MessageConsole() {
 				await reloadActiveViews();
 			})
 			.catch((err) => {
+				setOperationError("markRead");
 				console.error(err);
 			})
 			.finally(() => {
@@ -505,7 +530,11 @@ export function MessageConsole() {
 				loadConversations(),
 			]);
 		} catch (err) {
-			if (!sendCompleted) setSendFailed(true);
+			if (sendCompleted) {
+				setOperationError("refresh");
+			} else {
+				setSendFailed(true);
+			}
 			console.error(err);
 		} finally {
 			setSending(false);
@@ -514,6 +543,7 @@ export function MessageConsole() {
 
 	async function handleMarkConversationRead() {
 		if (!selectedPhone) return;
+		setOperationError(null);
 		try {
 			await apiFetch(
 				`/api/conversations/${encodeURIComponent(selectedPhone)}/read`,
@@ -523,6 +553,7 @@ export function MessageConsole() {
 			);
 			await reloadActiveViews();
 		} catch (err) {
+			setOperationError("markRead");
 			console.error(err);
 		}
 	}
@@ -530,6 +561,7 @@ export function MessageConsole() {
 	async function handleMarkSelected(read: boolean) {
 		const ids = Array.from(selectedIds);
 		if (ids.length === 0) return;
+		setOperationError(null);
 		try {
 			await Promise.all(
 				ids.map((id) =>
@@ -542,12 +574,14 @@ export function MessageConsole() {
 			setSelectionMode(false);
 			await reloadActiveViews();
 		} catch (err) {
+			setOperationError("update");
 			console.error(err);
 		}
 	}
 
 	async function handleDeleteSelected() {
 		if (selectedIds.size === 0) return;
+		setOperationError(null);
 		try {
 			await apiFetch("/api/messages/delete", {
 				method: "POST",
@@ -557,6 +591,7 @@ export function MessageConsole() {
 			setSelectionMode(false);
 			await reloadActiveViews();
 		} catch (err) {
+			setOperationError("delete");
 			console.error(err);
 		}
 	}
@@ -568,6 +603,12 @@ export function MessageConsole() {
 
 	return (
 		<div className="flex h-full min-h-0 flex-col bg-background">
+			{operationError ? (
+				<MessageOperationErrorBanner
+					error={operationError}
+					onDismiss={() => setOperationError(null)}
+				/>
+			) : null}
 			<div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden md:grid-cols-[22rem_minmax(0,1fr)] md:gap-4">
 				<section
 					className={cn(
@@ -597,6 +638,8 @@ export function MessageConsole() {
 						conversations={filteredConversations}
 						selectedPhone={selectedPhone}
 						onSelect={selectConversation}
+						loadFailed={conversationLoadFailed}
+						onRetry={() => void loadConversations().catch(() => {})}
 					/>
 				</section>
 
@@ -825,12 +868,33 @@ function ConversationList({
 	conversations,
 	selectedPhone,
 	onSelect,
+	loadFailed,
+	onRetry,
 }: {
 	conversations: ConversationSummary[];
 	selectedPhone: string | null;
 	onSelect: (phone: string) => void;
+	loadFailed: boolean;
+	onRetry: () => void;
 }) {
 	const { t } = useTranslation();
+	if (loadFailed) {
+		return (
+			<div
+				role="alert"
+				className="grid flex-1 place-items-center px-6 text-center"
+			>
+				<div className="max-w-64 space-y-3">
+					<p className="font-medium text-destructive">
+						{t("messages.error.load")}
+					</p>
+					<Button type="button" variant="outline" onClick={onRetry}>
+						{t("common.retry")}
+					</Button>
+				</div>
+			</div>
+		);
+	}
 	if (conversations.length === 0) {
 		return (
 			<div className="grid flex-1 place-items-center px-6 text-center">
@@ -863,6 +927,35 @@ function ConversationList({
 					/>
 				))}
 			</div>
+		</div>
+	);
+}
+
+function MessageOperationErrorBanner({
+	error,
+	onDismiss,
+}: {
+	error: MessageOperationError;
+	onDismiss: () => void;
+}) {
+	const { t } = useTranslation();
+	const messages = {
+		markRead: t("messages.error.markRead"),
+		update: t("messages.error.update"),
+		delete: t("messages.error.delete"),
+		loadOlder: t("messages.error.loadOlder"),
+		refresh: t("messages.error.refresh"),
+	} satisfies Record<MessageOperationError, string>;
+
+	return (
+		<div
+			role="alert"
+			className="flex shrink-0 items-center justify-between gap-3 border-b border-destructive/30 bg-destructive/10 px-4 py-2 text-sm text-destructive"
+		>
+			<span>{messages[error]}</span>
+			<Button type="button" variant="ghost" size="sm" onClick={onDismiss}>
+				{t("common.done")}
+			</Button>
 		</div>
 	);
 }

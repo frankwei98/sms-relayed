@@ -1,5 +1,7 @@
 import { captureFailure } from "./monitoring";
 
+export const AUTH_UNAUTHORIZED_EVENT = "sms-relayed:unauthorized";
+
 export type ApiErrorBody = { error: { code: string; message: string } };
 
 export class ApiRequestError extends Error {
@@ -39,6 +41,9 @@ export async function apiRequest<T>(
 		throw error;
 	}
 	if (!response.ok) {
+		if (response.status === 401 && typeof window !== "undefined") {
+			window.dispatchEvent(new Event(AUTH_UNAUTHORIZED_EVENT));
+		}
 		if (response.status >= 500) {
 			captureFailure("api.request_failed", {
 				status: response.status.toString(),

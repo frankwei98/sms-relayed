@@ -16,6 +16,7 @@ export const es = {
 		ariaBackConfig: "Volver a la configuración",
 		ariaConfigCategories: "Categorías de configuración",
 		ariaUnsavedChanges: "Cambios sin guardar",
+		logout: "Cerrar sesión",
 	},
 	common: {
 		refresh: "Actualizar",
@@ -319,6 +320,16 @@ export const es = {
 			noMatching: "No hay mensajes coincidentes",
 			noMatchingDescription:
 				"Ajuste los filtros o espere al siguiente evento de SMS.",
+		},
+		error: {
+			load: "No se pudieron cargar los mensajes.",
+			markRead:
+				"No se pudieron marcar los mensajes como leídos. Inténtalo de nuevo.",
+			update: "No se pudieron actualizar los mensajes. Inténtalo de nuevo.",
+			delete: "No se pudieron eliminar los mensajes. Inténtalo de nuevo.",
+			loadOlder:
+				"No se pudieron cargar los mensajes anteriores. Inténtalo de nuevo.",
+			refresh: "No se pudieron actualizar los mensajes. Inténtalo de nuevo.",
 		},
 		thread: {
 			loadingOlder: "Cargando mensajes anteriores",

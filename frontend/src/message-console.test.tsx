@@ -90,6 +90,65 @@ describe("MessageConsole SIM phone number", () => {
 	});
 });
 
+describe("MessageConsole error recovery", () => {
+	test("shows an initial load error instead of an empty inbox and retries", async () => {
+		let conversationLoads = 0;
+		mocks.apiFetch.mockImplementation((input: string) => {
+			if (input === "/api/conversations") {
+				conversationLoads += 1;
+				return conversationLoads === 1
+					? Promise.reject(new Error("backend unavailable"))
+					: Promise.resolve([]);
+			}
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+
+		expect((await screen.findByRole("alert")).textContent).toContain(
+			"Messages could not be loaded.",
+		);
+		expect(screen.queryByText("No conversations")).toBeNull();
+
+		fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+		expect(await screen.findByText("No conversations")).toBeTruthy();
+		expect(screen.queryByRole("alert")).toBeNull();
+		expect(conversationLoads).toBe(2);
+	});
+
+	test("shows a visible error when marking a conversation read fails", async () => {
+		mocks.apiFetch.mockImplementation((input: string, init?: RequestInit) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: unreadMessage.phone_number,
+						last_message: unreadMessage,
+						unread_count: 1,
+						total_count: 1,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?")) {
+				return Promise.resolve([unreadMessage]);
+			}
+			if (input.includes("/api/conversations/") && init?.method === "POST") {
+				return Promise.reject(new Error("write failed"));
+			}
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+		fireEvent.click(
+			await screen.findByRole("button", { name: /\+15550000001/ }),
+		);
+
+		expect((await screen.findByRole("alert")).textContent).toContain(
+			"Could not mark messages as read. Try again.",
+		);
+	});
+});
+
 describe("MessageConsole sending", () => {
 	test("sends an idempotency key and reuses it after an ambiguous failure", async () => {
 		const sendRequests: RequestInit[] = [];
@@ -155,7 +214,9 @@ describe("MessageConsole sending", () => {
 				errorsAfterSendFailure,
 			),
 		);
-		expect(screen.queryByRole("alert")).toBeNull();
+		expect(
+			screen.queryByText("Message could not be sent. Try again."),
+		).toBeNull();
 
 		const firstKey = new Headers(sendRequests[0].headers).get(
 			"Idempotency-Key",
