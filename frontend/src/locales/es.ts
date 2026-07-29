@@ -324,13 +324,13 @@ export const es = {
 		error: {
 			load: "No se pudieron cargar los mensajes.",
 			markRead:
-				"No se pudieron marcar los mensajes como leídos. Inténtalo de nuevo.",
-			update: "No se pudieron actualizar los mensajes. Inténtalo de nuevo.",
-			delete: "No se pudieron eliminar los mensajes. Inténtalo de nuevo.",
-			export: "No se pudieron exportar los mensajes. Inténtalo de nuevo.",
+				"No se pudieron marcar los mensajes como leídos. Inténtelo de nuevo.",
+			update: "No se pudieron actualizar los mensajes. Inténtelo de nuevo.",
+			delete: "No se pudieron eliminar los mensajes. Inténtelo de nuevo.",
+			export: "No se pudieron exportar los mensajes. Inténtelo de nuevo.",
 			loadOlder:
-				"No se pudieron cargar los mensajes anteriores. Inténtalo de nuevo.",
-			refresh: "No se pudieron actualizar los mensajes. Inténtalo de nuevo.",
+				"No se pudieron cargar los mensajes anteriores. Inténtelo de nuevo.",
+			refresh: "No se pudieron actualizar los mensajes. Inténtelo de nuevo.",
 		},
 		thread: {
 			loadingOlder: "Cargando mensajes anteriores",

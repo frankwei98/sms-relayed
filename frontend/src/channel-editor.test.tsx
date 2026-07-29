@@ -207,7 +207,8 @@ describe("ChannelEditor forwarding controls", () => {
 		fireEvent.change(firstName, { target: { value: "x-two" } });
 		fireEvent.blur(firstName);
 		expect(onUpdate).not.toHaveBeenCalled();
-		expect(screen.getByText("That header name already exists.")).toBeTruthy();
+		const error = screen.getByText("That header name already exists.");
+		expect(firstName.getAttribute("aria-describedby")).toBe(error.id);
 
 		fireEvent.change(firstName, { target: { value: "X-Renamed" } });
 		fireEvent.blur(firstName);

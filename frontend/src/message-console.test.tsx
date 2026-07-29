@@ -149,6 +149,43 @@ describe("MessageConsole error recovery", () => {
 			"Could not mark messages as read. Try again.",
 		);
 	});
+
+	test("reports a refresh error when reloading after marking read fails", async () => {
+		let conversationLoads = 0;
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		mocks.apiFetch.mockImplementation((input: string, init?: RequestInit) => {
+			if (input === "/api/conversations") {
+				conversationLoads += 1;
+				if (conversationLoads > 1) {
+					return Promise.reject(new Error("refresh failed"));
+				}
+				return Promise.resolve([
+					{
+						phone_number: unreadMessage.phone_number,
+						last_message: unreadMessage,
+						unread_count: 1,
+						total_count: 1,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?")) {
+				return Promise.resolve([unreadMessage]);
+			}
+			if (input.includes("/api/conversations/") && init?.method === "POST") {
+				return Promise.resolve({ changed: 1 });
+			}
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+		fireEvent.click(
+			await screen.findByRole("button", { name: /\+15550000001/ }),
+		);
+
+		expect((await screen.findByRole("alert")).textContent).toContain(
+			"Could not refresh messages. Try again.",
+		);
+	});
 });
 
 describe("MessageConsole sending", () => {

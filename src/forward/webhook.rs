@@ -56,6 +56,7 @@ pub fn validate_profile(profile: &WebhookConfig) -> Result<()> {
         bail!("body template exceeds {MAX_BODY_BYTES} bytes");
     }
     validate_template(&profile.url)?;
+    validate_static_url_authority(&profile.url)?;
     validate_template(&profile.body)?;
 
     let sample = WebhookMessage {
@@ -117,6 +118,20 @@ pub fn validate_profile(profile: &WebhookConfig) -> Result<()> {
             bail!("webhook header {name:?} is managed by the HTTP client");
         }
     }
+    Ok(())
+}
+
+fn validate_static_url_authority(template: &str) -> Result<()> {
+    let authority_start = template.find("://").map_or(0, |index| index + 3);
+    let authority_end = template[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(template.len(), |index| authority_start + index);
+    let authority = &template[authority_start..authority_end];
+
+    if TOKENS.iter().any(|(token, _, _)| authority.contains(token)) {
+        bail!("webhook url authority must not contain template variables");
+    }
+
     Ok(())
 }
 
@@ -346,6 +361,36 @@ mod tests {
         assert!(error
             .to_string()
             .contains("incomplete webhook template variable {TITLE"));
+    }
+
+    #[test]
+    fn rejects_template_variables_in_url_authority() {
+        for url in [
+            "https://{MESSAGE}/notify",
+            "https://user:{SENDER_JSON}@example.com/notify",
+            "https://example.com:{DATETIME_URL}/notify",
+        ] {
+            let profile = WebhookConfig {
+                url: url.to_string(),
+                ..WebhookConfig::default()
+            };
+
+            let error = validate_profile(&profile).unwrap_err();
+            assert!(
+                error.to_string().contains("authority"),
+                "unexpected error for {url}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_template_variables_after_url_authority() {
+        let profile = WebhookConfig {
+            url: "https://example.com/{SENDER_URL}?message={MESSAGE_URL}".to_string(),
+            ..WebhookConfig::default()
+        };
+
+        validate_profile(&profile).unwrap();
     }
 
     #[test]
