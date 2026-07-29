@@ -23,8 +23,8 @@ declare module "@tanstack/react-router" {
 const rootElement = document.getElementById("app") as HTMLElement;
 
 async function start(): Promise<void> {
-	initMonitoring(await loadMonitoringPreference());
 	if (rootElement.innerHTML) return;
+	initMonitoring(await loadMonitoringPreference());
 
 	const root = ReactDOM.createRoot(rootElement, {
 		onUncaughtError: Sentry.reactErrorHandler(),

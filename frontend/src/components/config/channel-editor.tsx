@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "#/components/ui/button";
 import {
@@ -614,6 +614,7 @@ function WebhookHeaderRow({
 	onChange: (oldName: string, name: string, value: string) => void;
 }) {
 	const { t } = useTranslation();
+	const errorId = useId();
 	const [draftName, setDraftName] = useState(name);
 	const missing = draftName.length === 0;
 	const duplicate =
@@ -629,6 +630,7 @@ function WebhookHeaderRow({
 				<Input
 					aria-label={t("config.channel.webhookHeaderName")}
 					aria-invalid={invalid}
+					aria-describedby={invalid ? errorId : undefined}
 					value={draftName}
 					onChange={(event) => setDraftName(event.target.value)}
 					onBlur={() => {
@@ -656,7 +658,7 @@ function WebhookHeaderRow({
 				</Button>
 			</div>
 			{invalid ? (
-				<p className="mt-1 text-xs text-destructive">
+				<p id={errorId} className="mt-1 text-xs text-destructive">
 					{t(
 						duplicate
 							? "config.channel.webhookHeaderDuplicate"

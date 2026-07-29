@@ -428,13 +428,17 @@ export function MessageConsole() {
 		apiFetch(`/api/conversations/${encodeURIComponent(phone)}/read`, {
 			method: "POST",
 		})
-			.then(async () => {
-				await reloadActiveViews();
-			})
-			.catch((err) => {
-				setOperationError("markRead");
-				console.error(err);
-			})
+			.then(
+				() =>
+					reloadActiveViews().catch((err) => {
+						setOperationError("refresh");
+						console.error(err);
+					}),
+				(err) => {
+					setOperationError("markRead");
+					console.error(err);
+				},
+			)
 			.finally(() => {
 				markingReadPhonesRef.current.delete(phone);
 			});
@@ -563,9 +567,15 @@ export function MessageConsole() {
 					method: "POST",
 				},
 			);
-			await reloadActiveViews();
 		} catch (err) {
 			setOperationError("markRead");
+			console.error(err);
+			return;
+		}
+		try {
+			await reloadActiveViews();
+		} catch (err) {
+			setOperationError("refresh");
 			console.error(err);
 		}
 	}

@@ -510,7 +510,7 @@ export const ja = {
 			timeouts: {
 				sectionTitle: "タイムアウト",
 				sectionDescription:
-					"接続の確立、プロバイダーリクエスト、およびシェルプロファイルの実行を制限します。すべての値は秒単位です。",
+					"接続の確立と、プロバイダーまたは Webhook へのリクエストを制限します。すべての値は秒単位です。",
 				connectTimeout: "接続タイムアウト",
 				connectTimeoutDescription:
 					"正の値であり、リクエストタイムアウト以下である必要があります。",
