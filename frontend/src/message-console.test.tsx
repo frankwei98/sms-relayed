@@ -48,6 +48,14 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 	vi.clearAllMocks();
 	vi.unstubAllGlobals();
+	Object.defineProperty(navigator, "clipboard", {
+		configurable: true,
+		value: undefined,
+	});
+	Object.defineProperty(document, "execCommand", {
+		configurable: true,
+		value: undefined,
+	});
 	mocks.handlers = {};
 	await i18n.changeLanguage("en");
 });
@@ -350,6 +358,58 @@ describe("MessageConsole context menus", () => {
 		fireEvent.click(await screen.findByRole("menuitem", { name: "Copy" }));
 
 		await waitFor(() => expect(writeText).toHaveBeenCalledWith("test body"));
+		expect((await screen.findByRole("status")).textContent).toContain(
+			"Message copied",
+		);
+	});
+
+	test("copies the message body via the execCommand fallback when the Clipboard API is unavailable", async () => {
+		Object.defineProperty(navigator, "clipboard", {
+			configurable: true,
+			value: undefined,
+		});
+		let copiedBody: string | null = null;
+		const execCommand = vi.fn((command: string) => {
+			const textarea = document.body.querySelector("textarea[readonly]");
+			copiedBody = (textarea as HTMLTextAreaElement | null)?.value ?? null;
+			return command === "copy";
+		});
+		Object.defineProperty(document, "execCommand", {
+			configurable: true,
+			value: execCommand,
+		});
+		mocks.apiFetch.mockImplementation((input: string) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: unreadMessage.phone_number,
+						last_message: unreadMessage,
+						unread_count: 0,
+						total_count: 1,
+						pinned: false,
+						favorite_count: 0,
+						delete_blocked: false,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?")) {
+				return Promise.resolve([unreadMessage]);
+			}
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+		fireEvent.click(
+			await screen.findByRole("button", { name: /\+15550000001/ }),
+		);
+		await screen.findByRole("log");
+		const body = screen.getAllByText("test body").at(-1);
+		expect(body).toBeTruthy();
+		fireEvent.contextMenu(body?.parentElement?.parentElement as Element);
+		fireEvent.click(await screen.findByRole("menuitem", { name: "Copy" }));
+
+		await waitFor(() => expect(execCommand).toHaveBeenCalledWith("copy"));
+		expect(copiedBody).toBe("test body");
 		expect((await screen.findByRole("status")).textContent).toContain(
 			"Message copied",
 		);

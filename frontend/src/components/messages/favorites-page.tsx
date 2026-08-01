@@ -14,6 +14,7 @@ import {
 	ContextMenuTrigger,
 } from "#/components/ui/context-menu";
 import { apiFetch, type Message } from "#/lib/api";
+import { copyText } from "#/lib/clipboard";
 import { subscribeEvents } from "#/lib/events";
 
 type FavoritesError = "load" | "update" | "copy" | "delete";
@@ -81,11 +82,10 @@ export function FavoritesPage({
 	}
 
 	async function copyMessage(message: Message) {
-		try {
-			await navigator.clipboard.writeText(message.body);
+		if (await copyText(message.body)) {
 			setNotice(true);
 			setError(null);
-		} catch {
+		} else {
 			setError("copy");
 		}
 	}

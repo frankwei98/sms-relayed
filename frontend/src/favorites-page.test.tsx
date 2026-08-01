@@ -45,6 +45,14 @@ afterEach(async () => {
 	cleanup();
 	vi.restoreAllMocks();
 	vi.clearAllMocks();
+	Object.defineProperty(navigator, "clipboard", {
+		configurable: true,
+		value: undefined,
+	});
+	Object.defineProperty(document, "execCommand", {
+		configurable: true,
+		value: undefined,
+	});
 	mocks.handlers = {};
 	await i18n.changeLanguage("en");
 });
@@ -110,5 +118,40 @@ describe("FavoritesPage", () => {
 				method: "DELETE",
 			});
 		});
+	});
+
+	test("copies the message body via the execCommand fallback when the Clipboard API is unavailable", async () => {
+		Object.defineProperty(navigator, "clipboard", {
+			configurable: true,
+			value: undefined,
+		});
+		let copiedBody: string | null = null;
+		const execCommand = vi.fn((command: string) => {
+			const textarea = document.body.querySelector("textarea[readonly]");
+			copiedBody = (textarea as HTMLTextAreaElement | null)?.value ?? null;
+			return command === "copy";
+		});
+		Object.defineProperty(document, "execCommand", {
+			configurable: true,
+			value: execCommand,
+		});
+		mocks.apiFetch.mockImplementation((input: string) => {
+			if (input === "/api/messages/favorites")
+				return Promise.resolve([favorite]);
+			return Promise.resolve({});
+		});
+
+		render(<FavoritesPage onOpenMessage={vi.fn()} />);
+		const card = await screen.findByRole("button", {
+			name: /Saved verification code/,
+		});
+		fireEvent.contextMenu(card);
+		fireEvent.click(await screen.findByRole("menuitem", { name: "Copy" }));
+
+		await waitFor(() => expect(execCommand).toHaveBeenCalledWith("copy"));
+		expect(copiedBody).toBe("Saved verification code");
+		expect((await screen.findByRole("status")).textContent).toContain(
+			"Message copied",
+		);
 	});
 });
