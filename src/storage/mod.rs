@@ -1118,6 +1118,68 @@ mod tests {
     }
 
     #[test]
+    fn reopening_an_existing_database_replaces_the_legacy_delete_trigger() {
+        let path = std::env::temp_dir().join(format!(
+            "sms-relayed-legacy-delete-trigger-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let message_id = {
+            let store = MessageStore::open(&path).unwrap();
+            let message = store
+                .insert_message(NewMessage::inbound("+15550000003", "only"))
+                .unwrap();
+            store.set_conversation_pinned("+15550000003", true).unwrap();
+            message.id
+        };
+
+        {
+            let legacy = Connection::open(&path).unwrap();
+            legacy
+                .execute_batch(
+                    "DROP TRIGGER messages_delete_conversation_summary;
+                     CREATE TRIGGER messages_delete_conversation_summary
+                     AFTER DELETE ON messages
+                     BEGIN
+                         UPDATE conversation_summaries
+                         SET total_count = total_count - 1,
+                             unread_count = unread_count
+                                 - CASE WHEN OLD.direction = 'inbound' AND OLD.read_at IS NULL THEN 1 ELSE 0 END,
+                             last_message_id = CASE
+                                 WHEN last_message_id = OLD.id THEN (
+                                     SELECT id FROM messages
+                                     WHERE phone_number = OLD.phone_number
+                                     ORDER BY COALESCE(julianday(timestamp), julianday(created_at)) DESC, id DESC
+                                     LIMIT 1
+                                 )
+                                 ELSE last_message_id
+                             END
+                         WHERE phone_number = OLD.phone_number;
+                         DELETE FROM conversation_summaries
+                         WHERE phone_number = OLD.phone_number AND total_count = 0;
+                     END;",
+                )
+                .unwrap();
+        }
+
+        let store = MessageStore::open(&path).unwrap();
+        store.delete_messages(&[message_id]).unwrap();
+        assert!(store.list_conversations().unwrap().is_empty());
+
+        store
+            .insert_message(NewMessage::inbound("+15550000003", "reborn"))
+            .unwrap();
+        let conversations = store.list_conversations().unwrap();
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].phone_number, "+15550000003");
+        assert!(!conversations[0].pinned);
+        drop(store);
+
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
+    }
+
+    #[test]
     fn filters_by_timestamp_range() {
         let store = memory_store();
         let lower_bound = store
