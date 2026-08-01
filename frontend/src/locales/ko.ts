@@ -7,6 +7,7 @@ type TranslationShape<T> = {
 export const ko = {
 	nav: {
 		sms: "SMS",
+		favorites: "즐겨찾기",
 		modem: "모뎀",
 		forwarding: "전달",
 		config: "구성",
@@ -266,6 +267,16 @@ export const ko = {
 			request: "요청 {{time}}",
 		},
 	},
+	favorites: {
+		title: "즐겨찾기",
+		subtitle: "저장된 메시지 {{count}}개",
+		loading: "즐겨찾기 불러오는 중",
+		emptyTitle: "아직 즐겨찾기가 없습니다",
+		emptyDescription:
+			"메시지를 즐겨찾기에 추가하면 여기에서 빠르게 찾을 수 있습니다.",
+		originalTime: "원본 메시지",
+		error: { load: "즐겨찾기를 불러올 수 없습니다." },
+	},
 	messages: {
 		title: "메시지",
 		sim: "SIM {{number}}",
@@ -314,6 +325,7 @@ export const ko = {
 			markRead: "메시지를 읽음으로 표시할 수 없습니다. 다시 시도하세요.",
 			update: "메시지를 업데이트할 수 없습니다. 다시 시도하세요.",
 			delete: "메시지를 삭제할 수 없습니다. 다시 시도하세요.",
+			copy: "메시지를 복사할 수 없습니다. 다시 시도하세요.",
 			export: "메시지를 내보낼 수 없습니다. 다시 시도하세요.",
 			loadOlder: "이전 메시지를 불러올 수 없습니다. 다시 시도하세요.",
 			refresh: "메시지를 새로 고칠 수 없습니다. 다시 시도하세요.",
@@ -340,6 +352,16 @@ export const ko = {
 			failed: "실패",
 		},
 		actions: {
+			favorite: "즐겨찾기",
+			unfavorite: "즐겨찾기 해제",
+			copy: "복사",
+			delete: "삭제",
+			deleteSendingDisabled: "전송 중인 메시지는 삭제할 수 없습니다",
+			pin: "상단 고정",
+			unpin: "고정 해제",
+			deleteConversation: "대화 삭제",
+			deleteConversationSendingDisabled:
+				"메시지를 보내는 동안에는 대화를 삭제할 수 없습니다",
 			selectMessages: "메시지 선택",
 			stopSelecting: "선택 중지",
 			markRead: "읽음으로 표시 ({{count}})",
@@ -347,6 +369,21 @@ export const ko = {
 			deleteSelected: "선택 항목 삭제",
 			markConversationRead: "대화를 읽음으로 표시",
 			conversationActions: "대화 작업",
+		},
+		deleteMessage: {
+			title: "메시지를 삭제할까요?",
+			description: "이 메시지는 영구적으로 삭제되며 복구할 수 없습니다.",
+			confirm: "메시지 삭제",
+		},
+		deleteConversation: {
+			title: "대화를 삭제할까요?",
+			description:
+				"{{phone}} 및 메시지 {{count}}개를 모두 삭제합니다. 이 작업은 취소할 수 없습니다.",
+			favoriteWarning: "즐겨찾기 {{count}}개가 포함되어 있습니다.",
+			confirm: "대화 삭제",
+		},
+		notice: {
+			copied: "메시지가 복사되었습니다",
 		},
 		relativeDay: {
 			today: "오늘",

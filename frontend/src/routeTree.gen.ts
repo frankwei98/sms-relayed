@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as ModemRouteImport } from './routes/modem'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as ForwardingRouteImport } from './routes/forwarding'
+import { Route as FavoritesRouteImport } from './routes/favorites'
 import { Route as ConfigRouteImport } from './routes/config'
 import { Route as IndexRouteImport } from './routes/index'
 
@@ -30,6 +31,11 @@ const ForwardingRoute = ForwardingRouteImport.update({
   path: '/forwarding',
   getParentRoute: () => rootRouteImport,
 } as any)
+const FavoritesRoute = FavoritesRouteImport.update({
+  id: '/favorites',
+  path: '/favorites',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ConfigRoute = ConfigRouteImport.update({
   id: '/config',
   path: '/config',
@@ -44,6 +50,7 @@ const IndexRoute = IndexRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/config': typeof ConfigRoute
+  '/favorites': typeof FavoritesRoute
   '/forwarding': typeof ForwardingRoute
   '/login': typeof LoginRoute
   '/modem': typeof ModemRoute
@@ -51,6 +58,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/config': typeof ConfigRoute
+  '/favorites': typeof FavoritesRoute
   '/forwarding': typeof ForwardingRoute
   '/login': typeof LoginRoute
   '/modem': typeof ModemRoute
@@ -59,21 +67,31 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/config': typeof ConfigRoute
+  '/favorites': typeof FavoritesRoute
   '/forwarding': typeof ForwardingRoute
   '/login': typeof LoginRoute
   '/modem': typeof ModemRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/config' | '/forwarding' | '/login' | '/modem'
+  fullPaths:
+    '/' | '/config' | '/favorites' | '/forwarding' | '/login' | '/modem'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/config' | '/forwarding' | '/login' | '/modem'
-  id: '__root__' | '/' | '/config' | '/forwarding' | '/login' | '/modem'
+  to: '/' | '/config' | '/favorites' | '/forwarding' | '/login' | '/modem'
+  id:
+    | '__root__'
+    | '/'
+    | '/config'
+    | '/favorites'
+    | '/forwarding'
+    | '/login'
+    | '/modem'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ConfigRoute: typeof ConfigRoute
+  FavoritesRoute: typeof FavoritesRoute
   ForwardingRoute: typeof ForwardingRoute
   LoginRoute: typeof LoginRoute
   ModemRoute: typeof ModemRoute
@@ -102,6 +120,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ForwardingRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/favorites': {
+      id: '/favorites'
+      path: '/favorites'
+      fullPath: '/favorites'
+      preLoaderRoute: typeof FavoritesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/config': {
       id: '/config'
       path: '/config'
@@ -122,6 +147,7 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ConfigRoute: ConfigRoute,
+  FavoritesRoute: FavoritesRoute,
   ForwardingRoute: ForwardingRoute,
   LoginRoute: LoginRoute,
   ModemRoute: ModemRoute,

@@ -131,6 +131,8 @@ export type Message = {
 	error: string | null;
 	created_at: string;
 	updated_at: string;
+	favorite_at: string | null;
+	delete_blocked: boolean;
 };
 
 export type ConversationSummary = {
@@ -138,6 +140,9 @@ export type ConversationSummary = {
 	last_message: Message;
 	unread_count: number;
 	total_count: number;
+	pinned: boolean;
+	favorite_count: number;
+	delete_blocked: boolean;
 };
 
 export type ForwardAttemptOutcome =

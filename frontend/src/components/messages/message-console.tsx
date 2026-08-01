@@ -10,24 +10,38 @@ import {
 	Archive,
 	CheckCheck,
 	ChevronLeft,
+	Copy,
 	Download,
 	Filter,
 	Inbox,
 	LoaderCircle,
 	MessageCircle,
 	MoreHorizontal,
+	Pin,
+	PinOff,
 	Plus,
 	Search,
 	Send,
+	Star,
 	Trash2,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import {
+	DeleteMessageDialog,
+	useDesktopContextMenus,
+} from "#/components/messages/message-context-menu";
 import { PhoneNumberCopy } from "#/components/phone-number-copy";
 import { Badge } from "#/components/ui/badge";
 import { Button } from "#/components/ui/button";
 import { Checkbox } from "#/components/ui/checkbox";
+import {
+	ContextMenu,
+	ContextMenuContent,
+	ContextMenuItem,
+	ContextMenuTrigger,
+} from "#/components/ui/context-menu";
 import {
 	Dialog,
 	DialogClose,
@@ -80,6 +94,7 @@ type MessageOperationError =
 	| "markRead"
 	| "update"
 	| "delete"
+	| "copy"
 	| "export"
 	| "loadOlder"
 	| "refresh";
@@ -128,10 +143,19 @@ function mergeMessagesChronologically(current: Message[], incoming: Message[]) {
 	];
 }
 
-export function MessageConsole() {
+export function MessageConsole({
+	initialPhone,
+	targetMessageId,
+}: {
+	initialPhone?: string;
+	targetMessageId?: number;
+} = {}) {
+	const { t } = useTranslation();
 	const [conversations, setConversations] = useState<ConversationSummary[]>([]);
 	const [messages, setMessages] = useState<Message[]>([]);
-	const [selectedPhone, setSelectedPhone] = useState<string | null>(null);
+	const [selectedPhone, setSelectedPhone] = useState<string | null>(
+		initialPhone ?? null,
+	);
 	const [isComposingNew, setIsComposingNew] = useState(false);
 	const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
 	const [selectionMode, setSelectionMode] = useState(false);
@@ -139,7 +163,7 @@ export function MessageConsole() {
 	const [direction, setDirection] = useState(ALL_DIRECTIONS);
 	const [statusFilter, setStatusFilter] = useState(ALL_STATUSES);
 	const [unreadOnly, setUnreadOnly] = useState(false);
-	const [phoneNumber, setPhoneNumber] = useState("");
+	const [phoneNumber, setPhoneNumber] = useState(initialPhone ?? "");
 	const [body, setBody] = useState("");
 	const [sending, setSending] = useState(false);
 	const [sendFailed, setSendFailed] = useState(false);
@@ -149,6 +173,12 @@ export function MessageConsole() {
 	const [conversationLoadFailed, setConversationLoadFailed] = useState(false);
 	const [operationError, setOperationError] =
 		useState<MessageOperationError | null>(null);
+	const [actionNotice, setActionNotice] = useState<"copied" | null>(null);
+	const [deleteMessageTarget, setDeleteMessageTarget] =
+		useState<Message | null>(null);
+	const [deleteConversationTarget, setDeleteConversationTarget] =
+		useState<ConversationSummary | null>(null);
+	const [deletePending, setDeletePending] = useState(false);
 	const markingReadPhonesRef = useRef<Set<string>>(new Set());
 	const hasLoadedConversationsRef = useRef(false);
 	const loadedMessageCountRef = useRef(0);
@@ -161,6 +191,8 @@ export function MessageConsole() {
 	const messageReloadVersionRef = useRef(0);
 	const messageRefreshEpochRef = useRef(0);
 	const oldestLoadedMessageIdRef = useRef<number | null>(null);
+	const loadedDeepLinkRef = useRef<string | null>(null);
+	const contextMenusEnabled = useDesktopContextMenus();
 
 	const resetMessageWindow = useCallback(() => {
 		messageWindowGenerationRef.current += 1;
@@ -267,8 +299,15 @@ export function MessageConsole() {
 			resetMessageWindow();
 			return;
 		}
+		if (targetMessageId && selectedPhone === initialPhone) return;
 		await loadMessagesForPhone(selectedPhone);
-	}, [loadMessagesForPhone, resetMessageWindow, selectedPhone]);
+	}, [
+		initialPhone,
+		loadMessagesForPhone,
+		resetMessageWindow,
+		selectedPhone,
+		targetMessageId,
+	]);
 
 	const loadOlderMessages = useCallback(async () => {
 		if (
@@ -357,6 +396,31 @@ export function MessageConsole() {
 		void loadMessages().catch(() => setOperationError("refresh"));
 	}, [loadMessages]);
 
+	useEffect(() => {
+		if (!initialPhone || !targetMessageId) return;
+		const conversation = conversations.find(
+			(item) => item.phone_number === initialPhone,
+		);
+		if (!conversation) return;
+		const key = `${initialPhone}:${targetMessageId}`;
+		if (loadedDeepLinkRef.current === key) return;
+		loadedDeepLinkRef.current = key;
+		resetMessageWindow();
+		setSelectedPhone(initialPhone);
+		setPhoneNumber(initialPhone);
+		setIsComposingNew(false);
+		void loadMessagesForPhone(
+			initialPhone,
+			Math.max(MESSAGE_PAGE_SIZE, conversation.total_count),
+		).catch(() => setOperationError("refresh"));
+	}, [
+		conversations,
+		initialPhone,
+		loadMessagesForPhone,
+		resetMessageWindow,
+		targetMessageId,
+	]);
+
 	const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const pendingCreatedMessagesRef = useRef(0);
 
@@ -387,6 +451,7 @@ export function MessageConsole() {
 			"message.deleted": () => scheduleRefresh(),
 			"message.read_state_changed": () => scheduleRefresh(),
 			"conversation.read": () => scheduleRefresh(),
+			"conversation.updated": () => scheduleRefresh(),
 		});
 		const refreshInterval = window.setInterval(
 			() => scheduleRefresh(),
@@ -410,6 +475,12 @@ export function MessageConsole() {
 			setIsComposingNew(false);
 		}
 	}, [conversations, selectedPhone]);
+
+	useEffect(() => {
+		if (!actionNotice) return;
+		const timeout = window.setTimeout(() => setActionNotice(null), 2500);
+		return () => window.clearTimeout(timeout);
+	}, [actionNotice]);
 
 	useEffect(() => {
 		if (!selectedPhone || isComposingNew) return;
@@ -472,6 +543,11 @@ export function MessageConsole() {
 
 	const activePhone = isComposingNew ? phoneNumber : selectedPhone;
 	const hasThreadOpen = Boolean(selectedPhone || isComposingNew);
+	const activeTargetMessageId =
+		selectedPhone === initialPhone &&
+		messages.some((message) => message.id === targetMessageId)
+			? targetMessageId
+			: undefined;
 
 	function selectConversation(phone: string) {
 		if (!isComposingNew && phone === selectedPhone) return;
@@ -630,6 +706,90 @@ export function MessageConsole() {
 		}
 	}
 
+	async function handleToggleFavorite(message: Message) {
+		setOperationError(null);
+		try {
+			const updated = await apiFetch<Message>(
+				`/api/messages/${message.id}/${message.favorite_at ? "unfavorite" : "favorite"}`,
+				{ method: "POST" },
+			);
+			setMessages((current) =>
+				current.map((item) => (item.id === updated.id ? updated : item)),
+			);
+			await loadConversations();
+		} catch {
+			setOperationError("update");
+		}
+	}
+
+	async function handleTogglePin(conversation: ConversationSummary) {
+		setOperationError(null);
+		try {
+			await apiFetch(
+				`/api/conversations/${encodeURIComponent(conversation.phone_number)}/${conversation.pinned ? "unpin" : "pin"}`,
+				{ method: "POST" },
+			);
+			await loadConversations();
+		} catch {
+			setOperationError("update");
+		}
+	}
+
+	async function handleCopyMessage(message: Message) {
+		setOperationError(null);
+		try {
+			await navigator.clipboard.writeText(message.body);
+			setActionNotice("copied");
+		} catch {
+			setOperationError("copy");
+		}
+	}
+
+	async function handleConfirmDeleteMessage() {
+		if (!deleteMessageTarget || deletePending) return;
+		setOperationError(null);
+		setDeletePending(true);
+		try {
+			await apiFetch(`/api/messages/${deleteMessageTarget.id}`, {
+				method: "DELETE",
+			});
+			setDeleteMessageTarget(null);
+			setMessages((current) =>
+				current.filter((message) => message.id !== deleteMessageTarget.id),
+			);
+			await reloadActiveViews();
+		} catch {
+			setOperationError("delete");
+		} finally {
+			setDeletePending(false);
+		}
+	}
+
+	async function handleConfirmDeleteConversation() {
+		if (!deleteConversationTarget || deletePending) return;
+		setOperationError(null);
+		setDeletePending(true);
+		const phone = deleteConversationTarget.phone_number;
+		try {
+			await apiFetch(`/api/conversations/${encodeURIComponent(phone)}`, {
+				method: "DELETE",
+			});
+			setDeleteConversationTarget(null);
+			if (selectedPhone === phone) {
+				resetMessageWindow();
+				setSelectedPhone(null);
+				setIsComposingNew(false);
+				setSelectionMode(false);
+				setSelectedIds(new Set());
+			}
+			await loadConversations();
+		} catch {
+			setOperationError("delete");
+		} finally {
+			setDeletePending(false);
+		}
+	}
+
 	async function exportMessages(format: "csv" | "json") {
 		const p = buildParams(selectedPhone);
 		try {
@@ -645,6 +805,27 @@ export function MessageConsole() {
 
 	return (
 		<div className="flex h-full min-h-0 flex-col bg-background">
+			<DeleteConversationDialog
+				conversation={deleteConversationTarget}
+				pending={deletePending}
+				onOpenChange={(open) => {
+					if (!open && !deletePending) setDeleteConversationTarget(null);
+				}}
+				onConfirm={() => void handleConfirmDeleteConversation()}
+			/>
+			<DeleteMessageDialog
+				message={deleteMessageTarget}
+				pending={deletePending}
+				onOpenChange={(open) => {
+					if (!open && !deletePending) setDeleteMessageTarget(null);
+				}}
+				onConfirm={() => void handleConfirmDeleteMessage()}
+			/>
+			{actionNotice === "copied" ? (
+				<output className="fixed bottom-5 left-1/2 z-60 -translate-x-1/2 rounded-full bg-foreground px-4 py-2 text-sm font-medium text-background shadow-lg">
+					{t("messages.notice.copied")}
+				</output>
+			) : null}
 			{operationError ? (
 				<MessageOperationErrorBanner
 					error={operationError}
@@ -679,7 +860,10 @@ export function MessageConsole() {
 					<ConversationList
 						conversations={filteredConversations}
 						selectedPhone={selectedPhone}
+						contextMenusEnabled={contextMenusEnabled}
 						onSelect={selectConversation}
+						onTogglePin={handleTogglePin}
+						onRequestDelete={setDeleteConversationTarget}
 						loadFailed={conversationLoadFailed}
 						onRetry={() => void loadConversations().catch(() => {})}
 					/>
@@ -706,7 +890,12 @@ export function MessageConsole() {
 						selectionMode={selectionMode}
 						setSelectionMode={setSelectionMode}
 						selectedIds={selectedIds}
+						contextMenusEnabled={contextMenusEnabled}
+						targetMessageId={activeTargetMessageId}
 						onToggleSelect={toggleSelect}
+						onToggleFavorite={handleToggleFavorite}
+						onCopyMessage={handleCopyMessage}
+						onRequestDeleteMessage={setDeleteMessageTarget}
 						onLoadOlderMessages={loadOlderMessages}
 						onBack={closeMobileThread}
 						onSend={handleSend}
@@ -909,13 +1098,19 @@ function FilterDialog({
 function ConversationList({
 	conversations,
 	selectedPhone,
+	contextMenusEnabled,
 	onSelect,
+	onTogglePin,
+	onRequestDelete,
 	loadFailed,
 	onRetry,
 }: {
 	conversations: ConversationSummary[];
 	selectedPhone: string | null;
+	contextMenusEnabled: boolean;
 	onSelect: (phone: string) => void;
+	onTogglePin: (conversation: ConversationSummary) => void;
+	onRequestDelete: (conversation: ConversationSummary) => void;
 	loadFailed: boolean;
 	onRetry: () => void;
 }) {
@@ -965,7 +1160,10 @@ function ConversationList({
 						key={conversation.phone_number}
 						conversation={conversation}
 						active={conversation.phone_number === selectedPhone}
+						contextMenuEnabled={contextMenusEnabled}
 						onClick={() => onSelect(conversation.phone_number)}
+						onTogglePin={() => onTogglePin(conversation)}
+						onRequestDelete={() => onRequestDelete(conversation)}
 					/>
 				))}
 			</div>
@@ -985,6 +1183,7 @@ function MessageOperationErrorBanner({
 		markRead: t("messages.error.markRead"),
 		update: t("messages.error.update"),
 		delete: t("messages.error.delete"),
+		copy: t("messages.error.copy"),
 		export: t("messages.error.export"),
 		loadOlder: t("messages.error.loadOlder"),
 		refresh: t("messages.error.refresh"),
@@ -1003,95 +1202,192 @@ function MessageOperationErrorBanner({
 	);
 }
 
+function DeleteConversationDialog({
+	conversation,
+	pending,
+	onOpenChange,
+	onConfirm,
+}: {
+	conversation: ConversationSummary | null;
+	pending: boolean;
+	onOpenChange: (open: boolean) => void;
+	onConfirm: () => void;
+}) {
+	const { t } = useTranslation();
+	return (
+		<Dialog open={Boolean(conversation)} onOpenChange={onOpenChange}>
+			<DialogContent>
+				<DialogHeader>
+					<DialogTitle>{t("messages.deleteConversation.title")}</DialogTitle>
+					<DialogDescription>
+						{conversation
+							? t("messages.deleteConversation.description", {
+									phone: conversation.phone_number,
+									count: conversation.total_count,
+								})
+							: ""}
+					</DialogDescription>
+				</DialogHeader>
+				{conversation && conversation.favorite_count > 0 ? (
+					<div className="rounded-2xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-200">
+						{t("messages.deleteConversation.favoriteWarning", {
+							count: conversation.favorite_count,
+						})}
+					</div>
+				) : null}
+				<DialogFooter>
+					<DialogClose
+						disabled={pending}
+						render={<Button type="button" variant="outline" />}
+					>
+						{t("common.cancel")}
+					</DialogClose>
+					<Button
+						type="button"
+						variant="destructive"
+						disabled={pending}
+						onClick={onConfirm}
+					>
+						{pending ? <LoaderCircle className="animate-spin" /> : <Trash2 />}
+						{t("messages.deleteConversation.confirm")}
+					</Button>
+				</DialogFooter>
+			</DialogContent>
+		</Dialog>
+	);
+}
+
 function ConversationCard({
 	conversation,
 	active,
+	contextMenuEnabled,
 	onClick,
+	onTogglePin,
+	onRequestDelete,
 }: {
 	conversation: ConversationSummary;
 	active: boolean;
+	contextMenuEnabled: boolean;
 	onClick: () => void;
+	onTogglePin: () => void;
+	onRequestDelete: () => void;
 }) {
 	const { t, i18n } = useTranslation();
 	const language = i18n.resolvedLanguage ?? i18n.language;
 	const last = conversation.last_message;
 	return (
-		<button
-			type="button"
-			onClick={onClick}
-			className={cn(
-				"group grid w-full grid-cols-[2.75rem_minmax(0,1fr)] gap-3 rounded-3xl px-3 py-3 text-left transition-colors hover:bg-muted/70",
-				active && "bg-primary text-primary-foreground hover:bg-primary/90",
-			)}
-		>
-			<div
-				className={cn(
-					"grid size-11 place-items-center rounded-2xl bg-muted text-muted-foreground transition-colors",
-					active && "bg-primary-foreground/15 text-primary-foreground",
-				)}
+		<ContextMenu disabled={!contextMenuEnabled}>
+			<ContextMenuTrigger
+				render={
+					<button
+						type="button"
+						onClick={onClick}
+						className={cn(
+							"group grid w-full grid-cols-[2.75rem_minmax(0,1fr)] gap-3 rounded-3xl px-3 py-3 text-left transition-colors hover:bg-muted/70",
+							active &&
+								"bg-primary text-primary-foreground hover:bg-primary/90",
+						)}
+					/>
+				}
 			>
-				<MessageCircle className="size-5" />
-			</div>
-			<div className="min-w-0">
-				<div className="flex min-w-0 items-start justify-between gap-2">
-					<div className="min-w-0">
-						<p className="truncate text-base font-semibold leading-5">
-							{conversation.phone_number}
-						</p>
-						<p
-							className={cn(
-								"mt-0.5 text-xs text-muted-foreground",
-								active && "text-primary-foreground/75",
-							)}
-						>
-							{t("messages.conversationList.messages", {
-								count: conversation.total_count,
-							})}
-						</p>
-					</div>
-					<div className="flex shrink-0 flex-col items-end gap-1">
-						<span
-							className={cn(
-								"text-xs text-muted-foreground",
-								active && "text-primary-foreground/75",
-							)}
-						>
-							{active
-								? formatAbsoluteLocalTime(
-										messageDisplayTimestamp(last),
-										language,
-									)
-								: formatRelativeTime(messageDisplayTimestamp(last), language)}
-						</span>
-						{conversation.unread_count > 0 && (
-							<Badge
+				<div
+					className={cn(
+						"grid size-11 place-items-center rounded-2xl bg-muted text-muted-foreground transition-colors",
+						active && "bg-primary-foreground/15 text-primary-foreground",
+					)}
+				>
+					<MessageCircle className="size-5" />
+				</div>
+				<div className="min-w-0">
+					<div className="flex min-w-0 items-start justify-between gap-2">
+						<div className="min-w-0">
+							<div className="flex items-center gap-1.5">
+								<p className="truncate text-base font-semibold leading-5">
+									{conversation.phone_number}
+								</p>
+								{conversation.pinned ? (
+									<Pin
+										className="size-3.5 shrink-0 fill-current"
+										aria-hidden="true"
+									/>
+								) : null}
+							</div>
+							<p
 								className={cn(
-									"h-5 min-w-5 px-1.5",
-									active && "bg-primary-foreground text-primary",
+									"mt-0.5 text-xs text-muted-foreground",
+									active && "text-primary-foreground/75",
 								)}
 							>
-								{conversation.unread_count}
-							</Badge>
-						)}
+								{t("messages.conversationList.messages", {
+									count: conversation.total_count,
+								})}
+							</p>
+						</div>
+						<div className="flex shrink-0 flex-col items-end gap-1">
+							<span
+								className={cn(
+									"text-xs text-muted-foreground",
+									active && "text-primary-foreground/75",
+								)}
+							>
+								{active
+									? formatAbsoluteLocalTime(
+											messageDisplayTimestamp(last),
+											language,
+										)
+									: formatRelativeTime(messageDisplayTimestamp(last), language)}
+							</span>
+							{conversation.unread_count > 0 && (
+								<Badge
+									className={cn(
+										"h-5 min-w-5 px-1.5",
+										active && "bg-primary-foreground text-primary",
+									)}
+								>
+									{conversation.unread_count}
+								</Badge>
+							)}
+						</div>
+					</div>
+					<div className="mt-2 flex items-center gap-2">
+						<DirectionPill message={last} active={active} />
+						<p
+							className={cn(
+								"min-w-0 flex-1 truncate text-sm text-muted-foreground",
+								active && "text-primary-foreground/80",
+								conversation.unread_count > 0 && "font-medium text-foreground",
+								active &&
+									conversation.unread_count > 0 &&
+									"text-primary-foreground",
+							)}
+						>
+							{last.body}
+						</p>
 					</div>
 				</div>
-				<div className="mt-2 flex items-center gap-2">
-					<DirectionPill message={last} active={active} />
-					<p
-						className={cn(
-							"min-w-0 flex-1 truncate text-sm text-muted-foreground",
-							active && "text-primary-foreground/80",
-							conversation.unread_count > 0 && "font-medium text-foreground",
-							active &&
-								conversation.unread_count > 0 &&
-								"text-primary-foreground",
-						)}
-					>
-						{last.body}
-					</p>
-				</div>
-			</div>
-		</button>
+			</ContextMenuTrigger>
+			<ContextMenuContent className="w-48">
+				<ContextMenuItem onClick={onTogglePin}>
+					{conversation.pinned ? <PinOff /> : <Pin />}
+					{conversation.pinned
+						? t("messages.actions.unpin")
+						: t("messages.actions.pin")}
+				</ContextMenuItem>
+				<ContextMenuItem
+					variant="destructive"
+					disabled={conversation.delete_blocked}
+					onClick={onRequestDelete}
+					title={
+						conversation.delete_blocked
+							? t("messages.actions.deleteConversationSendingDisabled")
+							: undefined
+					}
+				>
+					<Trash2 />
+					{t("messages.actions.deleteConversation")}
+				</ContextMenuItem>
+			</ContextMenuContent>
+		</ContextMenu>
 	);
 }
 
@@ -1135,7 +1431,12 @@ function ThreadPanel({
 	selectionMode,
 	setSelectionMode,
 	selectedIds,
+	contextMenusEnabled,
+	targetMessageId,
 	onToggleSelect,
+	onToggleFavorite,
+	onCopyMessage,
+	onRequestDeleteMessage,
 	onLoadOlderMessages,
 	onBack,
 	onSend,
@@ -1158,7 +1459,12 @@ function ThreadPanel({
 	selectionMode: boolean;
 	setSelectionMode: (value: boolean) => void;
 	selectedIds: Set<number>;
+	contextMenusEnabled: boolean;
+	targetMessageId?: number;
 	onToggleSelect: (id: number) => void;
+	onToggleFavorite: (message: Message) => void;
+	onCopyMessage: (message: Message) => void;
+	onRequestDeleteMessage: (message: Message) => void;
 	onLoadOlderMessages: () => Promise<void>;
 	onBack: () => void;
 	onSend: () => void;
@@ -1193,12 +1499,23 @@ function ThreadPanel({
 		}
 		if (messages.length === 0) return;
 		if (scrolledConversationRef.current === phone) return;
+		if (targetMessageId) {
+			const target = threadScrollRef.current?.querySelector(
+				`[data-message-id="${targetMessageId}"]`,
+			);
+			if (!target) return;
+			scrolledConversationRef.current = phone;
+			requestAnimationFrame(() =>
+				target.scrollIntoView({ block: "center", behavior: "smooth" }),
+			);
+			return;
+		}
 		scrolledConversationRef.current = phone;
 		requestAnimationFrame(() => {
 			const element = threadScrollRef.current;
 			if (element) element.scrollTop = element.scrollHeight;
 		});
-	}, [conversation?.phone_number, messages.length]);
+	}, [conversation?.phone_number, messages.length, targetMessageId]);
 
 	const loadOlderPreservingScroll = useCallback(async () => {
 		if (loadingOlderRef.current || !hasOlderMessages) return;
@@ -1320,9 +1637,14 @@ function ThreadPanel({
 								)}
 								<MessageThread
 									messages={messages}
+									targetMessageId={targetMessageId}
 									selectionMode={selectionMode}
 									selectedIds={selectedIds}
+									contextMenusEnabled={contextMenusEnabled}
 									onToggleSelect={onToggleSelect}
+									onToggleFavorite={onToggleFavorite}
+									onCopyMessage={onCopyMessage}
+									onRequestDeleteMessage={onRequestDeleteMessage}
 								/>
 							</>
 						)}
@@ -1457,14 +1779,24 @@ function NewMessageRecipient({
 
 function MessageThread({
 	messages,
+	targetMessageId,
 	selectionMode,
 	selectedIds,
+	contextMenusEnabled,
 	onToggleSelect,
+	onToggleFavorite,
+	onCopyMessage,
+	onRequestDeleteMessage,
 }: {
 	messages: Message[];
+	targetMessageId?: number;
 	selectionMode: boolean;
 	selectedIds: Set<number>;
+	contextMenusEnabled: boolean;
 	onToggleSelect: (id: number) => void;
+	onToggleFavorite: (message: Message) => void;
+	onCopyMessage: (message: Message) => void;
+	onRequestDeleteMessage: (message: Message) => void;
 }) {
 	const { t, i18n } = useTranslation();
 	const language = i18n.resolvedLanguage ?? i18n.language;
@@ -1495,7 +1827,11 @@ function MessageThread({
 				const showDay = day !== lastDay;
 				lastDay = day;
 				return (
-					<div key={message.id} className="space-y-2">
+					<div
+						key={message.id}
+						data-message-id={message.id}
+						className="space-y-2 scroll-mt-20"
+					>
 						{showDay && (
 							<div className="flex justify-center py-2">
 								<span className="rounded-full bg-background px-3 py-1 text-xs font-medium text-muted-foreground shadow-sm ring-1 ring-border">
@@ -1507,7 +1843,12 @@ function MessageThread({
 							message={message}
 							selectionMode={selectionMode}
 							selected={selectedIds.has(message.id)}
+							contextMenuEnabled={contextMenusEnabled}
+							targeted={message.id === targetMessageId}
 							onToggle={() => onToggleSelect(message.id)}
+							onToggleFavorite={() => onToggleFavorite(message)}
+							onCopy={() => onCopyMessage(message)}
+							onRequestDelete={() => onRequestDeleteMessage(message)}
 						/>
 					</div>
 				);
@@ -1520,61 +1861,107 @@ function MessageBubble({
 	message,
 	selectionMode,
 	selected,
+	contextMenuEnabled,
+	targeted,
 	onToggle,
+	onToggleFavorite,
+	onCopy,
+	onRequestDelete,
 }: {
 	message: Message;
 	selectionMode: boolean;
 	selected: boolean;
+	contextMenuEnabled: boolean;
+	targeted: boolean;
 	onToggle: () => void;
+	onToggleFavorite: () => void;
+	onCopy: () => void;
+	onRequestDelete: () => void;
 }) {
-	const { i18n } = useTranslation();
+	const { t, i18n } = useTranslation();
 	const language = i18n.resolvedLanguage ?? i18n.language;
 	const outbound = message.direction === "outbound";
 	return (
-		<div
-			className={cn(
-				"flex items-end gap-2",
-				outbound ? "justify-end" : "justify-start",
-			)}
-		>
-			{selectionMode && !outbound && (
-				<Checkbox checked={selected} onCheckedChange={onToggle} />
-			)}
-			<div
-				className={cn(
-					"max-w-[82%] rounded-[1.35rem] px-4 py-2.5 text-sm leading-relaxed shadow-sm ring-1",
-					outbound
-						? "rounded-br-md bg-primary text-primary-foreground ring-primary/10"
-						: "rounded-bl-md bg-background text-foreground ring-border",
-					selected && "ring-3 ring-ring/40",
-				)}
+		<ContextMenu disabled={!contextMenuEnabled || selectionMode}>
+			<ContextMenuTrigger
+				render={
+					<div
+						className={cn(
+							"flex items-end gap-2",
+							outbound ? "justify-end" : "justify-start",
+							targeted &&
+								"rounded-[1.65rem] bg-amber-500/10 p-1 ring-2 ring-amber-400/60",
+						)}
+					/>
+				}
 			>
-				<p className="whitespace-pre-wrap break-words">{message.body}</p>
+				{selectionMode && !outbound && (
+					<Checkbox checked={selected} onCheckedChange={onToggle} />
+				)}
 				<div
 					className={cn(
-						"mt-1 flex flex-wrap items-center gap-1.5 text-[0.68rem]",
-						outbound ? "text-primary-foreground/70" : "text-muted-foreground",
+						"max-w-[82%] rounded-[1.35rem] px-4 py-2.5 text-sm leading-relaxed shadow-sm ring-1",
+						outbound
+							? "rounded-br-md bg-primary text-primary-foreground ring-primary/10"
+							: "rounded-bl-md bg-background text-foreground ring-border",
+						selected && "ring-3 ring-ring/40",
 					)}
 				>
-					<span>
-						{formatRelativeTime(messageDisplayTimestamp(message), language)}
-					</span>
-					<span>{message.status}</span>
-					{message.error && (
-						<span
-							className={
-								outbound ? "text-primary-foreground" : "text-destructive"
-							}
-						>
-							{message.error}
+					<p className="whitespace-pre-wrap break-words">{message.body}</p>
+					<div
+						className={cn(
+							"mt-1 flex flex-wrap items-center gap-1.5 text-[0.68rem]",
+							outbound ? "text-primary-foreground/70" : "text-muted-foreground",
+						)}
+					>
+						<span>
+							{formatRelativeTime(messageDisplayTimestamp(message), language)}
 						</span>
-					)}
+						<span>{message.status}</span>
+						{message.favorite_at ? (
+							<Star className="size-3 fill-current" aria-hidden="true" />
+						) : null}
+						{message.error && (
+							<span
+								className={
+									outbound ? "text-primary-foreground" : "text-destructive"
+								}
+							>
+								{message.error}
+							</span>
+						)}
+					</div>
 				</div>
-			</div>
-			{selectionMode && outbound && (
-				<Checkbox checked={selected} onCheckedChange={onToggle} />
-			)}
-		</div>
+				{selectionMode && outbound && (
+					<Checkbox checked={selected} onCheckedChange={onToggle} />
+				)}
+			</ContextMenuTrigger>
+			<ContextMenuContent className="w-48">
+				<ContextMenuItem onClick={onToggleFavorite}>
+					<Star className={cn(message.favorite_at && "fill-current")} />
+					{message.favorite_at
+						? t("messages.actions.unfavorite")
+						: t("messages.actions.favorite")}
+				</ContextMenuItem>
+				<ContextMenuItem onClick={onCopy}>
+					<Copy />
+					{t("messages.actions.copy")}
+				</ContextMenuItem>
+				<ContextMenuItem
+					variant="destructive"
+					disabled={message.delete_blocked}
+					onClick={onRequestDelete}
+					title={
+						message.delete_blocked
+							? t("messages.actions.deleteSendingDisabled")
+							: undefined
+					}
+				>
+					<Trash2 />
+					{t("messages.actions.delete")}
+				</ContextMenuItem>
+			</ContextMenuContent>
+		</ContextMenu>
 	);
 }
 

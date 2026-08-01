@@ -1,6 +1,7 @@
 export const en = {
 	nav: {
 		sms: "SMS",
+		favorites: "Favorites",
 		modem: "Modem",
 		forwarding: "Forwarding",
 		config: "Config",
@@ -266,6 +267,15 @@ export const en = {
 			request: "Request {{time}}",
 		},
 	},
+	favorites: {
+		title: "Favorites",
+		subtitle: "{{count}} saved messages",
+		loading: "Loading favorites",
+		emptyTitle: "No favorites yet",
+		emptyDescription: "Favorite a message to keep it easy to find here.",
+		originalTime: "Original message",
+		error: { load: "Favorites could not be loaded." },
+	},
 	messages: {
 		title: "Messages",
 		sim: "SIM {{number}}",
@@ -313,6 +323,7 @@ export const en = {
 			markRead: "Could not mark messages as read. Try again.",
 			update: "Could not update messages. Try again.",
 			delete: "Could not delete messages. Try again.",
+			copy: "Could not copy the message. Try again.",
 			export: "Could not export messages. Try again.",
 			loadOlder: "Could not load older messages. Try again.",
 			refresh: "Could not refresh messages. Try again.",
@@ -339,6 +350,16 @@ export const en = {
 			failed: "Failed",
 		},
 		actions: {
+			favorite: "Favorite",
+			unfavorite: "Remove from favorites",
+			copy: "Copy",
+			delete: "Delete",
+			deleteSendingDisabled: "Messages cannot be deleted while sending",
+			pin: "Pin",
+			unpin: "Unpin",
+			deleteConversation: "Delete conversation",
+			deleteConversationSendingDisabled:
+				"Conversations cannot be deleted while a message is sending",
 			selectMessages: "Select messages",
 			stopSelecting: "Stop selecting",
 			markRead: "Mark read ({{count}})",
@@ -346,6 +367,22 @@ export const en = {
 			deleteSelected: "Delete selected",
 			markConversationRead: "Mark conversation read",
 			conversationActions: "Conversation actions",
+		},
+		deleteMessage: {
+			title: "Delete message?",
+			description:
+				"This message will be permanently deleted and cannot be recovered.",
+			confirm: "Delete message",
+		},
+		deleteConversation: {
+			title: "Delete conversation?",
+			description:
+				"Delete {{phone}} and all {{count}} messages? This cannot be undone.",
+			favoriteWarning: "This includes {{count}} favorites.",
+			confirm: "Delete conversation",
+		},
+		notice: {
+			copied: "Message copied",
 		},
 		relativeDay: {
 			today: "Today",

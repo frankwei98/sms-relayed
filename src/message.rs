@@ -24,6 +24,17 @@ impl std::fmt::Display for IdempotencyReplayUnavailable {
 
 impl std::error::Error for IdempotencyReplayUnavailable {}
 
+#[derive(Debug)]
+pub struct ConversationDeleteBlocked;
+
+impl std::fmt::Display for ConversationDeleteBlocked {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("conversation contains a message that is still sending")
+    }
+}
+
+impl std::error::Error for ConversationDeleteBlocked {}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum MessageDirection {
@@ -62,6 +73,8 @@ pub struct Message {
     pub error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub favorite_at: Option<String>,
+    pub delete_blocked: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -89,4 +102,7 @@ pub struct ConversationSummary {
     pub last_message: Message,
     pub unread_count: i64,
     pub total_count: i64,
+    pub pinned: bool,
+    pub favorite_count: i64,
+    pub delete_blocked: bool,
 }

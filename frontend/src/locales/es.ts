@@ -7,6 +7,7 @@ type TranslationShape<T> = {
 export const es = {
 	nav: {
 		sms: "SMS",
+		favorites: "Favoritos",
 		modem: "Módem",
 		forwarding: "Reenvío",
 		config: "Configuración",
@@ -276,6 +277,16 @@ export const es = {
 			request: "Solicitud {{time}}",
 		},
 	},
+	favorites: {
+		title: "Favoritos",
+		subtitle: "{{count}} mensajes guardados",
+		loading: "Cargando favoritos",
+		emptyTitle: "Aún no hay favoritos",
+		emptyDescription:
+			"Marca un mensaje como favorito para encontrarlo fácilmente aquí.",
+		originalTime: "Mensaje original",
+		error: { load: "No se pudieron cargar los favoritos." },
+	},
 	messages: {
 		title: "Mensajes",
 		sim: "SIM {{number}}",
@@ -327,6 +338,7 @@ export const es = {
 				"No se pudieron marcar los mensajes como leídos. Inténtelo de nuevo.",
 			update: "No se pudieron actualizar los mensajes. Inténtelo de nuevo.",
 			delete: "No se pudieron eliminar los mensajes. Inténtelo de nuevo.",
+			copy: "No se pudo copiar el mensaje. Inténtelo de nuevo.",
 			export: "No se pudieron exportar los mensajes. Inténtelo de nuevo.",
 			loadOlder:
 				"No se pudieron cargar los mensajes anteriores. Inténtelo de nuevo.",
@@ -354,6 +366,17 @@ export const es = {
 			failed: "Fallido",
 		},
 		actions: {
+			favorite: "Añadir a favoritos",
+			unfavorite: "Quitar de favoritos",
+			copy: "Copiar",
+			delete: "Eliminar",
+			deleteSendingDisabled:
+				"No se puede eliminar un mensaje mientras se está enviando",
+			pin: "Fijar",
+			unpin: "Desfijar",
+			deleteConversation: "Eliminar conversación",
+			deleteConversationSendingDisabled:
+				"No se puede eliminar la conversación mientras se envía un mensaje",
 			selectMessages: "Seleccionar mensajes",
 			stopSelecting: "Detener selección",
 			markRead: "Marcar como leídos ({{count}})",
@@ -361,6 +384,22 @@ export const es = {
 			deleteSelected: "Eliminar selección",
 			markConversationRead: "Marcar conversación como leída",
 			conversationActions: "Acciones de conversación",
+		},
+		deleteMessage: {
+			title: "¿Eliminar mensaje?",
+			description:
+				"Este mensaje se eliminará permanentemente y no se podrá recuperar.",
+			confirm: "Eliminar mensaje",
+		},
+		deleteConversation: {
+			title: "¿Eliminar la conversación?",
+			description:
+				"¿Eliminar {{phone}} y sus {{count}} mensajes? Esta acción no se puede deshacer.",
+			favoriteWarning: "Esto incluye {{count}} favoritos.",
+			confirm: "Eliminar conversación",
+		},
+		notice: {
+			copied: "Mensaje copiado",
 		},
 		relativeDay: {
 			today: "Hoy",

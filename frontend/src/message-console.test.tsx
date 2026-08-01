@@ -38,6 +38,8 @@ const unreadMessage = {
 	error: null,
 	created_at: "2026-07-11T00:00:00Z",
 	updated_at: "2026-07-11T00:00:00Z",
+	favorite_at: null,
+	delete_blocked: false,
 };
 
 afterEach(async () => {
@@ -45,6 +47,7 @@ afterEach(async () => {
 	vi.useRealTimers();
 	vi.restoreAllMocks();
 	vi.clearAllMocks();
+	vi.unstubAllGlobals();
 	mocks.handlers = {};
 	await i18n.changeLanguage("en");
 });
@@ -89,6 +92,467 @@ describe("MessageConsole SIM phone number", () => {
 		expect(
 			screen.queryByRole("button", { name: "Copy phone number" }),
 		).toBeNull();
+	});
+});
+
+describe("MessageConsole context menus", () => {
+	test("keeps mobile conversation taps working without adding long-press menus", async () => {
+		vi.stubGlobal(
+			"matchMedia",
+			vi.fn(() => ({
+				matches: true,
+				addEventListener: vi.fn(),
+				removeEventListener: vi.fn(),
+			})),
+		);
+		mocks.apiFetch.mockImplementation((input: string) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: unreadMessage.phone_number,
+						last_message: unreadMessage,
+						unread_count: 0,
+						total_count: 1,
+						pinned: false,
+						favorite_count: 0,
+						delete_blocked: false,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?")) {
+				return Promise.resolve([unreadMessage]);
+			}
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+		const conversation = await screen.findByRole("button", {
+			name: /\+15550000001/,
+		});
+		fireEvent.click(conversation);
+		await screen.findByRole("log");
+		fireEvent.contextMenu(conversation);
+		expect(screen.queryByRole("menuitem", { name: "Pin" })).toBeNull();
+	});
+
+	test("disables conversation deletion while a message is sending", async () => {
+		const sendingMessage = {
+			...unreadMessage,
+			direction: "outbound" as const,
+			status: "sending" as const,
+			body: "still sending",
+			delete_blocked: true,
+		};
+		mocks.apiFetch.mockImplementation((input: string) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: sendingMessage.phone_number,
+						last_message: sendingMessage,
+						unread_count: 0,
+						total_count: 1,
+						pinned: false,
+						favorite_count: 0,
+						delete_blocked: true,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?")) {
+				return Promise.resolve([sendingMessage]);
+			}
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+		const conversation = await screen.findByRole("button", {
+			name: /\+15550000001/,
+		});
+		fireEvent.contextMenu(conversation);
+		const deleteConversation = await screen.findByRole("menuitem", {
+			name: "Delete conversation",
+		});
+		expect(deleteConversation.getAttribute("aria-disabled")).toBe("true");
+	});
+
+	test("disables deletion for a message that is sending", async () => {
+		const sendingMessage = {
+			...unreadMessage,
+			direction: "outbound" as const,
+			status: "sending" as const,
+			body: "still sending",
+			delete_blocked: true,
+		};
+		mocks.apiFetch.mockImplementation((input: string) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: sendingMessage.phone_number,
+						last_message: sendingMessage,
+						unread_count: 0,
+						total_count: 1,
+						pinned: false,
+						favorite_count: 0,
+						delete_blocked: true,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?")) {
+				return Promise.resolve([sendingMessage]);
+			}
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+		fireEvent.click(
+			await screen.findByRole("button", { name: /\+15550000001/ }),
+		);
+		await screen.findByRole("log");
+		await waitFor(() =>
+			expect(screen.getAllByText("still sending")).toHaveLength(2),
+		);
+		const body = screen.getAllByText("still sending").at(-1);
+		expect(body).toBeTruthy();
+		const bubble = body?.parentElement?.parentElement;
+		expect(bubble).toBeTruthy();
+		fireEvent.contextMenu(bubble as Element);
+		const deleteMessage = await screen.findByRole("menuitem", {
+			name: "Delete",
+		});
+		expect(deleteMessage.getAttribute("aria-disabled")).toBe("true");
+	});
+
+	test("allows deleting a permanently unknown outbound result", async () => {
+		const unknownMessage = {
+			...unreadMessage,
+			direction: "outbound" as const,
+			status: "sending" as const,
+			body: "outcome unknown",
+			error: "send outcome unknown",
+			delete_blocked: false,
+		};
+		mocks.apiFetch.mockImplementation((input: string) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: unknownMessage.phone_number,
+						last_message: unknownMessage,
+						unread_count: 0,
+						total_count: 1,
+						pinned: false,
+						favorite_count: 0,
+						delete_blocked: false,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?")) {
+				return Promise.resolve([unknownMessage]);
+			}
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+		fireEvent.click(
+			await screen.findByRole("button", { name: /\+15550000001/ }),
+		);
+		await screen.findByRole("log");
+		await waitFor(() =>
+			expect(screen.getAllByText("outcome unknown")).toHaveLength(2),
+		);
+		const body = screen.getAllByText("outcome unknown").at(-1);
+		const bubble = body?.parentElement?.parentElement;
+		fireEvent.contextMenu(bubble as Element);
+		const deleteMessage = await screen.findByRole("menuitem", {
+			name: "Delete",
+		});
+		expect(deleteMessage.getAttribute("aria-disabled")).toBeNull();
+	});
+
+	test("favorites a message from its context menu", async () => {
+		mocks.apiFetch.mockImplementation((input: string, init?: RequestInit) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: unreadMessage.phone_number,
+						last_message: unreadMessage,
+						unread_count: 0,
+						total_count: 1,
+						pinned: false,
+						favorite_count: 0,
+						delete_blocked: false,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?")) {
+				return Promise.resolve([unreadMessage]);
+			}
+			if (input === "/api/messages/1/favorite" && init?.method === "POST") {
+				return Promise.resolve({
+					...unreadMessage,
+					favorite_at: "2026-08-01T00:00:00Z",
+				});
+			}
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+		fireEvent.click(
+			await screen.findByRole("button", { name: /\+15550000001/ }),
+		);
+		await screen.findByRole("log");
+		const body = screen.getAllByText("test body").at(-1);
+		expect(body).toBeTruthy();
+		const bubble = body.parentElement?.parentElement;
+		expect(bubble).toBeTruthy();
+		fireEvent.contextMenu(bubble as Element);
+		fireEvent.click(await screen.findByRole("menuitem", { name: "Favorite" }));
+
+		await waitFor(() => {
+			expect(mocks.apiFetch).toHaveBeenCalledWith("/api/messages/1/favorite", {
+				method: "POST",
+			});
+		});
+	});
+
+	test("copies only the message body and announces success", async () => {
+		const writeText = vi.fn().mockResolvedValue(undefined);
+		Object.defineProperty(navigator, "clipboard", {
+			configurable: true,
+			value: { writeText },
+		});
+		mocks.apiFetch.mockImplementation((input: string) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: unreadMessage.phone_number,
+						last_message: unreadMessage,
+						unread_count: 0,
+						total_count: 1,
+						pinned: false,
+						favorite_count: 0,
+						delete_blocked: false,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?")) {
+				return Promise.resolve([unreadMessage]);
+			}
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+		fireEvent.click(
+			await screen.findByRole("button", { name: /\+15550000001/ }),
+		);
+		await screen.findByRole("log");
+		const body = screen.getAllByText("test body").at(-1);
+		expect(body).toBeTruthy();
+		fireEvent.contextMenu(body?.parentElement?.parentElement as Element);
+		fireEvent.click(await screen.findByRole("menuitem", { name: "Copy" }));
+
+		await waitFor(() => expect(writeText).toHaveBeenCalledWith("test body"));
+		expect((await screen.findByRole("status")).textContent).toContain(
+			"Message copied",
+		);
+	});
+
+	test("confirms before deleting a message from its context menu", async () => {
+		mocks.apiFetch.mockImplementation((input: string, init?: RequestInit) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: unreadMessage.phone_number,
+						last_message: unreadMessage,
+						unread_count: 0,
+						total_count: 1,
+						pinned: false,
+						favorite_count: 0,
+						delete_blocked: false,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?")) {
+				return Promise.resolve([unreadMessage]);
+			}
+			if (input === "/api/messages/1" && init?.method === "DELETE") {
+				return Promise.resolve(undefined);
+			}
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+		fireEvent.click(
+			await screen.findByRole("button", { name: /\+15550000001/ }),
+		);
+		await screen.findByRole("log");
+		const body = screen.getAllByText("test body").at(-1);
+		fireEvent.contextMenu(body?.parentElement?.parentElement as Element);
+		fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+
+		const dialog = await screen.findByRole("dialog", {
+			name: "Delete message?",
+		});
+		expect(dialog.textContent).toContain("test body");
+		fireEvent.click(screen.getByRole("button", { name: "Delete message" }));
+
+		await waitFor(() => {
+			expect(mocks.apiFetch).toHaveBeenCalledWith("/api/messages/1", {
+				method: "DELETE",
+			});
+		});
+	});
+
+	test("pins a conversation without selecting it", async () => {
+		mocks.apiFetch.mockImplementation((input: string, init?: RequestInit) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: unreadMessage.phone_number,
+						last_message: unreadMessage,
+						unread_count: 0,
+						total_count: 1,
+						pinned: false,
+						favorite_count: 0,
+						delete_blocked: false,
+					},
+				]);
+			}
+			if (
+				input === "/api/conversations/%2B15550000001/pin" &&
+				init?.method === "POST"
+			) {
+				return Promise.resolve(undefined);
+			}
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+		const conversation = await screen.findByRole("button", {
+			name: /\+15550000001/,
+		});
+		fireEvent.contextMenu(conversation);
+		fireEvent.click(await screen.findByRole("menuitem", { name: "Pin" }));
+
+		await waitFor(() => {
+			expect(mocks.apiFetch).toHaveBeenCalledWith(
+				"/api/conversations/%2B15550000001/pin",
+				{ method: "POST" },
+			);
+		});
+		expect(
+			mocks.apiFetch.mock.calls.some(([input]) =>
+				String(input).startsWith("/api/messages?"),
+			),
+		).toBe(false);
+	});
+
+	test("confirms counts before deleting an entire conversation", async () => {
+		mocks.apiFetch.mockImplementation((input: string, init?: RequestInit) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: unreadMessage.phone_number,
+						last_message: unreadMessage,
+						unread_count: 0,
+						total_count: 3,
+						pinned: true,
+						favorite_count: 2,
+						delete_blocked: false,
+					},
+				]);
+			}
+			if (
+				input === "/api/conversations/%2B15550000001" &&
+				init?.method === "DELETE"
+			) {
+				return Promise.resolve(undefined);
+			}
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+		const conversation = await screen.findByRole("button", {
+			name: /\+15550000001/,
+		});
+		fireEvent.contextMenu(conversation);
+		fireEvent.click(
+			await screen.findByRole("menuitem", { name: "Delete conversation" }),
+		);
+
+		const dialog = await screen.findByRole("dialog", {
+			name: "Delete conversation?",
+		});
+		expect(dialog.textContent).toContain("+15550000001");
+		expect(dialog.textContent).toContain("3 messages");
+		expect(dialog.textContent).toContain("2 favorites");
+		fireEvent.click(
+			screen.getByRole("button", { name: "Delete conversation" }),
+		);
+
+		await waitFor(() => {
+			expect(mocks.apiFetch).toHaveBeenCalledWith(
+				"/api/conversations/%2B15550000001",
+				{ method: "DELETE" },
+			);
+		});
+	});
+});
+
+describe("MessageConsole favorite deep links", () => {
+	test("loads the full conversation window and locates the original message", async () => {
+		const scrollIntoView = vi.fn();
+		Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+			configurable: true,
+			value: scrollIntoView,
+		});
+		vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+			callback(0);
+			return 1;
+		});
+		const oldFavorite = {
+			...unreadMessage,
+			id: 3,
+			body: "old saved message",
+			favorite_at: "2026-08-01T00:00:00Z",
+		};
+		mocks.apiFetch.mockImplementation((input: string) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: unreadMessage.phone_number,
+						last_message: unreadMessage,
+						unread_count: 0,
+						total_count: 12,
+						pinned: false,
+						favorite_count: 1,
+						delete_blocked: false,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?")) {
+				return Promise.resolve([unreadMessage, oldFavorite]);
+			}
+			return Promise.resolve({});
+		});
+
+		render(
+			<MessageConsole
+				initialPhone="+15550000001"
+				targetMessageId={oldFavorite.id}
+			/>,
+		);
+
+		await screen.findByText("old saved message");
+		await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+		expect(
+			mocks.apiFetch.mock.calls.some(([input]) => {
+				if (typeof input !== "string" || !input.startsWith("/api/messages?")) {
+					return false;
+				}
+				return (
+					new URL(input, "http://localhost").searchParams.get("limit") === "12"
+				);
+			}),
+		).toBe(true);
 	});
 });
 

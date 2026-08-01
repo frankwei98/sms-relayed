@@ -19,6 +19,8 @@ pub(super) fn row_to_message(row: &Row) -> rusqlite::Result<Message> {
         error: row.get(9)?,
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
+        favorite_at: row.get(12)?,
+        delete_blocked: row.get(13)?,
     })
 }
 

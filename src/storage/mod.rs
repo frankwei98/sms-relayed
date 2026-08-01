@@ -369,6 +369,7 @@ impl MessageStore {
                 error TEXT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
+                favorite_at TEXT NULL,
                 inbound_dedupe_key TEXT NULL,
                 outbound_phase TEXT NULL CHECK (
                     outbound_phase IN (
@@ -397,6 +398,10 @@ impl MessageStore {
             CREATE INDEX IF NOT EXISTS idx_messages_direction ON messages(direction);
             CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
             CREATE INDEX IF NOT EXISTS idx_messages_read_at ON messages(read_at);
+            CREATE TABLE IF NOT EXISTS conversation_pins (
+                phone_number TEXT PRIMARY KEY,
+                pinned_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS conversation_summaries (
                 phone_number TEXT PRIMARY KEY,
                 total_count INTEGER NOT NULL,
@@ -1211,6 +1216,51 @@ mod tests {
     }
 
     #[test]
+    fn favorites_are_not_silently_limited_to_500_messages() {
+        let store = memory_store();
+        for index in 0..501 {
+            let message = store
+                .insert_message(NewMessage::inbound("+15550000001", &index.to_string()))
+                .unwrap();
+            store.set_favorite(message.id, true).unwrap();
+        }
+
+        assert_eq!(store.list_favorites().unwrap().len(), 501);
+    }
+
+    #[test]
+    fn permanently_unknown_outbound_does_not_block_conversation_deletion() {
+        let store = memory_store();
+        let message = store
+            .insert_message(NewMessage {
+                direction: MessageDirection::Outbound,
+                phone_number: "+15550000001".to_string(),
+                body: "unknown outcome".to_string(),
+                timestamp: "2026-08-01T00:00:00Z".to_string(),
+                status: MessageStatus::Sending,
+                source: MessageSource::Web,
+                modem_sms_path: None,
+                read_at: Some("2026-08-01T00:00:00Z".to_string()),
+                error: Some("send outcome unknown".to_string()),
+                inbound_dedupe_key: None,
+            })
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE messages SET outbound_phase = 'unknown' WHERE id = ?1",
+                params![message.id],
+            )
+            .unwrap();
+
+        assert!(!store.list_conversations().unwrap()[0].delete_blocked);
+        store.delete_conversation("+15550000001").unwrap();
+        assert_eq!(store.count_messages().unwrap(), 0);
+    }
+
+    #[test]
     fn meta_read_write_roundtrip() {
         let store = memory_store();
         assert_eq!(store.get_meta("test_key").unwrap(), None);
@@ -1896,6 +1946,18 @@ mod tests {
 
         let store = MessageStore::open(&path).unwrap();
         assert_eq!(store.count_messages().unwrap(), 3);
+        store.set_favorite(1, true).unwrap();
+        assert_eq!(store.list_favorites().unwrap().len(), 1);
+        store.set_conversation_pinned("+1", true).unwrap();
+        assert!(
+            store
+                .list_conversations()
+                .unwrap()
+                .iter()
+                .find(|conversation| conversation.phone_number == "+1")
+                .unwrap()
+                .pinned
+        );
         store
             .insert_deliveries(1, &["bark.primary".to_string()])
             .unwrap();
