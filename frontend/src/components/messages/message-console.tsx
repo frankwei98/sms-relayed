@@ -25,7 +25,7 @@ import {
 	Star,
 	Trash2,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -144,6 +144,26 @@ function mergeMessagesChronologically(current: Message[], incoming: Message[]) {
 	];
 }
 
+function openContextMenuFromKeyboard(event: ReactKeyboardEvent<HTMLElement>) {
+	const opensMenu =
+		event.key === "ContextMenu" ||
+		event.key === "Enter" ||
+		event.key === " " ||
+		(event.key === "F10" && event.shiftKey);
+	if (!opensMenu) return;
+
+	event.preventDefault();
+	const bounds = event.currentTarget.getBoundingClientRect();
+	event.currentTarget.dispatchEvent(
+		new MouseEvent("contextmenu", {
+			bubbles: true,
+			cancelable: true,
+			clientX: bounds.left + bounds.width / 2,
+			clientY: bounds.top + bounds.height / 2,
+		}),
+	);
+}
+
 export function MessageConsole({
 	initialPhone,
 	targetMessageId,
@@ -180,6 +200,11 @@ export function MessageConsole({
 	const [deleteConversationTarget, setDeleteConversationTarget] =
 		useState<ConversationSummary | null>(null);
 	const [deletePending, setDeletePending] = useState(false);
+	const [deepLinkRetryRequested, setDeepLinkRetryRequested] = useState(false);
+	const deepLinkKey =
+		initialPhone && targetMessageId !== undefined
+			? `${initialPhone}:${targetMessageId}`
+			: null;
 	const markingReadPhonesRef = useRef<Set<string>>(new Set());
 	const hasLoadedConversationsRef = useRef(false);
 	const loadedMessageCountRef = useRef(0);
@@ -192,8 +217,23 @@ export function MessageConsole({
 	const messageReloadVersionRef = useRef(0);
 	const messageRefreshEpochRef = useRef(0);
 	const oldestLoadedMessageIdRef = useRef<number | null>(null);
-	const loadedDeepLinkRef = useRef<string | null>(null);
+	const deepLinkLoadRef = useRef<{
+		key: string;
+		status: "waiting" | "loading" | "loaded";
+	} | null>(deepLinkKey ? { key: deepLinkKey, status: "waiting" } : null);
 	const contextMenusEnabled = useDesktopContextMenus();
+
+	useEffect(() => {
+		if (!deepLinkKey) {
+			deepLinkLoadRef.current = null;
+			setDeepLinkRetryRequested(false);
+			return;
+		}
+		if (deepLinkLoadRef.current?.key !== deepLinkKey) {
+			deepLinkLoadRef.current = { key: deepLinkKey, status: "waiting" };
+			setDeepLinkRetryRequested(false);
+		}
+	}, [deepLinkKey]);
 
 	const resetMessageWindow = useCallback(() => {
 		messageWindowGenerationRef.current += 1;
@@ -270,7 +310,7 @@ export function MessageConsole({
 					generation !== messageWindowGenerationRef.current ||
 					reloadVersion !== messageReloadVersionRef.current
 				) {
-					return;
+					return false;
 				}
 				const expandedLimit =
 					baseRequestedLimit +
@@ -291,6 +331,7 @@ export function MessageConsole({
 			oldestLoadedMessageIdRef.current = ordered[0]?.id ?? null;
 			setMessages(ordered);
 			setHasOlderMessages(serverWindowFilled);
+			return true;
 		},
 		[fetchMessageWindow],
 	);
@@ -300,14 +341,22 @@ export function MessageConsole({
 			resetMessageWindow();
 			return;
 		}
-		if (targetMessageId && selectedPhone === initialPhone) return;
+		const deepLinkLoad = deepLinkLoadRef.current;
+		if (
+			deepLinkKey &&
+			selectedPhone === initialPhone &&
+			deepLinkLoad?.key === deepLinkKey &&
+			deepLinkLoad.status === "waiting"
+		) {
+			return;
+		}
 		await loadMessagesForPhone(selectedPhone);
 	}, [
+		deepLinkKey,
 		initialPhone,
 		loadMessagesForPhone,
 		resetMessageWindow,
 		selectedPhone,
-		targetMessageId,
 	]);
 
 	const loadOlderMessages = useCallback(async () => {
@@ -398,14 +447,21 @@ export function MessageConsole({
 	}, [loadMessages]);
 
 	useEffect(() => {
-		if (!initialPhone || !targetMessageId) return;
+		if (!initialPhone || targetMessageId === undefined || !deepLinkKey) return;
+		if (selectedPhone !== initialPhone) return;
 		const conversation = conversations.find(
 			(item) => item.phone_number === initialPhone,
 		);
 		if (!conversation) return;
-		const key = `${initialPhone}:${targetMessageId}`;
-		if (loadedDeepLinkRef.current === key) return;
-		loadedDeepLinkRef.current = key;
+		const deepLinkLoad = deepLinkLoadRef.current;
+		if (
+			deepLinkLoad?.key !== deepLinkKey ||
+			deepLinkLoad.status !== "waiting"
+		) {
+			return;
+		}
+		deepLinkLoad.status = "loading";
+		if (deepLinkRetryRequested) setDeepLinkRetryRequested(false);
 		resetMessageWindow();
 		setSelectedPhone(initialPhone);
 		setPhoneNumber(initialPhone);
@@ -413,12 +469,32 @@ export function MessageConsole({
 		void loadMessagesForPhone(
 			initialPhone,
 			Math.max(MESSAGE_PAGE_SIZE, conversation.total_count),
-		).catch(() => setOperationError("refresh"));
+		)
+			.then((loaded) => {
+				const current = deepLinkLoadRef.current;
+				if (current?.key !== deepLinkKey || current.status !== "loading") {
+					return;
+				}
+				if (loaded) {
+					current.status = "loaded";
+				} else {
+					current.status = "waiting";
+					setDeepLinkRetryRequested(true);
+				}
+			})
+			.catch(() => {
+				const current = deepLinkLoadRef.current;
+				if (current?.key === deepLinkKey) current.status = "waiting";
+				setOperationError("refresh");
+			});
 	}, [
 		conversations,
+		deepLinkKey,
+		deepLinkRetryRequested,
 		initialPhone,
 		loadMessagesForPhone,
 		resetMessageWindow,
+		selectedPhone,
 		targetMessageId,
 	]);
 
@@ -1306,10 +1382,15 @@ function ConversationCard({
 									{conversation.phone_number}
 								</p>
 								{conversation.pinned ? (
-									<Pin
-										className="size-3.5 shrink-0 fill-current"
-										aria-hidden="true"
-									/>
+									<>
+										<Pin
+											className="size-3.5 shrink-0 fill-current"
+											aria-hidden="true"
+										/>
+										<span className="sr-only">
+											{t("messages.states.pinned")}
+										</span>
+									</>
 								) : null}
 							</div>
 							<p
@@ -1881,20 +1962,40 @@ function MessageBubble({
 	const { t, i18n } = useTranslation();
 	const language = i18n.resolvedLanguage ?? i18n.language;
 	const outbound = message.direction === "outbound";
+	const keyboardMenuEnabled = contextMenuEnabled && !selectionMode;
 	return (
 		<ContextMenu disabled={!contextMenuEnabled || selectionMode}>
 			<ContextMenuTrigger
 				render={
-					<div
-						className={cn(
-							"flex items-end gap-2",
-							outbound ? "justify-end" : "justify-start",
-							targeted &&
-								"rounded-[1.65rem] bg-amber-500/10 p-1 ring-2 ring-amber-400/60",
-						)}
-					/>
+					keyboardMenuEnabled ? (
+						<button
+							type="button"
+							aria-haspopup="menu"
+							aria-keyshortcuts="Shift+F10"
+							onKeyDown={openContextMenuFromKeyboard}
+							className={cn(
+								"flex items-end gap-2 rounded-[1.65rem] text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+								outbound ? "justify-end" : "justify-start",
+								targeted && "bg-amber-500/10 p-1 ring-2 ring-amber-400/60",
+							)}
+						/>
+					) : (
+						<div
+							className={cn(
+								"flex items-end gap-2",
+								outbound ? "justify-end" : "justify-start",
+								targeted &&
+									"rounded-[1.65rem] bg-amber-500/10 p-1 ring-2 ring-amber-400/60",
+							)}
+						/>
+					)
 				}
 			>
+				{keyboardMenuEnabled ? (
+					<span className="sr-only">
+						{t("messages.actions.messageActions")}
+					</span>
+				) : null}
 				{selectionMode && !outbound && (
 					<Checkbox checked={selected} onCheckedChange={onToggle} />
 				)}
@@ -1919,7 +2020,12 @@ function MessageBubble({
 						</span>
 						<span>{message.status}</span>
 						{message.favorite_at ? (
-							<Star className="size-3 fill-current" aria-hidden="true" />
+							<>
+								<Star className="size-3 fill-current" aria-hidden="true" />
+								<span className="sr-only">
+									{t("messages.states.favorited")}
+								</span>
+							</>
 						) : null}
 						{message.error && (
 							<span

@@ -340,13 +340,14 @@ export const zhCN = {
 		actions: {
 			favorite: "收藏",
 			unfavorite: "取消收藏",
+			messageActions: "消息操作",
 			copy: "复制",
 			delete: "删除",
 			deleteSendingDisabled: "短信发送完成后才能删除",
 			pin: "置顶",
 			unpin: "取消置顶",
-			deleteConversation: "删除对话",
-			deleteConversationSendingDisabled: "消息发送期间无法删除对话",
+			deleteConversation: "删除会话",
+			deleteConversationSendingDisabled: "消息发送期间无法删除会话",
 			selectMessages: "选择消息",
 			stopSelecting: "停止选择",
 			markRead: "标记已读 ({{count}})",
@@ -355,17 +356,21 @@ export const zhCN = {
 			markConversationRead: "标记会话已读",
 			conversationActions: "会话操作",
 		},
+		states: {
+			pinned: "已置顶",
+			favorited: "已收藏",
+		},
 		deleteMessage: {
 			title: "删除短信？",
 			description: "这条短信将被永久删除，且无法恢复。",
 			confirm: "删除短信",
 		},
 		deleteConversation: {
-			title: "删除对话？",
+			title: "删除会话？",
 			description:
 				"确定删除 {{phone}} 及全部 {{count}} 条消息吗？此操作无法撤销。",
 			favoriteWarning: "其中包含 {{count}} 条收藏消息。",
-			confirm: "删除对话",
+			confirm: "删除会话",
 		},
 		notice: {
 			copied: "已复制短信",

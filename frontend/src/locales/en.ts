@@ -352,6 +352,7 @@ export const en = {
 		actions: {
 			favorite: "Favorite",
 			unfavorite: "Remove from favorites",
+			messageActions: "Message actions",
 			copy: "Copy",
 			delete: "Delete",
 			deleteSendingDisabled: "Messages cannot be deleted while sending",
@@ -367,6 +368,10 @@ export const en = {
 			deleteSelected: "Delete selected",
 			markConversationRead: "Mark conversation read",
 			conversationActions: "Conversation actions",
+		},
+		states: {
+			pinned: "Pinned",
+			favorited: "Favorited",
 		},
 		deleteMessage: {
 			title: "Delete message?",

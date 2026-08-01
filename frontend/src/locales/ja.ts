@@ -358,6 +358,7 @@ export const ja = {
 		actions: {
 			favorite: "お気に入りに追加",
 			unfavorite: "お気に入りから削除",
+			messageActions: "メッセージ操作",
 			copy: "コピー",
 			delete: "削除",
 			deleteSendingDisabled: "送信中のメッセージは削除できません",
@@ -373,6 +374,10 @@ export const ja = {
 			deleteSelected: "選択項目を削除",
 			markConversationRead: "会話を既読にする",
 			conversationActions: "会話操作",
+		},
+		states: {
+			pinned: "ピン留め済み",
+			favorited: "お気に入り登録済み",
 		},
 		deleteMessage: {
 			title: "メッセージを削除しますか？",
