@@ -35,6 +35,28 @@ impl std::fmt::Display for ConversationDeleteBlocked {
 
 impl std::error::Error for ConversationDeleteBlocked {}
 
+#[derive(Debug)]
+pub struct MessageNotFound;
+
+impl std::fmt::Display for MessageNotFound {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("message not found")
+    }
+}
+
+impl std::error::Error for MessageNotFound {}
+
+#[derive(Debug)]
+pub struct ConversationNotFound;
+
+impl std::fmt::Display for ConversationNotFound {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("conversation not found")
+    }
+}
+
+impl std::error::Error for ConversationNotFound {}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum MessageDirection {

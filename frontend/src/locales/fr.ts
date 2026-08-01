@@ -366,6 +366,7 @@ export const fr = {
 		actions: {
 			favorite: "Ajouter aux favoris",
 			unfavorite: "Retirer des favoris",
+			messageActions: "Actions du message",
 			copy: "Copier",
 			delete: "Supprimer",
 			deleteSendingDisabled:
@@ -382,6 +383,10 @@ export const fr = {
 			deleteSelected: "Supprimer la sélection",
 			markConversationRead: "Marquer la conversation comme lue",
 			conversationActions: "Actions de conversation",
+		},
+		states: {
+			pinned: "Épinglée",
+			favorited: "Ajouté aux favoris",
 		},
 		deleteMessage: {
 			title: "Supprimer le message ?",

@@ -354,6 +354,7 @@ export const ko = {
 		actions: {
 			favorite: "즐겨찾기",
 			unfavorite: "즐겨찾기 해제",
+			messageActions: "메시지 작업",
 			copy: "복사",
 			delete: "삭제",
 			deleteSendingDisabled: "전송 중인 메시지는 삭제할 수 없습니다",
@@ -369,6 +370,10 @@ export const ko = {
 			deleteSelected: "선택 항목 삭제",
 			markConversationRead: "대화를 읽음으로 표시",
 			conversationActions: "대화 작업",
+		},
+		states: {
+			pinned: "고정됨",
+			favorited: "즐겨찾기됨",
 		},
 		deleteMessage: {
 			title: "메시지를 삭제할까요?",

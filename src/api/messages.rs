@@ -13,7 +13,8 @@ use tokio_stream::StreamExt;
 use crate::events::AppEvent;
 use crate::export::MessageExportFormat;
 use crate::message::{
-    Message, MessageCursor, MessageDirection, MessageFilter, MessageSource, MessageStatus,
+    ConversationDeleteBlocked, ConversationNotFound, Message, MessageCursor, MessageDirection,
+    MessageFilter, MessageNotFound, MessageSource, MessageStatus,
 };
 use crate::messaging::SendMessage;
 #[cfg(test)]
@@ -72,6 +73,36 @@ fn to_filter(q: &MessageQuery) -> ApiResult<MessageFilter> {
         from: q.from.clone(),
         to: q.to.clone(),
     })
+}
+
+fn map_message_resource_error(error: anyhow::Error) -> ApiError {
+    if error.downcast_ref::<MessageNotFound>().is_some() {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "message_not_found",
+            error.to_string(),
+        )
+    } else {
+        ApiError::internal(error.to_string())
+    }
+}
+
+fn map_conversation_resource_error(error: anyhow::Error) -> ApiError {
+    if error.downcast_ref::<ConversationNotFound>().is_some() {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "conversation_not_found",
+            error.to_string(),
+        )
+    } else if error.downcast_ref::<ConversationDeleteBlocked>().is_some() {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            "conversation_delete_blocked",
+            error.to_string(),
+        )
+    } else {
+        ApiError::internal(error.to_string())
+    }
 }
 
 pub fn routes() -> Router<ApiState> {
@@ -216,7 +247,7 @@ async fn mark_read(State(state): State<ApiState>, Path(id): Path<i64>) -> ApiRes
         .messaging()
         .set_read(id, true)
         .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+        .map_err(map_message_resource_error)?;
     Ok(Json(msg))
 }
 
@@ -228,7 +259,7 @@ async fn mark_unread(
         .messaging()
         .set_read(id, false)
         .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+        .map_err(map_message_resource_error)?;
     Ok(Json(msg))
 }
 
@@ -240,7 +271,7 @@ async fn favorite_message(
         .messaging()
         .set_favorite(id, true)
         .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+        .map_err(map_message_resource_error)?;
     Ok(Json(message))
 }
 
@@ -252,7 +283,7 @@ async fn unfavorite_message(
         .messaging()
         .set_favorite(id, false)
         .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+        .map_err(map_message_resource_error)?;
     Ok(Json(message))
 }
 
@@ -276,7 +307,7 @@ async fn pin_conversation(
         .messaging()
         .set_conversation_pinned(phone_number, true)
         .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+        .map_err(map_conversation_resource_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -288,7 +319,7 @@ async fn unpin_conversation(
         .messaging()
         .set_conversation_pinned(phone_number, false)
         .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+        .map_err(map_conversation_resource_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -300,20 +331,7 @@ async fn delete_conversation(
         .messaging()
         .delete_conversation(phone_number)
         .await
-        .map_err(|error| {
-            if error
-                .downcast_ref::<crate::message::ConversationDeleteBlocked>()
-                .is_some()
-            {
-                ApiError::new(
-                    StatusCode::CONFLICT,
-                    "conversation_delete_blocked",
-                    error.to_string(),
-                )
-            } else {
-                ApiError::internal(error.to_string())
-            }
-        })?;
+        .map_err(map_conversation_resource_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -325,7 +343,7 @@ async fn delete_message(
         .messaging()
         .delete(vec![id])
         .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+        .map_err(map_message_resource_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -338,7 +356,7 @@ async fn delete_many(
         .messaging()
         .delete(ids)
         .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+        .map_err(map_message_resource_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -653,6 +671,54 @@ mod tests {
             AppEvent::ConversationRead
         ));
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn missing_message_and_conversation_resources_return_not_found() {
+        use tower::ServiceExt;
+
+        let store = crate::storage::MessageStore::open_in_memory().unwrap();
+        let state = super::super::ApiState {
+            config: std::sync::Arc::new(crate::config::AppConfig::default()),
+            config_path: std::path::PathBuf::from("/tmp/not-used.toml"),
+            config_save_lock: Arc::new(tokio::sync::Mutex::new(())),
+            store: store.into(),
+            events: crate::events::EventBus::new(),
+            delivery_wakeup: crate::delivery::DeliveryWakeup::new(),
+            started_at: std::time::Instant::now(),
+            sessions: super::super::auth::SessionStore::default(),
+            modem: crate::modem::ModemService::new(),
+            sms_sender: super::super::test_sms_sender(),
+            service_control: super::super::service::ServiceControl::default(),
+        };
+        let app = routes().with_state(state);
+
+        for (method, uri) in [
+            (axum::http::Method::POST, "/api/messages/404/favorite"),
+            (
+                axum::http::Method::POST,
+                "/api/conversations/%2B15550000404/pin",
+            ),
+            (
+                axum::http::Method::DELETE,
+                "/api/conversations/%2B15550000404",
+            ),
+            (axum::http::Method::DELETE, "/api/messages/404"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+        }
     }
 
     #[tokio::test]

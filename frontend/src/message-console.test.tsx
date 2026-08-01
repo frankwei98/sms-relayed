@@ -42,6 +42,40 @@ const unreadMessage = {
 	delete_blocked: false,
 };
 
+const originalScrollIntoViewDescriptor = Object.getOwnPropertyDescriptor(
+	HTMLElement.prototype,
+	"scrollIntoView",
+);
+
+function getMessageContextMenuTrigger(id: number) {
+	const message = document.querySelector(`[data-message-id="${id}"]`);
+	const trigger = message?.querySelector<HTMLElement>(
+		'[data-slot="context-menu-trigger"]',
+	);
+	if (!trigger) throw new Error(`message ${id} context-menu trigger not found`);
+	return trigger;
+}
+
+function messageRequestPhone(input: unknown) {
+	if (typeof input !== "string" || !input.startsWith("/api/messages?")) {
+		return null;
+	}
+	return new URL(input, "http://localhost").searchParams.get("phone_number");
+}
+
+function mockScrollIntoView() {
+	const scrollIntoView = vi.fn();
+	Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+		configurable: true,
+		value: scrollIntoView,
+	});
+	vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+		callback(0);
+		return 1;
+	});
+	return scrollIntoView;
+}
+
 afterEach(async () => {
 	cleanup();
 	vi.useRealTimers();
@@ -56,6 +90,15 @@ afterEach(async () => {
 		configurable: true,
 		value: undefined,
 	});
+	if (originalScrollIntoViewDescriptor) {
+		Object.defineProperty(
+			HTMLElement.prototype,
+			"scrollIntoView",
+			originalScrollIntoViewDescriptor,
+		);
+	} else {
+		Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
+	}
 	mocks.handlers = {};
 	await i18n.changeLanguage("en");
 });
@@ -143,6 +186,78 @@ describe("MessageConsole context menus", () => {
 		expect(screen.queryByRole("menuitem", { name: "Pin" })).toBeNull();
 	});
 
+	test("opens message actions from the keyboard", async () => {
+		mocks.apiFetch.mockImplementation((input: string) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: unreadMessage.phone_number,
+						last_message: unreadMessage,
+						unread_count: 0,
+						total_count: 1,
+						pinned: false,
+						favorite_count: 0,
+						delete_blocked: false,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?")) {
+				return Promise.resolve([unreadMessage]);
+			}
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+		fireEvent.click(
+			await screen.findByRole("button", { name: /\+15550000001/ }),
+		);
+		await screen.findByRole("log");
+		const trigger = getMessageContextMenuTrigger(unreadMessage.id);
+		trigger.focus();
+		expect(document.activeElement).toBe(trigger);
+		fireEvent.keyDown(trigger, { key: "F10", shiftKey: true });
+
+		expect(
+			await screen.findByRole("menuitem", { name: "Favorite" }),
+		).toBeTruthy();
+	});
+
+	test("announces pinned conversations and favorited messages", async () => {
+		const favoriteMessage = {
+			...unreadMessage,
+			favorite_at: "2026-08-01T00:00:00Z",
+		};
+		mocks.apiFetch.mockImplementation((input: string) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: favoriteMessage.phone_number,
+						last_message: favoriteMessage,
+						unread_count: 0,
+						total_count: 1,
+						pinned: true,
+						favorite_count: 1,
+						delete_blocked: false,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?")) {
+				return Promise.resolve([favoriteMessage]);
+			}
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+		expect(await screen.findByText("Pinned")).toBeTruthy();
+		fireEvent.click(screen.getByRole("button", { name: /\+15550000001/ }));
+		expect(await screen.findByText("Favorited")).toBeTruthy();
+		expect(
+			screen.getByRole("button", {
+				name: /Message actions.*test body.*Favorited/,
+			}),
+		).toBeTruthy();
+	});
+
 	test("disables conversation deletion while a message is sending", async () => {
 		const sendingMessage = {
 			...unreadMessage,
@@ -218,11 +333,7 @@ describe("MessageConsole context menus", () => {
 		await waitFor(() =>
 			expect(screen.getAllByText("still sending")).toHaveLength(2),
 		);
-		const body = screen.getAllByText("still sending").at(-1);
-		expect(body).toBeTruthy();
-		const bubble = body?.parentElement?.parentElement;
-		expect(bubble).toBeTruthy();
-		fireEvent.contextMenu(bubble as Element);
+		fireEvent.contextMenu(getMessageContextMenuTrigger(sendingMessage.id));
 		const deleteMessage = await screen.findByRole("menuitem", {
 			name: "Delete",
 		});
@@ -266,9 +377,7 @@ describe("MessageConsole context menus", () => {
 		await waitFor(() =>
 			expect(screen.getAllByText("outcome unknown")).toHaveLength(2),
 		);
-		const body = screen.getAllByText("outcome unknown").at(-1);
-		const bubble = body?.parentElement?.parentElement;
-		fireEvent.contextMenu(bubble as Element);
+		fireEvent.contextMenu(getMessageContextMenuTrigger(unknownMessage.id));
 		const deleteMessage = await screen.findByRole("menuitem", {
 			name: "Delete",
 		});
@@ -307,11 +416,7 @@ describe("MessageConsole context menus", () => {
 			await screen.findByRole("button", { name: /\+15550000001/ }),
 		);
 		await screen.findByRole("log");
-		const body = screen.getAllByText("test body").at(-1);
-		expect(body).toBeTruthy();
-		const bubble = body.parentElement?.parentElement;
-		expect(bubble).toBeTruthy();
-		fireEvent.contextMenu(bubble as Element);
+		fireEvent.contextMenu(getMessageContextMenuTrigger(unreadMessage.id));
 		fireEvent.click(await screen.findByRole("menuitem", { name: "Favorite" }));
 
 		await waitFor(() => {
@@ -352,9 +457,7 @@ describe("MessageConsole context menus", () => {
 			await screen.findByRole("button", { name: /\+15550000001/ }),
 		);
 		await screen.findByRole("log");
-		const body = screen.getAllByText("test body").at(-1);
-		expect(body).toBeTruthy();
-		fireEvent.contextMenu(body?.parentElement?.parentElement as Element);
+		fireEvent.contextMenu(getMessageContextMenuTrigger(unreadMessage.id));
 		fireEvent.click(await screen.findByRole("menuitem", { name: "Copy" }));
 
 		await waitFor(() => expect(writeText).toHaveBeenCalledWith("test body"));
@@ -403,9 +506,7 @@ describe("MessageConsole context menus", () => {
 			await screen.findByRole("button", { name: /\+15550000001/ }),
 		);
 		await screen.findByRole("log");
-		const body = screen.getAllByText("test body").at(-1);
-		expect(body).toBeTruthy();
-		fireEvent.contextMenu(body?.parentElement?.parentElement as Element);
+		fireEvent.contextMenu(getMessageContextMenuTrigger(unreadMessage.id));
 		fireEvent.click(await screen.findByRole("menuitem", { name: "Copy" }));
 
 		await waitFor(() => expect(execCommand).toHaveBeenCalledWith("copy"));
@@ -444,8 +545,7 @@ describe("MessageConsole context menus", () => {
 			await screen.findByRole("button", { name: /\+15550000001/ }),
 		);
 		await screen.findByRole("log");
-		const body = screen.getAllByText("test body").at(-1);
-		fireEvent.contextMenu(body?.parentElement?.parentElement as Element);
+		fireEvent.contextMenu(getMessageContextMenuTrigger(unreadMessage.id));
 		fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
 
 		const dialog = await screen.findByRole("dialog", {
@@ -559,15 +659,7 @@ describe("MessageConsole context menus", () => {
 
 describe("MessageConsole favorite deep links", () => {
 	test("loads the full conversation window and locates the original message", async () => {
-		const scrollIntoView = vi.fn();
-		Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
-			configurable: true,
-			value: scrollIntoView,
-		});
-		vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
-			callback(0);
-			return 1;
-		});
+		const scrollIntoView = mockScrollIntoView();
 		const oldFavorite = {
 			...unreadMessage,
 			id: 3,
@@ -610,6 +702,244 @@ describe("MessageConsole favorite deep links", () => {
 				}
 				return (
 					new URL(input, "http://localhost").searchParams.get("limit") === "12"
+				);
+			}),
+		).toBe(true);
+	});
+
+	test("reloads the target conversation after switching away and back", async () => {
+		mockScrollIntoView();
+		const currentMessage = {
+			...unreadMessage,
+			read_at: "2026-07-11T00:00:00Z",
+		};
+		const targetMessage = {
+			...currentMessage,
+			id: 3,
+			body: "old saved message",
+			favorite_at: "2026-08-01T00:00:00Z",
+		};
+		const otherMessage = {
+			...currentMessage,
+			id: 4,
+			phone_number: "+15550000002",
+			body: "other conversation",
+		};
+		mocks.apiFetch.mockImplementation((input: string) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: unreadMessage.phone_number,
+						last_message: currentMessage,
+						unread_count: 0,
+						total_count: 12,
+						pinned: false,
+						favorite_count: 1,
+						delete_blocked: false,
+					},
+					{
+						phone_number: otherMessage.phone_number,
+						last_message: otherMessage,
+						unread_count: 0,
+						total_count: 1,
+						pinned: false,
+						favorite_count: 0,
+						delete_blocked: false,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?")) {
+				const phone = messageRequestPhone(input);
+				return Promise.resolve(
+					phone === otherMessage.phone_number
+						? [otherMessage]
+						: [currentMessage, targetMessage],
+				);
+			}
+			return Promise.resolve({});
+		});
+
+		render(
+			<MessageConsole
+				initialPhone={unreadMessage.phone_number}
+				targetMessageId={targetMessage.id}
+			/>,
+		);
+
+		await waitFor(() =>
+			expect(
+				document.querySelector(`[data-message-id="${targetMessage.id}"]`),
+			).not.toBeNull(),
+		);
+		fireEvent.click(screen.getByRole("button", { name: /\+15550000002/ }));
+		await waitFor(() =>
+			expect(
+				mocks.apiFetch.mock.calls.some(
+					([input]) => messageRequestPhone(input) === otherMessage.phone_number,
+				),
+			).toBe(true),
+		);
+		await waitFor(() =>
+			expect(
+				document.querySelector(`[data-message-id="${otherMessage.id}"]`),
+			).not.toBeNull(),
+		);
+		const targetRequestsBeforeReturn = mocks.apiFetch.mock.calls.filter(
+			([input]) => messageRequestPhone(input) === unreadMessage.phone_number,
+		).length;
+
+		fireEvent.click(screen.getByRole("button", { name: /\+15550000001/ }));
+		await waitFor(() =>
+			expect(
+				mocks.apiFetch.mock.calls.filter(
+					([input]) =>
+						messageRequestPhone(input) === unreadMessage.phone_number,
+				).length,
+			).toBeGreaterThan(targetRequestsBeforeReturn),
+		);
+	});
+
+	test("retries a target load that was canceled by switching conversations", async () => {
+		mockScrollIntoView();
+		const currentMessage = {
+			...unreadMessage,
+			read_at: "2026-07-11T00:00:00Z",
+		};
+		const targetMessage = {
+			...currentMessage,
+			id: 3,
+			body: "old saved message",
+			favorite_at: "2026-08-01T00:00:00Z",
+		};
+		const otherMessage = {
+			...currentMessage,
+			id: 4,
+			phone_number: "+15550000002",
+			body: "other conversation",
+		};
+		let releaseInitialRequest = () => {};
+		const initialRequest = new Promise((resolve) => {
+			releaseInitialRequest = () => resolve([currentMessage, targetMessage]);
+		});
+		const targetRequestLimits: string[] = [];
+		mocks.apiFetch.mockImplementation((input: string) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: currentMessage.phone_number,
+						last_message: currentMessage,
+						unread_count: 0,
+						total_count: 80,
+						pinned: false,
+						favorite_count: 1,
+						delete_blocked: false,
+					},
+					{
+						phone_number: otherMessage.phone_number,
+						last_message: otherMessage,
+						unread_count: 0,
+						total_count: 1,
+						pinned: false,
+						favorite_count: 0,
+						delete_blocked: false,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?")) {
+				const params = new URL(input, "http://localhost").searchParams;
+				if (params.get("phone_number") === otherMessage.phone_number) {
+					return Promise.resolve([otherMessage]);
+				}
+				const limit = params.get("limit") ?? "";
+				targetRequestLimits.push(limit);
+				if (targetRequestLimits.length === 1) return initialRequest;
+				return Promise.resolve(
+					limit === "80" ? [currentMessage, targetMessage] : [currentMessage],
+				);
+			}
+			return Promise.resolve({});
+		});
+
+		render(
+			<MessageConsole
+				initialPhone={currentMessage.phone_number}
+				targetMessageId={targetMessage.id}
+			/>,
+		);
+		await waitFor(() => expect(targetRequestLimits).toEqual(["80"]));
+
+		fireEvent.click(screen.getByRole("button", { name: /\+15550000002/ }));
+		await waitFor(() =>
+			expect(
+				document.querySelector(`[data-message-id="${otherMessage.id}"]`),
+			).not.toBeNull(),
+		);
+		fireEvent.click(screen.getByRole("button", { name: /\+15550000001/ }));
+		await waitFor(() => expect(targetRequestLimits).toEqual(["80", "10"]));
+		await act(async () => releaseInitialRequest());
+
+		await waitFor(() =>
+			expect(
+				document.querySelector(`[data-message-id="${targetMessage.id}"]`),
+			).not.toBeNull(),
+		);
+		expect(targetRequestLimits).toEqual(["80", "10", "80"]);
+	});
+
+	test("retries a failed target load after filters change", async () => {
+		mockScrollIntoView();
+		const targetMessage = {
+			...unreadMessage,
+			id: 3,
+			body: "old saved message",
+			favorite_at: "2026-08-01T00:00:00Z",
+		};
+		let messageRequests = 0;
+		mocks.apiFetch.mockImplementation((input: string) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: unreadMessage.phone_number,
+						last_message: unreadMessage,
+						unread_count: 0,
+						total_count: 12,
+						pinned: false,
+						favorite_count: 1,
+						delete_blocked: false,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?")) {
+				messageRequests += 1;
+				if (messageRequests === 1) {
+					return Promise.reject(new Error("temporary failure"));
+				}
+				return Promise.resolve([unreadMessage, targetMessage]);
+			}
+			return Promise.resolve({});
+		});
+
+		render(
+			<MessageConsole
+				initialPhone={unreadMessage.phone_number}
+				targetMessageId={targetMessage.id}
+			/>,
+		);
+
+		await screen.findByRole("alert");
+		fireEvent.change(screen.getByPlaceholderText("Search messages"), {
+			target: { value: "saved" },
+		});
+
+		await screen.findByText("old saved message");
+		expect(messageRequests).toBeGreaterThanOrEqual(2);
+		expect(
+			mocks.apiFetch.mock.calls.some(([input]) => {
+				if (typeof input !== "string" || !input.startsWith("/api/messages?")) {
+					return false;
+				}
+				return (
+					new URL(input, "http://localhost").searchParams.get("q") === "saved"
 				);
 			}),
 		).toBe(true);

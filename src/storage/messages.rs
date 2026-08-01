@@ -7,8 +7,8 @@ use rusqlite::{
 use time::OffsetDateTime;
 
 use crate::message::{
-    ConversationDeleteBlocked, ConversationSummary, Message, MessageCursor, MessageFilter,
-    MessageStatus,
+    ConversationDeleteBlocked, ConversationNotFound, ConversationSummary, Message, MessageCursor,
+    MessageFilter, MessageNotFound, MessageStatus,
 };
 use crate::message::{IdempotencyConflict, IdempotencyReplayUnavailable};
 
@@ -531,14 +531,14 @@ impl MessageStore {
 
     pub fn set_conversation_pinned(&self, phone_number: &str, pinned: bool) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
-        let transaction = conn.transaction()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let exists = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM conversation_summaries WHERE phone_number = ?1)",
             params![phone_number],
             |row| row.get::<_, bool>(0),
         )?;
         if !exists {
-            anyhow::bail!("conversation not found");
+            return Err(ConversationNotFound.into());
         }
         if pinned {
             transaction.execute(
@@ -559,7 +559,7 @@ impl MessageStore {
 
     pub fn delete_messages(&self, ids: &[i64]) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
-        let transaction = conn.transaction()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for id in ids {
             let query = format!("SELECT ({DELETE_BLOCKED_SQL}) FROM messages WHERE id = ?1");
             let delete_blocked = transaction
@@ -567,6 +567,9 @@ impl MessageStore {
                 .optional()?;
             if delete_blocked == Some(true) {
                 anyhow::bail!("message {id} cannot be deleted while sending");
+            }
+            if delete_blocked.is_none() {
+                return Err(MessageNotFound.into());
             }
         }
         for id in ids {
@@ -578,7 +581,7 @@ impl MessageStore {
 
     pub fn delete_conversation(&self, phone_number: &str) -> Result<Vec<i64>> {
         let mut conn = self.conn.lock().unwrap();
-        let transaction = conn.transaction()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ids = {
             let mut statement = transaction
                 .prepare("SELECT id FROM messages WHERE phone_number = ?1 ORDER BY id")?;
@@ -586,7 +589,7 @@ impl MessageStore {
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
         if ids.is_empty() {
-            anyhow::bail!("conversation not found");
+            return Err(ConversationNotFound.into());
         }
         let delete_blocked_query = format!(
             "SELECT EXISTS(
@@ -714,7 +717,7 @@ impl MessageStore {
 }
 
 fn map_get(conn: &Connection, id: i64) -> Result<Message> {
-    map_find(conn, id)?.ok_or_else(|| anyhow::anyhow!("message {} not found", id))
+    map_find(conn, id)?.ok_or_else(|| MessageNotFound.into())
 }
 
 fn map_find(conn: &Connection, id: i64) -> Result<Option<Message>> {
