@@ -4,6 +4,23 @@ use rusqlite::{params, Connection, OptionalExtension};
 use super::{metadata::backfill_dedupe_keys_on, CONVERSATION_SUMMARIES_BACKFILL_META_KEY};
 
 pub(super) fn migrate_existing_schema(conn: &Connection) -> Result<()> {
+    let has_favorite_at: bool = conn
+        .prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('messages')
+             WHERE name = 'favorite_at'",
+        )?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|count| count > 0)?;
+    if !has_favorite_at {
+        conn.execute("ALTER TABLE messages ADD COLUMN favorite_at TEXT NULL", [])?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_favorite_at
+         ON messages(julianday(favorite_at) DESC, id DESC)
+         WHERE favorite_at IS NOT NULL",
+        [],
+    )?;
+
     let has_dedupe: bool = conn
         .prepare(
             "SELECT COUNT(*) FROM pragma_table_info('messages')

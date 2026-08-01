@@ -7,6 +7,7 @@ type TranslationShape<T> = {
 export const ja = {
 	nav: {
 		sms: "SMS",
+		favorites: "お気に入り",
 		modem: "モデム",
 		forwarding: "転送",
 		config: "設定",
@@ -267,6 +268,16 @@ export const ja = {
 			request: "リクエスト {{time}}",
 		},
 	},
+	favorites: {
+		title: "お気に入り",
+		subtitle: "保存済みメッセージ {{count}} 件",
+		loading: "お気に入りを読み込み中",
+		emptyTitle: "お気に入りはまだありません",
+		emptyDescription:
+			"メッセージをお気に入りにすると、ここですぐ見つけられます。",
+		originalTime: "元のメッセージ",
+		error: { load: "お気に入りを読み込めませんでした。" },
+	},
 	messages: {
 		title: "メッセージ",
 		sim: "SIM {{number}}",
@@ -316,6 +327,7 @@ export const ja = {
 			markRead: "メッセージを既読にできませんでした。もう一度お試しください。",
 			update: "メッセージを更新できませんでした。もう一度お試しください。",
 			delete: "メッセージを削除できませんでした。もう一度お試しください。",
+			copy: "メッセージをコピーできませんでした。もう一度お試しください。",
 			export:
 				"メッセージをエクスポートできませんでした。もう一度お試しください。",
 			loadOlder:
@@ -344,6 +356,16 @@ export const ja = {
 			failed: "失敗",
 		},
 		actions: {
+			favorite: "お気に入りに追加",
+			unfavorite: "お気に入りから削除",
+			copy: "コピー",
+			delete: "削除",
+			deleteSendingDisabled: "送信中のメッセージは削除できません",
+			pin: "ピン留め",
+			unpin: "ピン留めを解除",
+			deleteConversation: "会話を削除",
+			deleteConversationSendingDisabled:
+				"メッセージ送信中は会話を削除できません",
 			selectMessages: "メッセージを選択",
 			stopSelecting: "選択を停止",
 			markRead: "既読にする ({{count}})",
@@ -351,6 +373,21 @@ export const ja = {
 			deleteSelected: "選択項目を削除",
 			markConversationRead: "会話を既読にする",
 			conversationActions: "会話操作",
+		},
+		deleteMessage: {
+			title: "メッセージを削除しますか？",
+			description: "このメッセージは完全に削除され、元に戻せません。",
+			confirm: "メッセージを削除",
+		},
+		deleteConversation: {
+			title: "会話を削除しますか？",
+			description:
+				"{{phone}} と全 {{count}} 件のメッセージを削除します。この操作は取り消せません。",
+			favoriteWarning: "{{count}} 件のお気に入りも含まれます。",
+			confirm: "会話を削除",
+		},
+		notice: {
+			copied: "メッセージをコピーしました",
 		},
 		relativeDay: {
 			today: "今日",

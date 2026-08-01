@@ -226,6 +226,8 @@ mod tests {
             error: Some("system bus unavailable".to_string()),
             created_at: "2026-07-24T00:00:00Z".to_string(),
             updated_at: "2026-07-24T00:00:00Z".to_string(),
+            favorite_at: None,
+            delete_blocked: false,
         }));
 
         assert!(result.is_err());

@@ -77,13 +77,28 @@ fn to_filter(q: &MessageQuery) -> ApiResult<MessageFilter> {
 pub fn routes() -> Router<ApiState> {
     Router::new()
         .route("/api/messages", get(list_messages))
+        .route("/api/messages/favorites", get(list_favorites))
         .route("/api/conversations", get(list_conversations))
         .route("/api/messages/send", post(send_message))
         .route("/api/messages/{id}/read", post(mark_read))
         .route("/api/messages/{id}/unread", post(mark_unread))
+        .route("/api/messages/{id}/favorite", post(favorite_message))
+        .route("/api/messages/{id}/unfavorite", post(unfavorite_message))
         .route(
             "/api/conversations/{phone_number}/read",
             post(mark_conversation_read),
+        )
+        .route(
+            "/api/conversations/{phone_number}/pin",
+            post(pin_conversation),
+        )
+        .route(
+            "/api/conversations/{phone_number}/unpin",
+            post(unpin_conversation),
+        )
+        .route(
+            "/api/conversations/{phone_number}",
+            delete(delete_conversation),
         )
         .route("/api/messages/{id}", delete(delete_message))
         .route("/api/messages/delete", post(delete_many))
@@ -115,6 +130,15 @@ async fn list_conversations(
     let rows = state
         .messaging()
         .conversations()
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(rows))
+}
+
+async fn list_favorites(State(state): State<ApiState>) -> ApiResult<Json<Vec<Message>>> {
+    let rows = state
+        .messaging()
+        .favorites()
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(rows))
@@ -208,6 +232,30 @@ async fn mark_unread(
     Ok(Json(msg))
 }
 
+async fn favorite_message(
+    State(state): State<ApiState>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Message>> {
+    let message = state
+        .messaging()
+        .set_favorite(id, true)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(message))
+}
+
+async fn unfavorite_message(
+    State(state): State<ApiState>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Message>> {
+    let message = state
+        .messaging()
+        .set_favorite(id, false)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(message))
+}
+
 async fn mark_conversation_read(
     State(state): State<ApiState>,
     Path(phone_number): Path<String>,
@@ -218,6 +266,55 @@ async fn mark_conversation_read(
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(serde_json::json!({ "changed": changed })))
+}
+
+async fn pin_conversation(
+    State(state): State<ApiState>,
+    Path(phone_number): Path<String>,
+) -> ApiResult<StatusCode> {
+    state
+        .messaging()
+        .set_conversation_pinned(phone_number, true)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn unpin_conversation(
+    State(state): State<ApiState>,
+    Path(phone_number): Path<String>,
+) -> ApiResult<StatusCode> {
+    state
+        .messaging()
+        .set_conversation_pinned(phone_number, false)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_conversation(
+    State(state): State<ApiState>,
+    Path(phone_number): Path<String>,
+) -> ApiResult<StatusCode> {
+    state
+        .messaging()
+        .delete_conversation(phone_number)
+        .await
+        .map_err(|error| {
+            if error
+                .downcast_ref::<crate::message::ConversationDeleteBlocked>()
+                .is_some()
+            {
+                ApiError::new(
+                    StatusCode::CONFLICT,
+                    "conversation_delete_blocked",
+                    error.to_string(),
+                )
+            } else {
+                ApiError::internal(error.to_string())
+            }
+        })?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn delete_message(
@@ -556,5 +653,216 @@ mod tests {
             AppEvent::ConversationRead
         ));
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn favorites_and_pins_are_persistent_api_resources() {
+        use tower::ServiceExt;
+
+        let store = crate::storage::MessageStore::open_in_memory().unwrap();
+        let first = store
+            .insert_message(NewMessage::inbound("+1", "favorite me"))
+            .unwrap();
+        store
+            .insert_message(NewMessage::inbound("+2", "newest conversation"))
+            .unwrap();
+        let state = super::super::ApiState {
+            config: std::sync::Arc::new(crate::config::AppConfig::default()),
+            config_path: std::path::PathBuf::from("/tmp/not-used.toml"),
+            config_save_lock: Arc::new(tokio::sync::Mutex::new(())),
+            store: store.into(),
+            events: crate::events::EventBus::new(),
+            delivery_wakeup: crate::delivery::DeliveryWakeup::new(),
+            started_at: std::time::Instant::now(),
+            sessions: super::super::auth::SessionStore::default(),
+            modem: crate::modem::ModemService::new(),
+            sms_sender: super::super::test_sms_sender(),
+            service_control: super::super::service::ServiceControl::default(),
+        };
+        let app = routes().with_state(state);
+
+        let favorite_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/messages/{}/favorite", first.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(favorite_response.status(), StatusCode::OK);
+
+        let pin_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/conversations/%2B1/pin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pin_response.status(), StatusCode::NO_CONTENT);
+
+        let favorites_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/messages/favorites")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(favorites_response.status(), StatusCode::OK);
+        let favorites_body = axum::body::to_bytes(favorites_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let favorites: serde_json::Value = serde_json::from_slice(&favorites_body).unwrap();
+        assert_eq!(favorites[0]["id"], first.id);
+        assert!(favorites[0]["favorite_at"].is_string());
+
+        let conversations_response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/conversations")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let conversations_body =
+            axum::body::to_bytes(conversations_response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+        let conversations: serde_json::Value = serde_json::from_slice(&conversations_body).unwrap();
+        assert_eq!(conversations[0]["phone_number"], "+1");
+        assert_eq!(conversations[0]["pinned"], true);
+        assert_eq!(conversations[0]["favorite_count"], 1);
+        assert_eq!(conversations[0]["delete_blocked"], false);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_conversation_removes_its_messages_favorites_and_pin() {
+        use tower::ServiceExt;
+
+        let store = crate::storage::MessageStore::open_in_memory().unwrap();
+        let message = store
+            .insert_message(NewMessage::inbound("+1", "delete together"))
+            .unwrap();
+        let state = super::super::ApiState {
+            config: std::sync::Arc::new(crate::config::AppConfig::default()),
+            config_path: std::path::PathBuf::from("/tmp/not-used.toml"),
+            config_save_lock: Arc::new(tokio::sync::Mutex::new(())),
+            store: store.into(),
+            events: crate::events::EventBus::new(),
+            delivery_wakeup: crate::delivery::DeliveryWakeup::new(),
+            started_at: std::time::Instant::now(),
+            sessions: super::super::auth::SessionStore::default(),
+            modem: crate::modem::ModemService::new(),
+            sms_sender: super::super::test_sms_sender(),
+            service_control: super::super::service::ServiceControl::default(),
+        };
+        let app = routes().with_state(state);
+
+        for uri in [
+            format!("/api/messages/{}/favorite", message.id),
+            "/api/conversations/%2B1/pin".to_string(),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(response.status().is_success());
+        }
+
+        let delete_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri("/api/conversations/%2B1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+        for uri in ["/api/conversations", "/api/messages/favorites"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let rows: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(rows.as_array().unwrap().len(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn deleting_a_conversation_with_a_sending_message_returns_conflict() {
+        use tower::ServiceExt;
+
+        let store = crate::storage::MessageStore::open_in_memory().unwrap();
+        store
+            .insert_message(NewMessage {
+                direction: MessageDirection::Outbound,
+                phone_number: "+1".to_string(),
+                body: "still sending".to_string(),
+                timestamp: "2026-08-01T00:00:00Z".to_string(),
+                status: MessageStatus::Sending,
+                source: MessageSource::Web,
+                modem_sms_path: None,
+                read_at: Some("2026-08-01T00:00:00Z".to_string()),
+                error: None,
+                inbound_dedupe_key: None,
+            })
+            .unwrap();
+        let state = super::super::ApiState {
+            config: std::sync::Arc::new(crate::config::AppConfig::default()),
+            config_path: std::path::PathBuf::from("/tmp/not-used.toml"),
+            config_save_lock: Arc::new(tokio::sync::Mutex::new(())),
+            store: store.into(),
+            events: crate::events::EventBus::new(),
+            delivery_wakeup: crate::delivery::DeliveryWakeup::new(),
+            started_at: std::time::Instant::now(),
+            sessions: super::super::auth::SessionStore::default(),
+            modem: crate::modem::ModemService::new(),
+            sms_sender: super::super::test_sms_sender(),
+            service_control: super::super::service::ServiceControl::default(),
+        };
+
+        let response = routes()
+            .with_state(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri("/api/conversations/%2B1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 }

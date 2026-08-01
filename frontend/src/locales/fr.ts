@@ -7,6 +7,7 @@ type TranslationShape<T> = {
 export const fr = {
 	nav: {
 		sms: "SMS",
+		favorites: "Favoris",
 		modem: "Modem",
 		forwarding: "Transfert",
 		config: "Configuration",
@@ -276,6 +277,16 @@ export const fr = {
 			request: "Requête {{time}}",
 		},
 	},
+	favorites: {
+		title: "Favoris",
+		subtitle: "{{count}} messages enregistrés",
+		loading: "Chargement des favoris",
+		emptyTitle: "Aucun favori",
+		emptyDescription:
+			"Ajoutez un message aux favoris pour le retrouver facilement ici.",
+		originalTime: "Message d’origine",
+		error: { load: "Impossible de charger les favoris." },
+	},
 	messages: {
 		title: "Messages",
 		sim: "SIM {{number}}",
@@ -325,6 +336,7 @@ export const fr = {
 			markRead: "Impossible de marquer les messages comme lus. Réessayez.",
 			update: "Impossible de mettre à jour les messages. Réessayez.",
 			delete: "Impossible de supprimer les messages. Réessayez.",
+			copy: "Impossible de copier le message. Réessayez.",
 			export: "Impossible d’exporter les messages. Réessayez.",
 			loadOlder: "Impossible de charger les messages précédents. Réessayez.",
 			refresh: "Impossible d’actualiser les messages. Réessayez.",
@@ -352,6 +364,17 @@ export const fr = {
 			failed: "Échoué",
 		},
 		actions: {
+			favorite: "Ajouter aux favoris",
+			unfavorite: "Retirer des favoris",
+			copy: "Copier",
+			delete: "Supprimer",
+			deleteSendingDisabled:
+				"Un message en cours d’envoi ne peut pas être supprimé",
+			pin: "Épingler",
+			unpin: "Désépingler",
+			deleteConversation: "Supprimer la conversation",
+			deleteConversationSendingDisabled:
+				"Impossible de supprimer la conversation pendant l’envoi d’un message",
 			selectMessages: "Sélectionner des messages",
 			stopSelecting: "Arrêter la sélection",
 			markRead: "Marquer comme lu ({{count}})",
@@ -359,6 +382,22 @@ export const fr = {
 			deleteSelected: "Supprimer la sélection",
 			markConversationRead: "Marquer la conversation comme lue",
 			conversationActions: "Actions de conversation",
+		},
+		deleteMessage: {
+			title: "Supprimer le message ?",
+			description:
+				"Ce message sera définitivement supprimé et ne pourra pas être récupéré.",
+			confirm: "Supprimer le message",
+		},
+		deleteConversation: {
+			title: "Supprimer la conversation ?",
+			description:
+				"Supprimer {{phone}} et ses {{count}} messages ? Cette action est irréversible.",
+			favoriteWarning: "Cela inclut {{count}} favoris.",
+			confirm: "Supprimer la conversation",
+		},
+		notice: {
+			copied: "Message copié",
 		},
 		relativeDay: {
 			today: "Aujourd'hui",

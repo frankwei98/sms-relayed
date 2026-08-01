@@ -6,7 +6,10 @@ use rusqlite::{
 };
 use time::OffsetDateTime;
 
-use crate::message::{ConversationSummary, Message, MessageCursor, MessageFilter, MessageStatus};
+use crate::message::{
+    ConversationDeleteBlocked, ConversationSummary, Message, MessageCursor, MessageFilter,
+    MessageStatus,
+};
 use crate::message::{IdempotencyConflict, IdempotencyReplayUnavailable};
 
 use super::codecs::{
@@ -18,8 +21,14 @@ use super::{
     NewMessage,
 };
 
-const MESSAGE_COLUMNS: &str =
-    "id, direction, phone_number, body, timestamp, status, source, modem_sms_path, read_at, error, created_at, updated_at";
+const DELETE_BLOCKED_SQL: &str =
+    "messages.status = 'sending' AND messages.outbound_phase IS NOT 'unknown'";
+
+fn message_columns() -> String {
+    format!(
+        "id, direction, phone_number, body, timestamp, status, source, modem_sms_path, read_at, error, created_at, updated_at, favorite_at, ({DELETE_BLOCKED_SQL}) AS delete_blocked"
+    )
+}
 
 fn operation_timestamps(after: Duration) -> Result<(String, String)> {
     let now = OffsetDateTime::now_utc();
@@ -492,22 +501,71 @@ impl MessageStore {
         Ok(conn.changes() as i64)
     }
 
+    pub fn set_favorite(&self, id: i64, favorite: bool) -> Result<Message> {
+        let now = now_string();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE messages
+             SET favorite_at = CASE WHEN ?1 THEN ?2 ELSE NULL END,
+                 updated_at = ?2
+             WHERE id = ?3",
+            params![favorite, now, id],
+        )?;
+        map_get(&conn, id)
+    }
+
+    pub fn list_favorites(&self) -> Result<Vec<Message>> {
+        let conn = self.conn.lock().unwrap();
+        let message_columns = message_columns();
+        let query = format!(
+            "SELECT {message_columns}
+             FROM messages
+             WHERE favorite_at IS NOT NULL
+             ORDER BY julianday(favorite_at) DESC, id DESC"
+        );
+        let mut statement = conn.prepare(&query)?;
+        let rows = statement.query_map([], row_to_message)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn set_conversation_pinned(&self, phone_number: &str, pinned: bool) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let transaction = conn.transaction()?;
+        let exists = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM conversation_summaries WHERE phone_number = ?1)",
+            params![phone_number],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !exists {
+            anyhow::bail!("conversation not found");
+        }
+        if pinned {
+            transaction.execute(
+                "INSERT INTO conversation_pins (phone_number, pinned_at)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(phone_number) DO NOTHING",
+                params![phone_number, now_string()],
+            )?;
+        } else {
+            transaction.execute(
+                "DELETE FROM conversation_pins WHERE phone_number = ?1",
+                params![phone_number],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn delete_messages(&self, ids: &[i64]) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let transaction = conn.transaction()?;
         for id in ids {
-            let sending_phase = transaction
-                .query_row(
-                    "SELECT status, outbound_phase FROM messages WHERE id = ?1",
-                    params![id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-                )
+            let query = format!("SELECT ({DELETE_BLOCKED_SQL}) FROM messages WHERE id = ?1");
+            let delete_blocked = transaction
+                .query_row(&query, params![id], |row| row.get::<_, bool>(0))
                 .optional()?;
-            if matches!(
-                sending_phase,
-                Some((ref status, ref phase))
-                    if status == "sending" && phase.as_deref() != Some("unknown")
-            ) {
+            if delete_blocked == Some(true) {
                 anyhow::bail!("message {id} cannot be deleted while sending");
             }
         }
@@ -518,18 +576,68 @@ impl MessageStore {
         Ok(())
     }
 
+    pub fn delete_conversation(&self, phone_number: &str) -> Result<Vec<i64>> {
+        let mut conn = self.conn.lock().unwrap();
+        let transaction = conn.transaction()?;
+        let ids = {
+            let mut statement = transaction
+                .prepare("SELECT id FROM messages WHERE phone_number = ?1 ORDER BY id")?;
+            let rows = statement.query_map(params![phone_number], |row| row.get::<_, i64>(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        if ids.is_empty() {
+            anyhow::bail!("conversation not found");
+        }
+        let delete_blocked_query = format!(
+            "SELECT EXISTS(
+                SELECT 1 FROM messages
+                WHERE phone_number = ?1
+                  AND {DELETE_BLOCKED_SQL}
+             )"
+        );
+        let delete_blocked =
+            transaction.query_row(&delete_blocked_query, params![phone_number], |row| {
+                row.get::<_, bool>(0)
+            })?;
+        if delete_blocked {
+            return Err(ConversationDeleteBlocked.into());
+        }
+        transaction.execute(
+            "DELETE FROM conversation_pins WHERE phone_number = ?1",
+            params![phone_number],
+        )?;
+        transaction.execute(
+            "DELETE FROM messages WHERE phone_number = ?1",
+            params![phone_number],
+        )?;
+        transaction.commit()?;
+        Ok(ids)
+    }
+
     pub fn list_conversations(&self) -> Result<Vec<ConversationSummary>> {
         let conn = self.conn.lock().unwrap();
-        let mut statement = conn.prepare(
+        let query = format!(
             "SELECT summaries.phone_number, summaries.total_count, summaries.unread_count,
                     messages.id, messages.direction, messages.phone_number, messages.body,
                     messages.timestamp, messages.status, messages.source, messages.modem_sms_path,
-                    messages.read_at, messages.error, messages.created_at, messages.updated_at
+                    messages.read_at, messages.error, messages.created_at, messages.updated_at,
+                    messages.favorite_at,
+                    ({DELETE_BLOCKED_SQL}),
+                    pins.phone_number IS NOT NULL,
+                    (SELECT COUNT(*) FROM messages AS favorites
+                     WHERE favorites.phone_number = summaries.phone_number
+                       AND favorites.favorite_at IS NOT NULL),
+                    EXISTS(SELECT 1 FROM messages
+                           WHERE messages.phone_number = summaries.phone_number
+                             AND {DELETE_BLOCKED_SQL})
              FROM conversation_summaries AS summaries
              INNER JOIN messages ON messages.id = summaries.last_message_id
-             ORDER BY COALESCE(julianday(messages.timestamp), julianday(messages.created_at)) DESC,
-                      messages.id DESC",
-        )?;
+             LEFT JOIN conversation_pins AS pins ON pins.phone_number = summaries.phone_number
+             ORDER BY (pins.phone_number IS NOT NULL) DESC,
+                      COALESCE(julianday(messages.timestamp), julianday(messages.created_at)) DESC,
+                      messages.id DESC"
+        );
+        let mut statement = conn.prepare(&query)?;
         let rows = statement.query_map([], |row| {
             let phone_number: String = row.get(0)?;
             let total_count: i64 = row.get(1)?;
@@ -547,12 +655,17 @@ impl MessageStore {
                 error: row.get(12)?,
                 created_at: row.get(13)?,
                 updated_at: row.get(14)?,
+                favorite_at: row.get(15)?,
+                delete_blocked: row.get(16)?,
             };
             Ok(ConversationSummary {
                 phone_number,
                 last_message,
                 unread_count,
                 total_count,
+                pinned: row.get(17)?,
+                favorite_count: row.get(18)?,
+                delete_blocked: row.get(19)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -575,8 +688,9 @@ impl MessageStore {
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         if let Some(key) = dedupe_key {
+            let message_columns = message_columns();
             let query =
-                format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE inbound_dedupe_key = ?1");
+                format!("SELECT {message_columns} FROM messages WHERE inbound_dedupe_key = ?1");
             if let Some(existing) = transaction
                 .query_row(&query, params![key], row_to_message)
                 .optional()?
@@ -604,7 +718,8 @@ fn map_get(conn: &Connection, id: i64) -> Result<Message> {
 }
 
 fn map_find(conn: &Connection, id: i64) -> Result<Option<Message>> {
-    let query = format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE id = ?1");
+    let message_columns = message_columns();
+    let query = format!("SELECT {message_columns} FROM messages WHERE id = ?1");
     conn.query_row(&query, params![id], row_to_message)
         .optional()
         .map_err(Into::into)
@@ -664,7 +779,8 @@ pub(super) fn build_message_query(
     apply_limit: bool,
 ) -> Result<(String, Vec<Value>)> {
     let limit = filter.limit.unwrap_or(10).min(500);
-    let mut sql = format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE 1=1");
+    let message_columns = message_columns();
+    let mut sql = format!("SELECT {message_columns} FROM messages WHERE 1=1");
     let mut values = Vec::new();
     match cursor {
         Some(ResolvedMessageCursor::Timeline { sort_key, id }) => {

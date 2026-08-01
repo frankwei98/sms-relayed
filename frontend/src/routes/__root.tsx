@@ -130,6 +130,13 @@ function RootComponent() {
 							{t("nav.modem")}
 						</Link>
 						<Link
+							to="/favorites"
+							className="shrink-0 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+							activeProps={{ className: "bg-accent text-accent-foreground" }}
+						>
+							{t("nav.favorites")}
+						</Link>
+						<Link
 							to="/forwarding"
 							className="shrink-0 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
 							activeProps={{ className: "bg-accent text-accent-foreground" }}

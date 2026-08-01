@@ -674,8 +674,37 @@ impl Messaging {
         Ok(changed)
     }
 
+    pub async fn set_favorite(&self, id: i64, favorite: bool) -> anyhow::Result<Message> {
+        let message = self.store.set_favorite(id, favorite).await?;
+        self.events.send(AppEvent::MessageUpdated(message.clone()));
+        Ok(message)
+    }
+
+    pub async fn favorites(&self) -> anyhow::Result<Vec<Message>> {
+        self.store.list_favorites().await
+    }
+
+    pub async fn set_conversation_pinned(
+        &self,
+        phone_number: String,
+        pinned: bool,
+    ) -> anyhow::Result<()> {
+        self.store
+            .set_conversation_pinned(phone_number.clone(), pinned)
+            .await?;
+        self.events
+            .send(AppEvent::ConversationUpdated { phone_number });
+        Ok(())
+    }
+
     pub async fn delete(&self, ids: Vec<i64>) -> anyhow::Result<()> {
         self.store.delete_messages(ids.clone()).await?;
+        self.events.send(AppEvent::MessageDeleted { ids });
+        Ok(())
+    }
+
+    pub async fn delete_conversation(&self, phone_number: String) -> anyhow::Result<()> {
+        let ids = self.store.delete_conversation(phone_number).await?;
         self.events.send(AppEvent::MessageDeleted { ids });
         Ok(())
     }
@@ -1147,6 +1176,7 @@ mod tests {
             .unwrap()
             .remove(0);
 
+        assert!(message.delete_blocked);
         assert!(messaging.delete(vec![message.id]).await.is_err());
 
         release_send.notify_one();
@@ -1165,6 +1195,7 @@ mod tests {
             Some("/org/freedesktop/ModemManager1/SMS/missing"),
         )
         .await;
+        assert!(!message.delete_blocked);
         let messaging = Messaging::new(
             store,
             EventBus::new(),

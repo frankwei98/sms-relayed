@@ -123,6 +123,8 @@ mod tests {
             error: Some("@SUM(A1:A2)".to_string()),
             created_at: "\r=1+1".to_string(),
             updated_at: "\n=1+1".to_string(),
+            favorite_at: None,
+            delete_blocked: false,
         })
         .unwrap();
 

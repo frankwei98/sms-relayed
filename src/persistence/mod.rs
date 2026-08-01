@@ -365,8 +365,27 @@ impl Store {
             .await
     }
 
+    pub async fn set_favorite(&self, id: i64, favorite: bool) -> Result<Message> {
+        self.run(move |sqlite| sqlite.set_favorite(id, favorite))
+            .await
+    }
+
+    pub async fn list_favorites(&self) -> Result<Vec<Message>> {
+        self.run(|sqlite| sqlite.list_favorites()).await
+    }
+
+    pub async fn set_conversation_pinned(&self, phone_number: String, pinned: bool) -> Result<()> {
+        self.run(move |sqlite| sqlite.set_conversation_pinned(&phone_number, pinned))
+            .await
+    }
+
     pub async fn delete_messages(&self, ids: Vec<i64>) -> Result<()> {
         self.run(move |sqlite| sqlite.delete_messages(&ids)).await
+    }
+
+    pub async fn delete_conversation(&self, phone_number: String) -> Result<Vec<i64>> {
+        self.run(move |sqlite| sqlite.delete_conversation(&phone_number))
+            .await
     }
 
     pub async fn forwarding_profiles(&self) -> Result<Vec<String>> {
