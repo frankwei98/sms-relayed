@@ -2,6 +2,7 @@ import { Check, Copy } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "#/components/ui/button";
+import { copyText } from "#/lib/clipboard";
 
 export function PhoneNumberCopy({ phoneNumber }: { phoneNumber: string }) {
 	const [result, setResult] = useState<"idle" | "copied" | "failed">("idle");
@@ -53,31 +54,4 @@ export function PhoneNumberCopy({ phoneNumber }: { phoneNumber: string }) {
 			</output>
 		</>
 	);
-}
-
-async function copyText(value: string) {
-	try {
-		if (navigator.clipboard?.writeText) {
-			await navigator.clipboard.writeText(value);
-			return true;
-		}
-	} catch {
-		// Fall back for non-secure HTTP deployments.
-	}
-
-	const textarea = document.createElement("textarea");
-	textarea.value = value;
-	textarea.setAttribute("readonly", "");
-	textarea.style.position = "fixed";
-	textarea.style.opacity = "0";
-	document.body.appendChild(textarea);
-	textarea.select();
-
-	try {
-		return document.execCommand?.("copy") === true;
-	} catch {
-		return false;
-	} finally {
-		textarea.remove();
-	}
 }

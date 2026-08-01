@@ -76,6 +76,7 @@ import {
 	downloadFile,
 	type Message,
 } from "#/lib/api";
+import { copyText } from "#/lib/clipboard";
 import { subscribeEvents } from "#/lib/events";
 import { normalizeLanguage } from "#/lib/i18n";
 import { fetchModemStatus } from "#/lib/modem-api";
@@ -737,10 +738,9 @@ export function MessageConsole({
 
 	async function handleCopyMessage(message: Message) {
 		setOperationError(null);
-		try {
-			await navigator.clipboard.writeText(message.body);
+		if (await copyText(message.body)) {
 			setActionNotice("copied");
-		} catch {
+		} else {
 			setOperationError("copy");
 		}
 	}
