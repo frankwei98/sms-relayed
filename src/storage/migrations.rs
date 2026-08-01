@@ -63,6 +63,42 @@ pub(super) fn migrate_existing_schema(conn: &Connection) -> Result<()> {
         }
     }
 
+    // Existing databases created `messages_delete_conversation_summary` via
+    // `CREATE TRIGGER IF NOT EXISTS`, so the updated body in the schema block
+    // (which also clears the conversation's pin when the last message is
+    // deleted) will not replace it. Drop and recreate so those databases get
+    // the fix; this is idempotent for databases that already have the new body.
+    conn.execute(
+        "DROP TRIGGER IF EXISTS messages_delete_conversation_summary",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TRIGGER messages_delete_conversation_summary
+         AFTER DELETE ON messages
+         BEGIN
+             UPDATE conversation_summaries
+             SET total_count = total_count - 1,
+                 unread_count = unread_count
+                     - CASE WHEN OLD.direction = 'inbound' AND OLD.read_at IS NULL THEN 1 ELSE 0 END,
+                 last_message_id = CASE
+                     WHEN last_message_id = OLD.id THEN (
+                         SELECT id FROM messages
+                         WHERE phone_number = OLD.phone_number
+                         ORDER BY COALESCE(julianday(timestamp), julianday(created_at)) DESC, id DESC
+                         LIMIT 1
+                     )
+                     ELSE last_message_id
+                 END
+             WHERE phone_number = OLD.phone_number;
+             DELETE FROM conversation_summaries
+             WHERE phone_number = OLD.phone_number AND total_count = 0;
+             DELETE FROM conversation_pins
+             WHERE phone_number = OLD.phone_number
+               AND NOT EXISTS (SELECT 1 FROM messages WHERE phone_number = OLD.phone_number);
+         END",
+        [],
+    )?;
+
     let has_dispatch_delay: bool = conn
         .prepare(
             "SELECT COUNT(*) FROM pragma_table_info('forward_attempt_samples')
