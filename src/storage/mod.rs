@@ -468,6 +468,9 @@ impl MessageStore {
                 WHERE phone_number = OLD.phone_number;
                 DELETE FROM conversation_summaries
                 WHERE phone_number = OLD.phone_number AND total_count = 0;
+                DELETE FROM conversation_pins
+                WHERE phone_number = OLD.phone_number
+                  AND NOT EXISTS (SELECT 1 FROM messages WHERE phone_number = OLD.phone_number);
             END;
             CREATE TRIGGER IF NOT EXISTS messages_update_timeline_conversation_summary
             AFTER UPDATE OF timestamp, created_at ON messages
@@ -1067,6 +1070,51 @@ mod tests {
             )
             .unwrap();
         assert_eq!(summary, (1, 0, earlier.id));
+    }
+
+    #[test]
+    fn deleting_last_message_removes_pin_and_recreated_conversation_is_unpinned() {
+        let store = memory_store();
+        let message = store
+            .insert_message(NewMessage::inbound("+15550000001", "only"))
+            .unwrap();
+        store.set_conversation_pinned("+15550000001", true).unwrap();
+
+        store.delete_messages(&[message.id]).unwrap();
+
+        assert!(store.list_conversations().unwrap().is_empty());
+
+        store
+            .insert_message(NewMessage::inbound("+15550000001", "reborn"))
+            .unwrap();
+        let conversations = store.list_conversations().unwrap();
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].phone_number, "+15550000001");
+        assert!(!conversations[0].pinned);
+    }
+
+    #[test]
+    fn deleting_all_messages_in_batch_removes_pin() {
+        let store = memory_store();
+        let one = store
+            .insert_message(NewMessage::inbound("+15550000002", "one"))
+            .unwrap();
+        let two = store
+            .insert_message(NewMessage::inbound("+15550000002", "two"))
+            .unwrap();
+        store.set_conversation_pinned("+15550000002", true).unwrap();
+
+        store.delete_messages(&[one.id, two.id]).unwrap();
+
+        assert!(store.list_conversations().unwrap().is_empty());
+
+        store
+            .insert_message(NewMessage::inbound("+15550000002", "third"))
+            .unwrap();
+        let conversations = store.list_conversations().unwrap();
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].phone_number, "+15550000002");
+        assert!(!conversations[0].pinned);
     }
 
     #[test]
