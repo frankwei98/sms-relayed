@@ -36,6 +36,17 @@ impl std::fmt::Display for ConversationDeleteBlocked {
 impl std::error::Error for ConversationDeleteBlocked {}
 
 #[derive(Debug)]
+pub struct MessageDeleteBlocked;
+
+impl std::fmt::Display for MessageDeleteBlocked {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("message cannot be deleted while sending")
+    }
+}
+
+impl std::error::Error for MessageDeleteBlocked {}
+
+#[derive(Debug)]
 pub struct MessageNotFound;
 
 impl std::fmt::Display for MessageNotFound {

@@ -13,8 +13,8 @@ use tokio_stream::StreamExt;
 use crate::events::AppEvent;
 use crate::export::MessageExportFormat;
 use crate::message::{
-    ConversationDeleteBlocked, ConversationNotFound, Message, MessageCursor, MessageDirection,
-    MessageFilter, MessageNotFound, MessageSource, MessageStatus,
+    ConversationDeleteBlocked, ConversationNotFound, Message, MessageCursor, MessageDeleteBlocked,
+    MessageDirection, MessageFilter, MessageNotFound, MessageSource, MessageStatus,
 };
 use crate::messaging::SendMessage;
 #[cfg(test)]
@@ -80,6 +80,12 @@ fn map_message_resource_error(error: anyhow::Error) -> ApiError {
         ApiError::new(
             StatusCode::NOT_FOUND,
             "message_not_found",
+            error.to_string(),
+        )
+    } else if error.downcast_ref::<MessageDeleteBlocked>().is_some() {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            "message_delete_blocked",
             error.to_string(),
         )
     } else {
@@ -881,6 +887,67 @@ mod tests {
                 .unwrap();
             let rows: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(rows.as_array().unwrap().len(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn deleting_sending_messages_returns_message_delete_blocked() {
+        use tower::ServiceExt;
+
+        let store = crate::storage::MessageStore::open_in_memory().unwrap();
+        let message = store
+            .insert_message(NewMessage {
+                direction: MessageDirection::Outbound,
+                phone_number: "+1".to_string(),
+                body: "still sending".to_string(),
+                timestamp: "2026-08-01T00:00:00Z".to_string(),
+                status: MessageStatus::Sending,
+                source: MessageSource::Web,
+                modem_sms_path: None,
+                read_at: Some("2026-08-01T00:00:00Z".to_string()),
+                error: None,
+                inbound_dedupe_key: None,
+            })
+            .unwrap();
+        let state = super::super::ApiState {
+            config: std::sync::Arc::new(crate::config::AppConfig::default()),
+            config_path: std::path::PathBuf::from("/tmp/not-used.toml"),
+            config_save_lock: Arc::new(tokio::sync::Mutex::new(())),
+            store: store.into(),
+            events: crate::events::EventBus::new(),
+            delivery_wakeup: crate::delivery::DeliveryWakeup::new(),
+            started_at: std::time::Instant::now(),
+            sessions: super::super::auth::SessionStore::default(),
+            modem: crate::modem::ModemService::new(),
+            sms_sender: super::super::test_sms_sender(),
+            service_control: super::super::service::ServiceControl::default(),
+        };
+        let app = routes().with_state(state);
+
+        let requests = [
+            axum::http::Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/messages/{}", message.id))
+                .body(Body::empty())
+                .unwrap(),
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/messages/delete")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "ids": [message.id] }).to_string(),
+                ))
+                .unwrap(),
+        ];
+
+        for request in requests {
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["code"], "message_delete_blocked");
         }
     }
 
