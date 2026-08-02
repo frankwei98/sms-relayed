@@ -8,7 +8,7 @@ use time::OffsetDateTime;
 
 use crate::message::{
     ConversationDeleteBlocked, ConversationNotFound, ConversationSummary, Message, MessageCursor,
-    MessageFilter, MessageNotFound, MessageStatus,
+    MessageDeleteBlocked, MessageFilter, MessageNotFound, MessageStatus,
 };
 use crate::message::{IdempotencyConflict, IdempotencyReplayUnavailable};
 
@@ -566,7 +566,7 @@ impl MessageStore {
                 .query_row(&query, params![id], |row| row.get::<_, bool>(0))
                 .optional()?;
             if delete_blocked == Some(true) {
-                anyhow::bail!("message {id} cannot be deleted while sending");
+                return Err(MessageDeleteBlocked.into());
             }
             if delete_blocked.is_none() {
                 return Err(MessageNotFound.into());
