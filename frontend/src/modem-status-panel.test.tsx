@@ -253,6 +253,24 @@ describe("ModemStatusPanel IMS detection", () => {
 		).toBeTruthy();
 	});
 
+	test("keeps an unknown IMS diagnostic code visible", async () => {
+		mocks.fetchModemStatus.mockResolvedValue({
+			...status,
+			sms_over_ims: {
+				...status.sms_over_ims,
+				warnings: ["vendor_specific_state"],
+			},
+		});
+
+		render(<ModemStatusPanel />);
+
+		expect(
+			await screen.findByText(
+				"Additional IMS diagnostic information is unavailable. (vendor_specific_state)",
+			),
+		).toBeTruthy();
+	});
+
 	test("refresh updates the IMS status without replacing modem details", async () => {
 		mocks.fetchModemStatus.mockResolvedValueOnce(status).mockResolvedValueOnce({
 			...status,

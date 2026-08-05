@@ -527,7 +527,7 @@ function imsDiagnosticMessage(code: string, t: TFunction) {
 	} as const;
 	return code in keys
 		? t(keys[code as keyof typeof keys])
-		: t("modem.imsDiagnostics.fallback");
+		: `${t("modem.imsDiagnostics.fallback")} (${code})`;
 }
 
 function StatusBadge({ value }: { value: ModemStatus["health"]["status"] }) {
