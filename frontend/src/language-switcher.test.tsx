@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import {
+	act,
 	cleanup,
 	fireEvent,
 	render,
@@ -41,16 +42,22 @@ afterEach(() => {
 
 describe("LanguageSwitcher", () => {
 	test("opens the complete language menu without a Base UI context error", async () => {
-		mocks.apiFetch.mockResolvedValue({ authenticated: true });
+		let resolveAuth!: (value: { authenticated: boolean }) => void;
+		mocks.apiFetch.mockReturnValue(
+			new Promise<{ authenticated: boolean }>((resolve) => {
+				resolveAuth = resolve;
+			}),
+		);
 		const RootComponent = Route.options.component as ComponentType;
 
 		render(<RootComponent />);
-		fireEvent.keyDown(
-			await screen.findByRole("button", {
-				name: "Language",
-			}),
-			{ key: "ArrowDown" },
-		);
+		await act(async () => {
+			resolveAuth({ authenticated: true });
+		});
+		const trigger = screen.getByRole("button", {
+			name: "Language",
+		});
+		fireEvent.keyDown(trigger, { key: "ArrowDown" });
 
 		const menu = await screen.findByRole("menu");
 		expect(within(menu).getByText("English")).toBeTruthy();
