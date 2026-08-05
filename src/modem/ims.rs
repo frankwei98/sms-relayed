@@ -670,6 +670,82 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct FailingNativeQmiClient {
+        error: NativeQmiError,
+    }
+
+    impl QmiRequestClient for FailingNativeQmiClient {
+        fn request<'a>(
+            &'a self,
+            _device: &'a str,
+            _service: u8,
+            _message: u16,
+            _timeout: Duration,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, NativeQmiError>> + Send + 'a>> {
+            Box::pin(async move { Err(self.error) })
+        }
+    }
+
+    async fn probe_with_startup_error(error: NativeQmiError) -> SmsOverIms {
+        NativeImsProbe::with_client(FailingNativeQmiClient { error })
+            .probe(
+                r#"{"modem":{"generic":{"ports":["wwan0qmi0 (qmi)"]}}}"#,
+                true,
+                Some(true),
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn native_probe_reports_qmi_result_failure() {
+        let failed_version_query = vec![
+            0x01, 0x12, 0x00, 0x80, 0x00, 0x00, 0x01, 0x01, 0x21, 0x00, 0x07, 0x00, 0x02, 0x04,
+            0x00, 0x01, 0x00, 0x47, 0x00,
+        ];
+        let probe = NativeImsProbe::with_client(FakeNativeQmiClient {
+            responses: Arc::new(HashMap::from([(
+                (QMI_SERVICE_CTL, QMI_CTL_GET_VERSION_INFO),
+                failed_version_query,
+            )])),
+        });
+
+        let status = probe
+            .probe(
+                r#"{"modem":{"generic":{"ports":["wwan0qmi0 (qmi)"]}}}"#,
+                true,
+                Some(true),
+            )
+            .await;
+
+        assert!(!status.probe.available);
+        assert_eq!(status.reasons, ["native_qmi_probe_failed"]);
+    }
+
+    #[tokio::test]
+    async fn native_probe_reports_permission_denied() {
+        let status = probe_with_startup_error(NativeQmiError::PermissionDenied).await;
+
+        assert!(!status.probe.available);
+        assert_eq!(status.reasons, ["ims_probe_permission_denied"]);
+    }
+
+    #[tokio::test]
+    async fn native_probe_reports_unavailable_proxy() {
+        let status = probe_with_startup_error(NativeQmiError::ProxyUnavailable).await;
+
+        assert!(!status.probe.available);
+        assert_eq!(status.reasons, ["qmi_proxy_unavailable"]);
+    }
+
+    #[tokio::test]
+    async fn native_probe_reports_startup_timeout() {
+        let status = probe_with_startup_error(NativeQmiError::Timeout).await;
+
+        assert!(!status.probe.available);
+        assert_eq!(status.reasons, ["ims_probe_timeout"]);
+    }
+
     #[tokio::test]
     async fn native_probe_preserves_network_ims_voice_support_without_claiming_registration() {
         // Known QMUX responses derived from the QMI CTL Get Version Info and
