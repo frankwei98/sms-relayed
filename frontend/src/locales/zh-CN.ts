@@ -98,7 +98,6 @@ export const zhCN = {
 				registering: "注册中",
 				limited: "受限",
 				notRegistered: "未注册",
-				notAvailable: "不可用",
 				available: "可用",
 				unavailable: "不可用",
 				unknown: "未知",

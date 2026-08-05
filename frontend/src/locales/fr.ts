@@ -98,7 +98,6 @@ export const fr = {
 				registering: "Enregistrement en cours",
 				limited: "Limité",
 				notRegistered: "Non enregistré",
-				notAvailable: "Non disponible",
 				available: "Disponible",
 				unavailable: "Indisponible",
 				unknown: "Inconnu",

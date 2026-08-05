@@ -98,7 +98,6 @@ export const ko = {
 				registering: "등록 중",
 				limited: "제한됨",
 				notRegistered: "등록되지 않음",
-				notAvailable: "사용할 수 없음",
 				available: "사용 가능",
 				unavailable: "사용 불가",
 				unknown: "알 수 없음",

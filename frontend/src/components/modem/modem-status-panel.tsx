@@ -461,20 +461,30 @@ function formatImsEvidence(value: SmsOverIms, t: TFunction) {
 	return t("modem.smsOverIms.evidence.noEvidence");
 }
 
-function formatImsEnum(value: string, t: TFunction) {
-	const keys = {
-		enabled: "modem.smsOverIms.enum.enabled",
-		disabled: "modem.smsOverIms.enum.disabled",
-		registered: "modem.smsOverIms.enum.registered",
-		registering: "modem.smsOverIms.enum.registering",
-		limited: "modem.smsOverIms.enum.limited",
-		not_registered: "modem.smsOverIms.enum.notRegistered",
-		not_available: "modem.smsOverIms.enum.notAvailable",
-		available: "modem.smsOverIms.enum.available",
-		unknown: "modem.smsOverIms.enum.unknown",
-		unavailable: "modem.smsOverIms.enum.unavailable",
-	} as const;
-	return value in keys ? t(keys[value as keyof typeof keys]) : value;
+type ImsEnumValue =
+	| SmsOverIms["status"]
+	| Exclude<SmsOverIms["voice_over_ims"], "volte" | "vowifi">
+	| SmsOverIms["registration"]
+	| SmsOverIms["voice_service"]
+	| SmsOverIms["sms_service"]
+	| SmsOverIms["configured"]
+	| SmsOverIms["volte_configured"]
+	| SmsOverIms["vowifi_configured"];
+
+const imsEnumKeys = {
+	enabled: "modem.smsOverIms.enum.enabled",
+	disabled: "modem.smsOverIms.enum.disabled",
+	registered: "modem.smsOverIms.enum.registered",
+	registering: "modem.smsOverIms.enum.registering",
+	limited: "modem.smsOverIms.enum.limited",
+	not_registered: "modem.smsOverIms.enum.notRegistered",
+	available: "modem.smsOverIms.enum.available",
+	unknown: "modem.smsOverIms.enum.unknown",
+	unavailable: "modem.smsOverIms.enum.unavailable",
+} as const satisfies Record<ImsEnumValue, string>;
+
+function formatImsEnum(value: ImsEnumValue, t: TFunction) {
+	return t(imsEnumKeys[value]);
 }
 
 function imsDiagnosticMessage(code: string, t: TFunction) {
