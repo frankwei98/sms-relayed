@@ -648,6 +648,14 @@ mod tests {
 
     use super::*;
 
+    struct SocketPathGuard(PathBuf);
+
+    impl Drop for SocketPathGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
     #[derive(Clone)]
     struct FakeNativeQmiClient {
         responses: Arc<HashMap<(u8, u16), Vec<u8>>>,
@@ -959,11 +967,11 @@ mod tests {
             frame
         }
 
-        let socket_path = PathBuf::from("/tmp").join(format!(
+        let socket_path = SocketPathGuard(PathBuf::from("/tmp").join(format!(
             "srq-{}.sock",
             &uuid::Uuid::new_v4().simple().to_string()[..12]
-        ));
-        let listener = UnixListener::bind(&socket_path).unwrap();
+        )));
+        let listener = UnixListener::bind(&socket_path.0).unwrap();
         let service_versions = vec![
             0x01, 0x1b, 0x00, 0x80, 0x00, 0x00, 0x01, 0x02, 0x21, 0x00, 0x10, 0x00, 0x02, 0x04,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x06, 0x00, 0x01, 0x03, 0x01, 0x00, 0x19, 0x00,
@@ -1011,7 +1019,7 @@ mod tests {
         });
 
         let probe =
-            NativeImsProbe::with_client(ProxyQmiClient::with_socket_path(socket_path.clone()));
+            NativeImsProbe::with_client(ProxyQmiClient::with_socket_path(socket_path.0.clone()));
         let status = probe
             .probe(
                 r#"{"modem":{"generic":{"ports":["wwan0qmi0 (qmi)"]}}}"#,
@@ -1021,7 +1029,6 @@ mod tests {
             .await;
 
         server.await.unwrap();
-        std::fs::remove_file(socket_path).unwrap();
         assert_eq!(status.ims_voice_support, Some(true));
         assert_eq!(status.voice_over_ims, VoiceOverImsStatus::Unknown);
     }
