@@ -70,7 +70,7 @@ export const ja = {
 		smsOverIms: {
 			title: "IMS音声とメッセージング",
 			description:
-				"モデムから報告されたものであり、各メッセージが実際に使用したルートを証明するものではありません。",
+				"モデムがIMS登録、音声サービス、アクセス技術を報告した場合にのみ、VoLTEまたはVoWiFiを使用中と表示します。",
 			field: {
 				lteVoiceSupport: "LTE音声機能",
 				imsVoiceSupport: "IMS音声機能",

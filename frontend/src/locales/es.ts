@@ -70,7 +70,7 @@ export const es = {
 		smsOverIms: {
 			title: "Voz y mensajería IMS",
 			description:
-				"Notificado por el módem; esto no demuestra la ruta que utiliza cada mensaje.",
+				"VoLTE o VoWiFi solo se muestra como activo cuando el módem informa del registro IMS, del servicio de voz y de la tecnología de acceso.",
 			field: {
 				lteVoiceSupport: "Capacidad de voz LTE",
 				imsVoiceSupport: "Capacidad de voz IMS",

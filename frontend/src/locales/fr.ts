@@ -70,7 +70,7 @@ export const fr = {
 		smsOverIms: {
 			title: "Voix et messagerie IMS",
 			description:
-				"Signalé par le modem ; cela ne prouve pas la route utilisée par chaque message.",
+				"VoLTE ou VoWiFi n’est indiqué comme actif que lorsque le modem signale l’enregistrement IMS, le service vocal et la technologie d’accès.",
 			field: {
 				lteVoiceSupport: "Capacité voix LTE",
 				imsVoiceSupport: "Capacité voix IMS",
