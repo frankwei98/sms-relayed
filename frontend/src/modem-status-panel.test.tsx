@@ -229,6 +229,30 @@ describe("ModemStatusPanel IMS detection", () => {
 		).toHaveLength(1);
 	});
 
+	test("explains unavailable and failed NAS capability queries", async () => {
+		mocks.fetchModemStatus.mockResolvedValue({
+			...status,
+			sms_over_ims: {
+				...status.sms_over_ims,
+				warnings: [
+					"ims_voice_support_query_unavailable",
+					"ims_voice_support_query_failed",
+				],
+			},
+		});
+
+		render(<ModemStatusPanel />);
+
+		expect(
+			await screen.findByText(
+				"The modem does not expose the NAS IMS voice capability query.",
+			),
+		).toBeTruthy();
+		expect(
+			screen.getByText("The NAS IMS voice capability query failed."),
+		).toBeTruthy();
+	});
+
 	test("refresh updates the IMS status without replacing modem details", async () => {
 		mocks.fetchModemStatus.mockResolvedValueOnce(status).mockResolvedValueOnce({
 			...status,

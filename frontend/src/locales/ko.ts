@@ -148,6 +148,9 @@ export const ko = {
 			qmiProxyUnavailable: "QMI 프록시를 사용할 수 없습니다.",
 			nativeQmiProbeFailed: "네이티브 QMI 탐색 응답이 잘못되었습니다.",
 			imsProbeTimeout: "IMS 탐색이 시간 예산을 초과했습니다.",
+			imsVoiceSupportQueryFailed: "NAS IMS 음성 기능 조회에 실패했습니다.",
+			imsVoiceSupportQueryUnavailable:
+				"모뎀이 NAS IMS 음성 기능 조회를 제공하지 않습니다.",
 			imsServicesQueryFailed: "IMS 서비스 조회에 실패했습니다.",
 			imsServicesQueryUnavailable:
 				"모뎀이 IMS 서비스 조회를 제공하지 않습니다.",

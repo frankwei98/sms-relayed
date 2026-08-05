@@ -375,15 +375,25 @@ impl NativeImsProbe {
             let nas = self
                 .request_response(&device, QMI_SERVICE_NAS, QMI_NAS_GET_SYSTEM_INFO, deadline)
                 .await;
-            if let Ok(response) = nas {
-                result.lte_voice_support = response.bool(0x21);
-                result.ims_voice_support = response.bool(0x29);
-                if result.ims_voice_support == Some(true) {
-                    result
-                        .evidence
-                        .push("qmi_nas_ims_voice_support".to_string());
+            match nas {
+                Ok(response) => {
+                    result.lte_voice_support = response.bool(0x21);
+                    result.ims_voice_support = response.bool(0x29);
+                    if result.ims_voice_support == Some(true) {
+                        result
+                            .evidence
+                            .push("qmi_nas_ims_voice_support".to_string());
+                    }
                 }
+                Err(error) => result.warnings.push(native_query_error_code(
+                    error,
+                    "ims_voice_support_query_failed",
+                )),
             }
+        } else {
+            result
+                .warnings
+                .push("ims_voice_support_query_unavailable".to_string());
         }
 
         if versions.imsa {
@@ -752,6 +762,58 @@ mod tests {
 
         assert!(!status.probe.available);
         assert_eq!(status.reasons, ["ims_probe_timeout"]);
+    }
+
+    #[tokio::test]
+    async fn native_probe_explains_unavailable_nas_capability_query() {
+        let service_versions = vec![
+            0x01, 0x16, 0x00, 0x80, 0x00, 0x00, 0x01, 0x01, 0x21, 0x00, 0x0b, 0x00, 0x02, 0x04,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00,
+        ];
+        let probe = NativeImsProbe::with_client(FakeNativeQmiClient {
+            responses: Arc::new(HashMap::from([(
+                (QMI_SERVICE_CTL, QMI_CTL_GET_VERSION_INFO),
+                service_versions,
+            )])),
+        });
+
+        let status = probe
+            .probe(
+                r#"{"modem":{"generic":{"ports":["wwan0qmi0 (qmi)"]}}}"#,
+                true,
+                Some(true),
+            )
+            .await;
+
+        assert!(status
+            .warnings
+            .contains(&"ims_voice_support_query_unavailable".to_string()));
+    }
+
+    #[tokio::test]
+    async fn native_probe_explains_failed_nas_capability_query() {
+        let service_versions = vec![
+            0x01, 0x1b, 0x00, 0x80, 0x00, 0x00, 0x01, 0x01, 0x21, 0x00, 0x10, 0x00, 0x02, 0x04,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x06, 0x00, 0x01, 0x03, 0x01, 0x00, 0x19, 0x00,
+        ];
+        let probe = NativeImsProbe::with_client(FakeNativeQmiClient {
+            responses: Arc::new(HashMap::from([(
+                (QMI_SERVICE_CTL, QMI_CTL_GET_VERSION_INFO),
+                service_versions,
+            )])),
+        });
+
+        let status = probe
+            .probe(
+                r#"{"modem":{"generic":{"ports":["wwan0qmi0 (qmi)"]}}}"#,
+                true,
+                Some(true),
+            )
+            .await;
+
+        assert!(status
+            .warnings
+            .contains(&"ims_voice_support_query_failed".to_string()));
     }
 
     #[tokio::test]

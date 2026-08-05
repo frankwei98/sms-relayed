@@ -150,6 +150,10 @@ export const fr = {
 			qmiProxyUnavailable: "Le proxy QMI est indisponible.",
 			nativeQmiProbeFailed: "La sonde QMI native a reçu une réponse invalide.",
 			imsProbeTimeout: "La sonde IMS a dépassé son budget de temps.",
+			imsVoiceSupportQueryFailed:
+				"La requête NAS de capacité vocale IMS a échoué.",
+			imsVoiceSupportQueryUnavailable:
+				"Le modem n’expose pas la requête NAS de capacité vocale IMS.",
 			imsServicesQueryFailed: "La requête de services IMS a échoué.",
 			imsServicesQueryUnavailable:
 				"Le modem n'expose pas la requête de services IMS.",

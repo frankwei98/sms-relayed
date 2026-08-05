@@ -152,6 +152,10 @@ export const es = {
 			nativeQmiProbeFailed:
 				"La sonda QMI nativa recibió una respuesta no válida.",
 			imsProbeTimeout: "El sondeo de IMS excedió su tiempo límite.",
+			imsVoiceSupportQueryFailed:
+				"La consulta NAS de capacidad de voz IMS falló.",
+			imsVoiceSupportQueryUnavailable:
+				"El módem no expone la consulta NAS de capacidad de voz IMS.",
 			imsServicesQueryFailed: "La consulta de servicios de IMS falló.",
 			imsServicesQueryUnavailable:
 				"El módem no expone la consulta de servicios de IMS.",
