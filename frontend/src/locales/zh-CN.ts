@@ -148,6 +148,9 @@ export const zhCN = {
 			qmiProxyUnavailable: "QMI 代理不可用。",
 			nativeQmiProbeFailed: "原生 QMI 探针收到无效响应。",
 			imsProbeTimeout: "IMS 探测超出时间预算。",
+			imsVoiceSupportQueryFailed: "NAS IMS 语音能力查询失败。",
+			imsVoiceSupportQueryUnavailable:
+				"调制解调器未提供 NAS IMS 语音能力查询接口。",
 			imsServicesQueryFailed: "IMS 服务查询失败。",
 			imsServicesQueryUnavailable: "调制解调器未提供 IMS 服务查询接口。",
 			imsRegistrationQueryFailed: "IMS 注册查询失败。",

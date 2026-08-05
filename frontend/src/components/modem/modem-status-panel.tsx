@@ -489,6 +489,10 @@ function imsDiagnosticMessage(code: string, t: TFunction) {
 		qmi_proxy_unavailable: "modem.imsDiagnostics.qmiProxyUnavailable",
 		native_qmi_probe_failed: "modem.imsDiagnostics.nativeQmiProbeFailed",
 		ims_probe_timeout: "modem.imsDiagnostics.imsProbeTimeout",
+		ims_voice_support_query_failed:
+			"modem.imsDiagnostics.imsVoiceSupportQueryFailed",
+		ims_voice_support_query_unavailable:
+			"modem.imsDiagnostics.imsVoiceSupportQueryUnavailable",
 		ims_services_query_failed: "modem.imsDiagnostics.imsServicesQueryFailed",
 		ims_services_query_unavailable:
 			"modem.imsDiagnostics.imsServicesQueryUnavailable",

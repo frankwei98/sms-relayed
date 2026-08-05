@@ -150,6 +150,9 @@ export const ja = {
 			qmiProxyUnavailable: "QMIプロキシが利用できません。",
 			nativeQmiProbeFailed: "ネイティブQMIプローブの応答が無効です。",
 			imsProbeTimeout: "IMSプローブが時間制限を超えました。",
+			imsVoiceSupportQueryFailed: "NASのIMS音声機能クエリに失敗しました。",
+			imsVoiceSupportQueryUnavailable:
+				"モデムはNASのIMS音声機能クエリを提供していません。",
 			imsServicesQueryFailed: "IMSサービスクエリに失敗しました。",
 			imsServicesQueryUnavailable:
 				"モデムはIMSサービスクエリを提供していません。",

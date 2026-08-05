@@ -144,6 +144,9 @@ export const en = {
 			nativeQmiProbeFailed:
 				"The native QMI probe returned an invalid response.",
 			imsProbeTimeout: "The IMS probe exceeded its time budget.",
+			imsVoiceSupportQueryFailed: "The NAS IMS voice capability query failed.",
+			imsVoiceSupportQueryUnavailable:
+				"The modem does not expose the NAS IMS voice capability query.",
 			imsServicesQueryFailed: "The IMS service query failed.",
 			imsServicesQueryUnavailable:
 				"The modem does not expose the IMS service query.",
