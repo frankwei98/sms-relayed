@@ -98,7 +98,6 @@ export const ja = {
 				registering: "登録中",
 				limited: "制限あり",
 				notRegistered: "未登録",
-				notAvailable: "利用不可",
 				available: "利用可能",
 				unavailable: "利用不可",
 				unknown: "不明",

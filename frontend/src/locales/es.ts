@@ -98,7 +98,6 @@ export const es = {
 				registering: "Registrando",
 				limited: "Limitado",
 				notRegistered: "No registrado",
-				notAvailable: "No disponible",
 				available: "Disponible",
 				unavailable: "No disponible",
 				unknown: "Desconocido",

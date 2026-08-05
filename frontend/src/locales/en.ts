@@ -92,7 +92,6 @@ export const en = {
 				registering: "Registering",
 				limited: "Limited",
 				notRegistered: "Not Registered",
-				notAvailable: "Not available",
 				available: "Available",
 				unavailable: "Unavailable",
 				unknown: "Unknown",
