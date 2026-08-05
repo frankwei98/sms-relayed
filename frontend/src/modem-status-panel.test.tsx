@@ -212,6 +212,23 @@ describe("ModemStatusPanel IMS detection", () => {
 		expect(screen.queryByText("ims_services_output_nonstandard")).toBeNull();
 	});
 
+	test("shows a repeated IMS diagnostic only once", async () => {
+		mocks.fetchModemStatus.mockResolvedValue({
+			...status,
+			sms_over_ims: {
+				...status.sms_over_ims,
+				reasons: ["ims_probe_timeout"],
+				warnings: ["ims_probe_timeout"],
+			},
+		});
+
+		render(<ModemStatusPanel />);
+
+		expect(
+			await screen.findAllByText("The IMS probe exceeded its time budget."),
+		).toHaveLength(1);
+	});
+
 	test("refresh updates the IMS status without replacing modem details", async () => {
 		mocks.fetchModemStatus.mockResolvedValueOnce(status).mockResolvedValueOnce({
 			...status,
