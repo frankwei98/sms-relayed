@@ -1129,24 +1129,6 @@ impl ModemService {
         }
     }
 
-    pub async fn scan_and_match_fingerprint(&self, target_fingerprint: &str) -> Option<String> {
-        let paths = self.list_all_modem_paths().await;
-        let mut matched: Vec<String> = Vec::new();
-        for path in &paths {
-            if let Some(identity) = self.extract_identity(path).await {
-                let fp = Self::compute_fingerprint(&identity);
-                if fp == target_fingerprint {
-                    matched.push(path.clone());
-                }
-            }
-        }
-        if matched.len() == 1 {
-            Some(matched.remove(0))
-        } else {
-            None
-        }
-    }
-
     #[allow(dead_code)]
     pub fn runner_ref(&self) -> &Arc<dyn MmcliRunner> {
         &self.runner
