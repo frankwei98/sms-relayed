@@ -70,7 +70,7 @@ export const ko = {
 		smsOverIms: {
 			title: "IMS 음성 및 메시징",
 			description:
-				"모뎀이 보고한 값이며, 각 메시지가 실제로 사용한 경로를 증명하지는 않습니다.",
+				"모뎀이 IMS 등록, 음성 서비스 및 접속 기술을 보고한 경우에만 VoLTE 또는 VoWiFi를 사용 중으로 표시합니다.",
 			field: {
 				lteVoiceSupport: "LTE 음성 기능",
 				imsVoiceSupport: "IMS 음성 기능",
