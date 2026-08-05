@@ -1077,6 +1077,8 @@ mod tests {
                 (QMI_SERVICE_NAS, 0x004d)
             );
             nas.write_all(&system_info).await.unwrap();
+            let release = read_frame(&mut nas).await;
+            assert_eq!(message_id(&release), 0x0023);
             drop(nas);
         });
 
