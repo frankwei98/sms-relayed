@@ -72,6 +72,7 @@ impl ProxyQmiClient {
         device: &str,
         service: u8,
         message: u16,
+        cleanup_timeout: Duration,
     ) -> Result<Vec<u8>, NativeQmiError> {
         let mut stream = self.connect().await?;
         let open = build_qmi_request(
@@ -134,9 +135,18 @@ impl ProxyQmiClient {
             &[(0x01, &[service, client])],
         );
         if let Ok(release) = release {
-            // CID cleanup is advisory. Closing this per-request proxy stream also
-            // releases its clients, so cleanup must not mask a service result.
-            let _ = stream.try_write(&release);
+            tokio::spawn(async move {
+                let cleanup = async {
+                    stream
+                        .write_all(&release)
+                        .await
+                        .map_err(map_proxy_io_error)?;
+                    let response = read_qmi_frame(&mut stream).await?;
+                    QmiResponse::parse(&response, QMI_SERVICE_CTL, QMI_CTL_RELEASE_CID)?;
+                    Ok::<(), NativeQmiError>(())
+                };
+                let _ = tokio::time::timeout(cleanup_timeout, cleanup).await;
+            });
         }
 
         service_response
@@ -168,9 +178,12 @@ impl QmiRequestClient for ProxyQmiClient {
         timeout: Duration,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, NativeQmiError>> + Send + 'a>> {
         Box::pin(async move {
-            tokio::time::timeout(timeout, self.request_inner(device, service, message))
-                .await
-                .map_err(|_| NativeQmiError::Timeout)?
+            tokio::time::timeout(
+                timeout,
+                self.request_inner(device, service, message, timeout),
+            )
+            .await
+            .map_err(|_| NativeQmiError::Timeout)?
         })
     }
 }
