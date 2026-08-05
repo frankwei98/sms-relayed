@@ -1,3 +1,4 @@
+import type { TFunction } from "i18next";
 import { Power, PowerOff, RefreshCw, RotateCcw } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
@@ -276,6 +277,12 @@ export function ModemStatusPanel() {
 function SmsOverImsCard({ value }: { value: SmsOverIms }) {
 	const { t } = useTranslation();
 	const diagnostics = [...value.reasons, ...value.warnings];
+	const booleanValue = (candidate: boolean | null) =>
+		candidate === null
+			? t("modem.value.unknown")
+			: candidate
+				? t("modem.value.yes")
+				: t("modem.value.no");
 
 	return (
 		<section className="rounded border p-4">
@@ -286,31 +293,59 @@ function SmsOverImsCard({ value }: { value: SmsOverIms }) {
 						{t("modem.smsOverIms.description")}
 					</p>
 				</div>
-				<ImsStatusBadge value={value.status} technology={value.technology} />
+				<VoiceImsStatusBadge value={value.voice_over_ims} />
 			</div>
 
 			<div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
 				<CompactField
-					label={t("modem.smsOverIms.field.configured")}
-					value={formatImsEnum(value.configured)}
+					label={t("modem.smsOverIms.field.lteVoiceSupport")}
+					value={booleanValue(value.lte_voice_support)}
+				/>
+				<CompactField
+					label={t("modem.smsOverIms.field.imsVoiceSupport")}
+					value={booleanValue(value.ims_voice_support)}
+				/>
+				<CompactField
+					label={t("modem.smsOverIms.field.volteConfigured")}
+					value={formatImsEnum(value.volte_configured, t)}
+				/>
+				<CompactField
+					label={t("modem.smsOverIms.field.vowifiConfigured")}
+					value={formatImsEnum(value.vowifi_configured, t)}
 				/>
 				<CompactField
 					label={t("modem.smsOverIms.field.registration")}
-					value={formatImsEnum(value.registration)}
+					value={formatImsEnum(value.registration, t)}
+				/>
+				<CompactField
+					label={t("modem.smsOverIms.field.voiceService")}
+					value={formatImsEnum(value.voice_service, t)}
+				/>
+				<CompactField
+					label={t("modem.smsOverIms.field.voiceTechnology")}
+					value={formatTechnology(value.voice_technology, t)}
+				/>
+				<CompactField
+					label={t("modem.smsOverIms.field.smsConfigured")}
+					value={formatImsEnum(value.configured, t)}
+				/>
+				<CompactField
+					label={t("modem.smsOverIms.field.smsStatus")}
+					value={formatImsStatus(value.status, value.technology, t)}
 				/>
 				<CompactField
 					label={t("modem.smsOverIms.field.smsService")}
-					value={formatImsEnum(value.sms_service)}
+					value={formatImsEnum(value.sms_service, t)}
 				/>
 				<CompactField
 					label={t("modem.smsOverIms.field.technology")}
-					value={formatTechnology(value.technology)}
+					value={formatTechnology(value.technology, t)}
 				/>
 				<CompactField
-					label={t("modem.smsOverIms.field.qmicli")}
+					label={t("modem.smsOverIms.field.detector")}
 					value={
 						value.probe.available
-							? (value.probe.version_raw ?? t("modem.value.available"))
+							? (value.probe.version_raw ?? value.probe.tool)
 							: t("modem.value.missing")
 					}
 				/>
@@ -320,14 +355,14 @@ function SmsOverImsCard({ value }: { value: SmsOverIms }) {
 				/>
 				<CompactField
 					label={t("modem.smsOverIms.field.evidence")}
-					value={formatImsEvidence(value)}
+					value={formatImsEvidence(value, t)}
 				/>
 			</div>
 
 			{diagnostics.length > 0 && (
 				<div className="mt-4 space-y-1 rounded bg-muted/40 p-3 text-xs text-muted-foreground">
 					{diagnostics.map((code) => (
-						<p key={code}>{imsDiagnosticMessage(code)}</p>
+						<p key={code}>{imsDiagnosticMessage(code, t)}</p>
 					))}
 				</div>
 			)}
@@ -335,15 +370,14 @@ function SmsOverImsCard({ value }: { value: SmsOverIms }) {
 	);
 }
 
-function ImsStatusBadge({
+function VoiceImsStatusBadge({
 	value,
-	technology,
 }: {
-	value: SmsOverIms["status"];
-	technology: SmsOverIms["technology"];
+	value: SmsOverIms["voice_over_ims"];
 }) {
+	const { t } = useTranslation();
 	const className =
-		value === "available"
+		value === "volte" || value === "vowifi"
 			? "bg-emerald-100 text-emerald-800"
 			: value === "registering"
 				? "bg-slate-200 text-slate-800"
@@ -352,10 +386,16 @@ function ImsStatusBadge({
 					: value === "unavailable"
 						? "bg-red-100 text-red-800"
 						: "bg-slate-100 text-slate-700";
+	const label =
+		value === "volte"
+			? t("modem.smsOverIms.voiceStatus.volte")
+			: value === "vowifi"
+				? t("modem.smsOverIms.voiceStatus.vowifi")
+				: formatImsEnum(value, t);
 
 	return (
 		<span className={`rounded px-2 py-1 text-xs font-medium ${className}`}>
-			{formatImsStatus(value, technology)}
+			{label}
 		</span>
 	);
 }
@@ -372,95 +412,118 @@ function CompactField({ label, value }: { label: string; value: string }) {
 function formatImsStatus(
 	status: SmsOverIms["status"],
 	technology: SmsOverIms["technology"],
+	t: TFunction,
 ) {
 	if (
 		status === "available" &&
 		(technology === "wlan" || technology === "interworking_wlan")
 	) {
-		return "Available over WLAN";
+		return t("modem.smsOverIms.availableOverWlan");
 	}
-	return formatImsEnum(status);
+	return formatImsEnum(status, t);
 }
 
-function formatTechnology(value: SmsOverIms["technology"]) {
-	if (value === "wwan") return "WWAN";
-	if (value === "wlan") return "WLAN";
-	if (value === "interworking_wlan") return "Interworking WLAN";
-	return "Unknown";
+function formatTechnology(value: SmsOverIms["technology"], t: TFunction) {
+	if (value === "wwan") return t("modem.smsOverIms.technology.wwan");
+	if (value === "wlan") return t("modem.smsOverIms.technology.wlan");
+	if (value === "interworking_wlan")
+		return t("modem.smsOverIms.technology.interworkingWlan");
+	return t("modem.smsOverIms.technology.unknown");
 }
 
-function formatImsEvidence(value: SmsOverIms) {
-	const source = value.evidence.some((item) => item.startsWith("qmi_imsa_"))
-		? "QMI IMSA"
-		: value.evidence.includes("qmi_ims_settings")
-			? "QMI IMS"
-			: "No runtime evidence";
-	if (value.technology === "unknown" || source === "No runtime evidence") {
-		return source;
+function formatImsEvidence(value: SmsOverIms, t: TFunction) {
+	if (value.evidence.some((item) => item.startsWith("qmi_imsa_"))) {
+		const parts = [t("modem.smsOverIms.evidence.qmiImsa")];
+		if (
+			value.evidence.includes("qmi_imsa_voice") &&
+			value.voice_technology !== "unknown"
+		) {
+			parts.push(
+				`${t("modem.smsOverIms.evidence.voice")} ${formatTechnology(value.voice_technology, t)}`,
+			);
+		}
+		if (
+			value.evidence.includes("qmi_imsa_services") &&
+			value.technology !== "unknown"
+		) {
+			parts.push(
+				`${t("modem.smsOverIms.evidence.sms")} ${formatTechnology(value.technology, t)}`,
+			);
+		}
+		return parts.join(" · ");
 	}
-	return `${source} · ${formatTechnology(value.technology)}`;
+	if (value.evidence.includes("qmi_ims_settings")) {
+		return t("modem.smsOverIms.evidence.qmiIms");
+	}
+	if (value.evidence.includes("qmi_nas_ims_voice_support")) {
+		return t("modem.smsOverIms.evidence.qmiNas");
+	}
+	return t("modem.smsOverIms.evidence.noEvidence");
 }
 
-function formatImsEnum(value: string) {
-	// Maps API enum values to translated labels via the smsOverIms.enum namespace
-	// The caller should wrap this in a translation context.
-	const map: Record<string, string> = {
-		enabled: "Enabled",
-		disabled: "Disabled",
-		registered: "Registered",
-		registering: "Registering",
-		limited: "Limited",
-		not_registered: "Not Registered",
-		not_available: "Not available",
-		available: "Available",
-		unknown: "Unknown",
-		unavailable: "Unavailable",
-	};
-	return map[value] ?? value;
+function formatImsEnum(value: string, t: TFunction) {
+	const keys = {
+		enabled: "modem.smsOverIms.enum.enabled",
+		disabled: "modem.smsOverIms.enum.disabled",
+		registered: "modem.smsOverIms.enum.registered",
+		registering: "modem.smsOverIms.enum.registering",
+		limited: "modem.smsOverIms.enum.limited",
+		not_registered: "modem.smsOverIms.enum.notRegistered",
+		not_available: "modem.smsOverIms.enum.notAvailable",
+		available: "modem.smsOverIms.enum.available",
+		unknown: "modem.smsOverIms.enum.unknown",
+		unavailable: "modem.smsOverIms.enum.unavailable",
+	} as const;
+	return value in keys ? t(keys[value as keyof typeof keys]) : value;
 }
 
-function imsDiagnosticMessage(code: string) {
-	const messages: Record<string, string> = {
-		ims_probe_not_attempted: "IMS probing was not attempted.",
-		modem_not_resolved:
-			"IMS probing was skipped because no modem was resolved.",
-		modem_disabled: "IMS probing was skipped because the modem is disabled.",
-		qmicli_missing: "qmicli is not installed or could not be executed.",
-		qmicli_path_invalid: "The configured qmicli path is invalid.",
-		qmicli_probe_failed: "qmicli capability detection failed.",
+function imsDiagnosticMessage(code: string, t: TFunction) {
+	const keys = {
+		ims_probe_not_attempted: "modem.imsDiagnostics.imsProbeNotAttempted",
+		modem_not_resolved: "modem.imsDiagnostics.modemNotResolved",
+		modem_disabled: "modem.imsDiagnostics.modemDisabled",
 		ims_probe_permission_denied:
-			"qmicli could not be executed due to permissions.",
-		qmi_port_unavailable: "No QMI control port was reported by ModemManager.",
-		qmi_port_ambiguous: "More than one QMI control port was reported.",
-		qmi_proxy_unavailable: "The QMI proxy is unavailable.",
-		ims_probe_timeout: "The IMS probe exceeded its time budget.",
-		ims_services_query_failed: "The IMS service query failed.",
+			"modem.imsDiagnostics.imsProbePermissionDenied",
+		qmi_port_unavailable: "modem.imsDiagnostics.qmiPortUnavailable",
+		qmi_port_ambiguous: "modem.imsDiagnostics.qmiPortAmbiguous",
+		qmi_proxy_unavailable: "modem.imsDiagnostics.qmiProxyUnavailable",
+		native_qmi_probe_failed: "modem.imsDiagnostics.nativeQmiProbeFailed",
+		ims_probe_timeout: "modem.imsDiagnostics.imsProbeTimeout",
+		ims_services_query_failed: "modem.imsDiagnostics.imsServicesQueryFailed",
 		ims_services_query_unavailable:
-			"qmicli does not expose the IMS service query.",
-		ims_registration_query_failed: "The IMS registration query failed.",
+			"modem.imsDiagnostics.imsServicesQueryUnavailable",
+		ims_registration_query_failed:
+			"modem.imsDiagnostics.imsRegistrationQueryFailed",
 		ims_registration_query_unavailable:
-			"qmicli does not expose the IMS registration query.",
-		ims_settings_query_failed: "The IMS settings query failed.",
+			"modem.imsDiagnostics.imsRegistrationQueryUnavailable",
+		ims_settings_query_failed: "modem.imsDiagnostics.imsSettingsQueryFailed",
 		ims_settings_query_unavailable:
-			"qmicli does not expose the IMS settings query.",
+			"modem.imsDiagnostics.imsSettingsQueryUnavailable",
+		ims_voice_output_unrecognized:
+			"modem.imsDiagnostics.imsVoiceOutputUnrecognized",
 		ims_services_output_unrecognized:
-			"The IMS service response was not recognized.",
+			"modem.imsDiagnostics.imsServicesOutputUnrecognized",
 		ims_registration_output_unrecognized:
-			"The IMS registration response was not recognized.",
+			"modem.imsDiagnostics.imsRegistrationOutputUnrecognized",
 		ims_settings_output_unrecognized:
-			"The IMS settings response was not recognized.",
+			"modem.imsDiagnostics.imsSettingsOutputUnrecognized",
+		ims_volte_setting_unavailable:
+			"modem.imsDiagnostics.imsVolteSettingUnavailable",
+		ims_vowifi_setting_unavailable:
+			"modem.imsDiagnostics.imsVowifiSettingUnavailable",
+		ims_sms_setting_unavailable:
+			"modem.imsDiagnostics.imsSmsSettingUnavailable",
 		ims_services_output_nonstandard:
-			"The IMS service response used a nonstandard label.",
+			"modem.imsDiagnostics.imsServicesOutputNonstandard",
 		ims_registration_output_nonstandard:
-			"The IMS registration response used a nonstandard label.",
+			"modem.imsDiagnostics.imsRegistrationOutputNonstandard",
 		ims_settings_output_nonstandard:
-			"The IMS settings response used a nonstandard label.",
-		ims_state_inconsistent:
-			"The modem reported inconsistent IMS configuration and runtime state.",
-	};
-	return (
-		messages[code] ?? "Additional IMS diagnostic information is unavailable."
-	);
+			"modem.imsDiagnostics.imsSettingsOutputNonstandard",
+		ims_state_inconsistent: "modem.imsDiagnostics.imsStateInconsistent",
+	} as const;
+	return code in keys
+		? t(keys[code as keyof typeof keys])
+		: t("modem.imsDiagnostics.fallback");
 }
 
 function StatusBadge({ value }: { value: ModemStatus["health"]["status"] }) {

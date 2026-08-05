@@ -283,16 +283,6 @@ EOF
 
 warn_environment() {
   have mmcli || warn "mmcli not found; SMS relay can still use ModemManager D-Bus, but Web modem status/control and /api/health modem diagnostics will report unknown"
-  if ! have qmicli; then
-    warn "qmicli not found; the optional Web SMS over IMS status will report unknown. Debian 12 users may run scripts/install-private-qmicli-debian.sh separately."
-    return
-  fi
-  qmicli_help="$(qmicli --help-all 2>/dev/null || true)"
-  if ! printf '%s\n' "$qmicli_help" | grep -F -- "--ims-get-ims-services-enabled-setting" >/dev/null ||
-     ! printf '%s\n' "$qmicli_help" | grep -F -- "--imsa-get-ims-registration-status" >/dev/null ||
-     ! printf '%s\n' "$qmicli_help" | grep -F -- "--imsa-get-ims-services-status" >/dev/null; then
-    warn "qmicli lacks the IMS/IMSA actions needed by the optional SMS over IMS status. Debian 12 users may run scripts/install-private-qmicli-debian.sh separately."
-  fi
 }
 
 run_setup_if_tty() {

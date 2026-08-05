@@ -68,17 +68,28 @@ export const ko = {
 			unknown: "알 수 없음",
 		},
 		smsOverIms: {
-			title: "SMS over IMS",
+			title: "IMS 음성 및 메시징",
 			description:
 				"모뎀이 보고한 값이며, 각 메시지가 실제로 사용한 경로를 증명하지는 않습니다.",
 			field: {
-				configured: "구성됨",
+				lteVoiceSupport: "LTE 음성 기능",
+				imsVoiceSupport: "IMS 음성 기능",
+				volteConfigured: "VoLTE 구성",
+				vowifiConfigured: "VoWiFi 구성",
 				registration: "등록 상태",
+				voiceService: "음성 서비스",
+				voiceTechnology: "음성 기술",
+				smsConfigured: "SMS 구성",
+				smsStatus: "SMS over IMS",
 				smsService: "SMS 서비스",
 				technology: "기술",
-				qmicli: "qmicli",
+				detector: "감지기",
 				qmiDevice: "QMI 장치",
 				evidence: "근거",
+			},
+			voiceStatus: {
+				volte: "VoLTE 사용 중",
+				vowifi: "VoWiFi 사용 중",
 			},
 			enum: {
 				enabled: "활성화",
@@ -89,6 +100,7 @@ export const ko = {
 				notRegistered: "등록되지 않음",
 				notAvailable: "사용할 수 없음",
 				available: "사용 가능",
+				unavailable: "사용 불가",
 				unknown: "알 수 없음",
 			},
 			availableOverWlan: "WLAN에서 사용 가능",
@@ -101,6 +113,9 @@ export const ko = {
 			evidence: {
 				qmiImsa: "QMI IMSA",
 				qmiIms: "QMI IMS",
+				qmiNas: "QMI NAS 기능",
+				voice: "음성",
+				sms: "SMS",
 				noEvidence: "런타임 근거 없음",
 			},
 		},
@@ -127,26 +142,30 @@ export const ko = {
 			imsProbeNotAttempted: "IMS 탐색이 시도되지 않았습니다.",
 			modemNotResolved: "모뎀이 확인되지 않아 IMS 탐색을 건너뛰었습니다.",
 			modemDisabled: "모뎀이 비활성화되어 IMS 탐색을 건너뛰었습니다.",
-			qmicliMissing: "qmicli가 설치되지 않았거나 실행할 수 없습니다.",
-			qmicliPathInvalid: "구성된 qmicli 경로가 잘못되었습니다.",
-			qmicliProbeFailed: "qmicli 기능 감지에 실패했습니다.",
-			imsProbePermissionDenied: "권한 부족으로 qmicli를 실행할 수 없습니다.",
+			imsProbePermissionDenied: "네이티브 QMI 탐색 권한이 없습니다.",
 			qmiPortUnavailable: "ModemManager가 QMI 제어 포트를 보고하지 않았습니다.",
 			qmiPortAmbiguous: "둘 이상의 QMI 제어 포트가 보고되었습니다.",
 			qmiProxyUnavailable: "QMI 프록시를 사용할 수 없습니다.",
+			nativeQmiProbeFailed: "네이티브 QMI 탐색 응답이 잘못되었습니다.",
 			imsProbeTimeout: "IMS 탐색이 시간 예산을 초과했습니다.",
 			imsServicesQueryFailed: "IMS 서비스 조회에 실패했습니다.",
 			imsServicesQueryUnavailable:
-				"qmicli가 IMS 서비스 조회를 노출하지 않습니다.",
+				"모뎀이 IMS 서비스 조회를 제공하지 않습니다.",
 			imsRegistrationQueryFailed: "IMS 등록 조회에 실패했습니다.",
 			imsRegistrationQueryUnavailable:
-				"qmicli가 IMS 등록 조회를 노출하지 않습니다.",
+				"모뎀이 IMS 등록 조회를 제공하지 않습니다.",
 			imsSettingsQueryFailed: "IMS 설정 조회에 실패했습니다.",
-			imsSettingsQueryUnavailable:
-				"qmicli가 IMS 설정 조회를 노출하지 않습니다.",
+			imsSettingsQueryUnavailable: "모뎀이 IMS 설정 조회를 제공하지 않습니다.",
+			imsVoiceOutputUnrecognized: "IMS 음성 서비스 응답을 인식할 수 없습니다.",
 			imsServicesOutputUnrecognized: "IMS 서비스 응답을 인식할 수 없습니다.",
 			imsRegistrationOutputUnrecognized: "IMS 등록 응답을 인식할 수 없습니다.",
 			imsSettingsOutputUnrecognized: "IMS 설정 응답을 인식할 수 없습니다.",
+			imsVolteSettingUnavailable:
+				"모뎀이 VoLTE 구성 필드를 보고하지 않았습니다.",
+			imsVowifiSettingUnavailable:
+				"모뎀이 VoWiFi 구성 필드를 보고하지 않았습니다.",
+			imsSmsSettingUnavailable:
+				"모뎀이 IMS SMS 구성 필드를 보고하지 않았습니다.",
 			imsServicesOutputNonstandard:
 				"IMS 서비스 응답이 비표준 레이블을 사용했습니다.",
 			imsRegistrationOutputNonstandard:

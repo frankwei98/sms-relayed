@@ -15,7 +15,7 @@ mod ims;
 #[cfg(test)]
 use ims::NoopImsProbe;
 pub use ims::SmsOverIms;
-use ims::{ImsProbe, RealImsProbe};
+use ims::{ImsProbe, NativeImsProbe};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -652,7 +652,7 @@ pub struct ModemService {
 
 impl ModemService {
     pub fn new() -> Self {
-        Self::new_with_runner_and_ims(RealMmcliRunner, RealImsProbe::new())
+        Self::new_with_runner_and_ims(RealMmcliRunner, NativeImsProbe::new())
     }
 
     #[cfg(test)]
@@ -1503,7 +1503,7 @@ mod service_tests {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut ims = SmsOverIms::default();
         ims.registration = ims::ImsRegistration::Registered;
-        ims.sms_service = ims::ImsSmsService::Available;
+        ims.sms_service = ims::ImsServiceStatus::Available;
         ims.classify();
         let service = ModemService::new_with_runner_and_ims(
             runner,
