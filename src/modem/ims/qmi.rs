@@ -121,7 +121,10 @@ impl ProxyQmiClient {
             .write_all(&service_request)
             .await
             .map_err(map_proxy_io_error)?;
-        let service_response = read_qmi_frame(&mut stream).await;
+        let service_response = read_qmi_frame(&mut stream).await.and_then(|response| {
+            QmiResponse::parse(&response, service, message)?;
+            Ok(response)
+        });
 
         let release = build_qmi_request(
             QMI_SERVICE_CTL,
@@ -129,17 +132,14 @@ impl ProxyQmiClient {
             3,
             QMI_CTL_RELEASE_CID,
             &[(0x01, &[service, client])],
-        )?;
-        stream
-            .write_all(&release)
-            .await
-            .map_err(map_proxy_io_error)?;
-        let release_response = read_qmi_frame(&mut stream).await?;
-        QmiResponse::parse(&release_response, QMI_SERVICE_CTL, QMI_CTL_RELEASE_CID)?;
+        );
+        if let Ok(release) = release {
+            // CID cleanup is advisory. Closing this per-request proxy stream also
+            // releases its clients, so cleanup must not mask a service result.
+            let _ = stream.try_write(&release);
+        }
 
-        let response = service_response?;
-        QmiResponse::parse(&response, service, message)?;
-        Ok(response)
+        service_response
     }
 
     async fn connect(&self) -> Result<UnixStream, NativeQmiError> {

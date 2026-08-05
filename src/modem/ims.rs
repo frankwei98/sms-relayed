@@ -836,7 +836,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn native_probe_reads_network_support_through_qmi_proxy_wire_protocol() {
+    async fn native_probe_preserves_network_support_when_cid_release_fails() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::UnixListener;
 
@@ -931,11 +931,7 @@ mod tests {
                 (QMI_SERVICE_NAS, 0x004d)
             );
             nas.write_all(&system_info).await.unwrap();
-            let release = read_frame(&mut nas).await;
-            assert_eq!(message_id(&release), 0x0023);
-            nas.write_all(&ctl_success(release[7], 0x0023, &[]))
-                .await
-                .unwrap();
+            drop(nas);
         });
 
         let probe =
