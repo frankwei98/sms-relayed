@@ -276,7 +276,7 @@ export function ModemStatusPanel() {
 
 function SmsOverImsCard({ value }: { value: SmsOverIms }) {
 	const { t } = useTranslation();
-	const diagnostics = [...value.reasons, ...value.warnings];
+	const diagnostics = [...new Set([...value.reasons, ...value.warnings])];
 	const booleanValue = (candidate: boolean | null) =>
 		candidate === null
 			? t("modem.value.unknown")
