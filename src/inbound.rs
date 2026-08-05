@@ -22,6 +22,7 @@ const BODY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_BODY_POLLS: usize = 600;
 const INITIAL_PERSISTENCE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const MAX_PERSISTENCE_RETRY_DELAY: Duration = Duration::from_secs(30);
+const SINGLE_MODEM_FINGERPRINT_SEED: &str = "sms-relayed-single-modem";
 
 #[derive(Debug, Clone)]
 pub struct ReceivedSms {
@@ -326,9 +327,10 @@ fn should_ignore_storage(storage: u32, filters: &[StorageType]) -> bool {
         .any(|filter| !matches!(filter, StorageType::All) && filter.should_ignore(storage))
 }
 
-/// Resolve the actual modem path for monitoring.
-/// First tries the configured path directly. If it fails and a fingerprint is
-/// stored, scans all modems and matches by fingerprint exactly once.
+/// Resolve the actual modem path for monitoring and outbound SMS.
+/// First tries the configured path directly, then scans for an enrolled
+/// fingerprint. When exactly one modem is available, it is selected as the
+/// runtime path even if its ModemManager object path changed.
 pub(crate) async fn resolve_monitor_path(
     configured_path: &str,
     modem_service: &ModemService,
@@ -343,11 +345,8 @@ pub(crate) async fn resolve_monitor_path(
                 store.backfill_dedupe_keys().await?;
                 return Ok(Some(configured_path.to_string()));
             }
-            Some(enrolled_fingerprint) => {
-                warn!("configured modem identity changed; refusing path reuse");
-                return Ok(modem_service
-                    .scan_and_match_fingerprint(enrolled_fingerprint)
-                    .await);
+            Some(_) => {
+                warn!("configured modem identity changed; checking available modems");
             }
             None => {
                 store.set_modem_fingerprint(current_fingerprint).await?;
@@ -359,12 +358,46 @@ pub(crate) async fn resolve_monitor_path(
         }
     }
 
-    let Some(stored_fingerprint) = stored_fingerprint.as_deref() else {
+    let paths = modem_service.list_all_modem_paths().await;
+    if let Some(enrolled_fingerprint) = stored_fingerprint.as_deref() {
+        let mut matches = Vec::new();
+        for path in &paths {
+            let Some(identity) = modem_service.extract_identity(path).await else {
+                continue;
+            };
+            if ModemService::compute_fingerprint(&identity) == enrolled_fingerprint {
+                matches.push(path.clone());
+            }
+        }
+        if matches.len() == 1 {
+            store.backfill_dedupe_keys().await?;
+            return Ok(matches.pop());
+        }
+    }
+
+    if paths.len() != 1 {
         return Ok(None);
-    };
-    Ok(modem_service
-        .scan_and_match_fingerprint(stored_fingerprint)
-        .await)
+    }
+
+    let selected_path = paths.into_iter().next().expect("one modem path");
+    warn!(
+        "selecting the only available modem as the runtime target at {}",
+        selected_path
+    );
+    if stored_fingerprint.is_none() {
+        let fingerprint = match modem_service.extract_identity(&selected_path).await {
+            Some(identity) => ModemService::compute_fingerprint(&identity),
+            None => {
+                warn!(
+                    "modem identity is unavailable; enrolling a path-independent single-modem identity"
+                );
+                ModemService::compute_fingerprint(SINGLE_MODEM_FINGERPRINT_SEED)
+            }
+        };
+        store.set_modem_fingerprint(fingerprint).await?;
+    }
+    store.backfill_dedupe_keys().await?;
+    Ok(Some(selected_path))
 }
 
 trait InboundSourceAdapter: Send + Sync {
@@ -528,6 +561,7 @@ mod tests {
     struct ScriptedSource {
         subscription: Mutex<Option<Box<dyn InboundSubscriptionAdapter>>>,
         subscribed: Arc<Notify>,
+        subscribed_paths: Arc<Mutex<Vec<String>>>,
     }
 
     impl ScriptedSource {
@@ -535,6 +569,7 @@ mod tests {
             Self {
                 subscription: Mutex::new(Some(Box::new(subscription))),
                 subscribed: Arc::new(Notify::new()),
+                subscribed_paths: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
@@ -542,8 +577,12 @@ mod tests {
     impl InboundSourceAdapter for ScriptedSource {
         fn subscribe<'a>(
             &'a self,
-            _modem_path: &'a str,
+            modem_path: &'a str,
         ) -> BoxFuture<'a, Result<Box<dyn InboundSubscriptionAdapter>>> {
+            self.subscribed_paths
+                .lock()
+                .unwrap()
+                .push(modem_path.to_string());
             let subscription = self.subscription.lock().unwrap().take();
             self.subscribed.notify_one();
             Box::pin(async move {
@@ -576,6 +615,66 @@ mod tests {
                     stdout: stdout.to_string(),
                     stderr: String::new(),
                     status_success: !stdout.is_empty(),
+                })
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct SingleModemRunner {
+        candidate_identity: Option<&'static str>,
+    }
+
+    impl MmcliRunner for SingleModemRunner {
+        fn run<'a>(
+            &'a self,
+            args: &'a [&'a str],
+            _timeout: Duration,
+        ) -> Pin<Box<dyn Future<Output = Result<MmcliOutput, ModemError>> + Send + 'a>> {
+            Box::pin(async move {
+                let stdout = match args {
+                    ["-L"] => {
+                        format!("{OTHER_MODEM_PATH} [test] modem\n")
+                    }
+                    ["--modem", OTHER_MODEM_PATH, "--output-json"] => self
+                        .candidate_identity
+                        .map(|identity| {
+                            format!(
+                                r#"{{"modem":{{"generic":{{"equipment-identifier":"{identity}"}}}}}}"#
+                            )
+                        })
+                        .unwrap_or_default(),
+                    _ => String::new(),
+                };
+                Ok(MmcliOutput {
+                    status_success: !stdout.is_empty(),
+                    stdout,
+                    stderr: String::new(),
+                })
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct MultipleModemsRunner;
+
+    impl MmcliRunner for MultipleModemsRunner {
+        fn run<'a>(
+            &'a self,
+            args: &'a [&'a str],
+            _timeout: Duration,
+        ) -> Pin<Box<dyn Future<Output = Result<MmcliOutput, ModemError>> + Send + 'a>> {
+            Box::pin(async move {
+                let stdout = match args {
+                    ["-L"] => format!(
+                        "{OTHER_MODEM_PATH} [test] first modem\n/org/freedesktop/ModemManager1/Modem/2 [test] second modem\n"
+                    ),
+                    _ => String::new(),
+                };
+                Ok(MmcliOutput {
+                    status_success: !stdout.is_empty(),
+                    stdout,
+                    stderr: String::new(),
                 })
             })
         }
@@ -914,6 +1013,115 @@ mod tests {
             store.modem_fingerprint().await.unwrap().as_deref(),
             Some(target.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn stale_configured_path_selects_the_only_available_modem() {
+        let store = Store::open_in_memory().unwrap();
+        let service = ModemService::new_with_runner(SingleModemRunner {
+            candidate_identity: Some("target"),
+        });
+
+        let resolved = resolve_monitor_path(MODEM_PATH, &service, &store)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.as_deref(), Some(OTHER_MODEM_PATH));
+        assert_eq!(
+            store.modem_fingerprint().await.unwrap().as_deref(),
+            Some(ModemService::compute_fingerprint("target").as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_subscribes_to_the_only_available_modem_and_publishes_its_runtime_path() {
+        let source = Arc::new(ScriptedSource::new(ScriptedSubscription {
+            messages: VecDeque::new(),
+            reads: Arc::new(AtomicUsize::new(0)),
+            dropped: Arc::new(AtomicBool::new(false)),
+        }));
+        let subscribed = source.subscribed.clone();
+        let subscribed_paths = source.subscribed_paths.clone();
+        let store = Store::open_in_memory().unwrap();
+        let modem_service = ModemService::new_with_runner(SingleModemRunner {
+            candidate_identity: Some("target"),
+        });
+        let worker = InboundWorker::new(
+            store.clone(),
+            messaging(store),
+            modem_service.clone(),
+            settings(Vec::new(), Vec::new()),
+        )
+        .with_source(source);
+
+        let run = tokio::spawn(async move { worker.run().await });
+        tokio::time::timeout(Duration::from_secs(1), subscribed.notified())
+            .await
+            .expect("worker subscribes after resolving the modem");
+
+        assert_eq!(
+            subscribed_paths.lock().unwrap().as_slice(),
+            [OTHER_MODEM_PATH]
+        );
+        assert_eq!(
+            modem_service.verified_path().as_deref(),
+            Some(OTHER_MODEM_PATH)
+        );
+
+        run.abort();
+        let _ = run.await;
+    }
+
+    #[tokio::test]
+    async fn only_available_modem_is_selected_when_identity_is_temporarily_unavailable() {
+        let store = Store::open_in_memory().unwrap();
+        let enrolled = ModemService::compute_fingerprint("target");
+        store.set_modem_fingerprint(enrolled.clone()).await.unwrap();
+        let service = ModemService::new_with_runner(SingleModemRunner {
+            candidate_identity: None,
+        });
+
+        let resolved = resolve_monitor_path(MODEM_PATH, &service, &store)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.as_deref(), Some(OTHER_MODEM_PATH));
+        assert_eq!(
+            store.modem_fingerprint().await.unwrap().as_deref(),
+            Some(enrolled.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn first_only_modem_without_identity_enrolls_a_path_independent_fingerprint() {
+        let store = Store::open_in_memory().unwrap();
+        let service = ModemService::new_with_runner(SingleModemRunner {
+            candidate_identity: None,
+        });
+
+        let resolved = resolve_monitor_path(MODEM_PATH, &service, &store)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.as_deref(), Some(OTHER_MODEM_PATH));
+        let expected_fingerprint = ModemService::compute_fingerprint(SINGLE_MODEM_FINGERPRINT_SEED);
+        assert_eq!(
+            store.modem_fingerprint().await.unwrap().as_deref(),
+            Some(expected_fingerprint.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_configured_path_does_not_select_from_multiple_unidentified_modems() {
+        let store = Store::open_in_memory().unwrap();
+        let service = ModemService::new_with_runner(MultipleModemsRunner);
+
+        let resolved = resolve_monitor_path(MODEM_PATH, &service, &store)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, None);
+        assert_eq!(store.modem_fingerprint().await.unwrap(), None);
     }
 
     #[tokio::test]
