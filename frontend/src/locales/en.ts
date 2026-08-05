@@ -62,17 +62,28 @@ export const en = {
 			unknown: "UNKNOWN",
 		},
 		smsOverIms: {
-			title: "SMS over IMS",
+			title: "IMS voice and messaging",
 			description:
-				"Reported by the modem; this does not prove the route used by each message.",
+				"VoLTE or VoWiFi is shown as active only when the modem reports IMS registration, voice service, and access technology.",
 			field: {
-				configured: "Configured",
+				lteVoiceSupport: "LTE voice capability",
+				imsVoiceSupport: "IMS voice capability",
+				volteConfigured: "VoLTE configured",
+				vowifiConfigured: "VoWiFi configured",
 				registration: "Registration",
+				voiceService: "Voice service",
+				voiceTechnology: "Voice technology",
+				smsConfigured: "SMS configured",
+				smsStatus: "SMS over IMS",
 				smsService: "SMS service",
 				technology: "Technology",
-				qmicli: "qmicli",
+				detector: "Detector",
 				qmiDevice: "QMI device",
 				evidence: "Evidence",
+			},
+			voiceStatus: {
+				volte: "VoLTE active",
+				vowifi: "VoWiFi active",
 			},
 			enum: {
 				enabled: "Enabled",
@@ -83,6 +94,7 @@ export const en = {
 				notRegistered: "Not Registered",
 				notAvailable: "Not available",
 				available: "Available",
+				unavailable: "Unavailable",
 				unknown: "Unknown",
 			},
 			availableOverWlan: "Available over WLAN",
@@ -95,6 +107,9 @@ export const en = {
 			evidence: {
 				qmiImsa: "QMI IMSA",
 				qmiIms: "QMI IMS",
+				qmiNas: "QMI NAS capability",
+				voice: "Voice",
+				sms: "SMS",
 				noEvidence: "No runtime evidence",
 			},
 		},
@@ -122,30 +137,36 @@ export const en = {
 			modemNotResolved:
 				"IMS probing was skipped because no modem was resolved.",
 			modemDisabled: "IMS probing was skipped because the modem is disabled.",
-			qmicliMissing: "qmicli is not installed or could not be executed.",
-			qmicliPathInvalid: "The configured qmicli path is invalid.",
-			qmicliProbeFailed: "qmicli capability detection failed.",
-			imsProbePermissionDenied:
-				"qmicli could not be executed due to permissions.",
+			imsProbePermissionDenied: "The native QMI probe lacks permission.",
 			qmiPortUnavailable: "No QMI control port was reported by ModemManager.",
 			qmiPortAmbiguous: "More than one QMI control port was reported.",
 			qmiProxyUnavailable: "The QMI proxy is unavailable.",
+			nativeQmiProbeFailed:
+				"The native QMI probe returned an invalid response.",
 			imsProbeTimeout: "The IMS probe exceeded its time budget.",
 			imsServicesQueryFailed: "The IMS service query failed.",
 			imsServicesQueryUnavailable:
-				"qmicli does not expose the IMS service query.",
+				"The modem does not expose the IMS service query.",
 			imsRegistrationQueryFailed: "The IMS registration query failed.",
 			imsRegistrationQueryUnavailable:
-				"qmicli does not expose the IMS registration query.",
+				"The modem does not expose the IMS registration query.",
 			imsSettingsQueryFailed: "The IMS settings query failed.",
 			imsSettingsQueryUnavailable:
-				"qmicli does not expose the IMS settings query.",
+				"The modem does not expose the IMS settings query.",
+			imsVoiceOutputUnrecognized:
+				"The IMS voice service response was not recognized.",
 			imsServicesOutputUnrecognized:
 				"The IMS service response was not recognized.",
 			imsRegistrationOutputUnrecognized:
 				"The IMS registration response was not recognized.",
 			imsSettingsOutputUnrecognized:
 				"The IMS settings response was not recognized.",
+			imsVolteSettingUnavailable:
+				"The modem did not report the VoLTE configuration field.",
+			imsVowifiSettingUnavailable:
+				"The modem did not report the VoWiFi configuration field.",
+			imsSmsSettingUnavailable:
+				"The modem did not report the IMS SMS configuration field.",
 			imsServicesOutputNonstandard:
 				"The IMS service response used a nonstandard label.",
 			imsRegistrationOutputNonstandard:

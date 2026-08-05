@@ -68,17 +68,28 @@ export const ja = {
 			unknown: "不明",
 		},
 		smsOverIms: {
-			title: "SMS over IMS",
+			title: "IMS音声とメッセージング",
 			description:
 				"モデムから報告されたものであり、各メッセージが実際に使用したルートを証明するものではありません。",
 			field: {
-				configured: "設定済み",
+				lteVoiceSupport: "LTE音声機能",
+				imsVoiceSupport: "IMS音声機能",
+				volteConfigured: "VoLTE設定",
+				vowifiConfigured: "VoWiFi設定",
 				registration: "登録ステータス",
+				voiceService: "音声サービス",
+				voiceTechnology: "音声技術",
+				smsConfigured: "SMS設定",
+				smsStatus: "SMS over IMS",
 				smsService: "SMSサービス",
 				technology: "技術",
-				qmicli: "qmicli",
+				detector: "検出器",
 				qmiDevice: "QMIデバイス",
 				evidence: "証拠",
+			},
+			voiceStatus: {
+				volte: "VoLTE使用中",
+				vowifi: "VoWiFi使用中",
 			},
 			enum: {
 				enabled: "有効",
@@ -89,6 +100,7 @@ export const ja = {
 				notRegistered: "未登録",
 				notAvailable: "利用不可",
 				available: "利用可能",
+				unavailable: "利用不可",
 				unknown: "不明",
 			},
 			availableOverWlan: "WLANで利用可能",
@@ -101,6 +113,9 @@ export const ja = {
 			evidence: {
 				qmiImsa: "QMI IMSA",
 				qmiIms: "QMI IMS",
+				qmiNas: "QMI NAS機能",
+				voice: "音声",
+				sms: "SMS",
 				noEvidence: "ランタイム証拠なし",
 			},
 		},
@@ -129,25 +144,30 @@ export const ja = {
 				"モデムが解決されなかったため、IMSプローブはスキップされました。",
 			modemDisabled:
 				"モデムが無効になっているため、IMSプローブはスキップされました。",
-			qmicliMissing: "qmicliがインストールされていないか、実行できません。",
-			qmicliPathInvalid: "設定されたqmicliパスが無効です。",
-			qmicliProbeFailed: "qmicliの機能検出に失敗しました。",
-			imsProbePermissionDenied: "権限のためqmicliを実行できませんでした。",
+			imsProbePermissionDenied: "ネイティブQMIプローブの権限がありません。",
 			qmiPortUnavailable: "ModemManagerがQMI制御ポートを報告しませんでした。",
 			qmiPortAmbiguous: "複数のQMI制御ポートが報告されました。",
 			qmiProxyUnavailable: "QMIプロキシが利用できません。",
+			nativeQmiProbeFailed: "ネイティブQMIプローブの応答が無効です。",
 			imsProbeTimeout: "IMSプローブが時間制限を超えました。",
 			imsServicesQueryFailed: "IMSサービスクエリに失敗しました。",
 			imsServicesQueryUnavailable:
-				"qmicliはIMSサービスクエリを公開していません。",
+				"モデムはIMSサービスクエリを提供していません。",
 			imsRegistrationQueryFailed: "IMS登録クエリに失敗しました。",
 			imsRegistrationQueryUnavailable:
-				"qmicliはIMS登録クエリを公開していません。",
+				"モデムはIMS登録クエリを提供していません。",
 			imsSettingsQueryFailed: "IMS設定クエリに失敗しました。",
-			imsSettingsQueryUnavailable: "qmicliはIMS設定クエリを公開していません。",
+			imsSettingsQueryUnavailable: "モデムはIMS設定クエリを提供していません。",
+			imsVoiceOutputUnrecognized: "IMS音声サービス応答を認識できませんでした。",
 			imsServicesOutputUnrecognized: "IMSサービス応答を認識できませんでした。",
 			imsRegistrationOutputUnrecognized: "IMS登録応答を認識できませんでした。",
 			imsSettingsOutputUnrecognized: "IMS設定応答を認識できませんでした。",
+			imsVolteSettingUnavailable:
+				"モデムはVoLTE設定フィールドを報告しませんでした。",
+			imsVowifiSettingUnavailable:
+				"モデムはVoWiFi設定フィールドを報告しませんでした。",
+			imsSmsSettingUnavailable:
+				"モデムはIMS SMS設定フィールドを報告しませんでした。",
 			imsServicesOutputNonstandard:
 				"IMSサービス応答が非標準のラベルを使用しました。",
 			imsRegistrationOutputNonstandard:

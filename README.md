@@ -26,7 +26,7 @@ sms-relayed 适用于插有 SIM 卡的 OpenWrt 路由器、Debian 网关、随�
 - 通过 CLI 或密码保护的 Web 控制台发送短信。
 - 在 Web 控制台中搜索、筛选、标记已读、删除和导出 CSV/JSON。
 - 查看 Modem 状态，执行启用、禁用和确认后的重置操作。
-- 在 Web Modem 页面查看可选的 SMS over IMS 辅助状态；该状态不影响主健康判定。
+- 在 Web Modem 页面通过原生 QMI 检测 IMS、VoLTE、VoWiFi 与 SMS over IMS；该状态不影响主健康判定。
 - 可选的历史保留策略，分批清理超过指定天数且没有待处理投递的消息。
 - 支持 OpenWrt procd 与 systemd 服务。
 - 支持带 SHA-256 校验、原子替换和服务重启的自更新。
@@ -37,7 +37,7 @@ sms-relayed 适用于插有 SIM 卡的 OpenWrt 路由器、Debian 网关、随�
 - ModemManager，以及一个支持短信功能的 Modem。
 - 服务用户需要访问 ModemManager 系统 D-Bus；路由器上通常以 `root` 运行。
 - `mmcli` 是 Web Modem 状态、健康诊断和设备控制的运行时依赖。没有 `mmcli` 时，短信收发仍通过 D-Bus 工作，但相关状态会显示为 `unknown`。
-- SMS over IMS 状态需要带 IMS/IMSA 命令的 `qmicli`。Debian 12 可按[运维说明](docs/operations/sms-over-ims.md)私有安装 1.36.0，不替换系统 libqmi。
+- IMS 检测由 SmsRelayed 直接实现 QMI/QMUX 协议，不依赖 `qmicli`；当前支持 ModemManager 报告的直接 QMI 端口并通过现有 `qmi-proxy` 安全共享设备。详见[运维说明](docs/operations/sms-over-ims.md)。
 - 官方 Release 当前提供静态 Linux x86_64、aarch64 和 armv7 二进制。
 
 ### 快速开始
@@ -347,7 +347,7 @@ The project consists of a Rust backend and a React frontend embedded in the bina
 - Send SMS from the CLI or the password-protected web dashboard.
 - Search, filter, mark, delete, and export message history as CSV or JSON.
 - Inspect modem health and enable, disable, or explicitly reset the modem.
-- Inspect an optional SMS over IMS auxiliary status without changing main health.
+- Inspect IMS, VoLTE, VoWiFi, and SMS over IMS through the built-in QMI probe without changing main health.
 - Optionally delete old terminal messages in batches while retaining messages with pending deliveries.
 - Run under OpenWrt procd or systemd.
 - Self-update with SHA-256 verification, atomic replacement, and service restart.
@@ -358,7 +358,7 @@ The project consists of a Rust backend and a React frontend embedded in the bina
 - ModemManager and an SMS-capable modem.
 - Permission to access ModemManager on the system bus; router installations commonly run as `root`.
 - `mmcli` is required for dashboard modem diagnostics, health details, and modem controls. SMS receive/send still uses D-Bus without it, but those status features report `unknown`.
-- SMS over IMS status requires qmicli with IMS/IMSA actions. On Debian 12, follow the [operations guide](docs/operations/sms-over-ims.md) to install a private 1.36.0 without replacing system libqmi.
+- IMS detection implements QMI/QMUX inside SmsRelayed and does not require `qmicli`. It currently supports direct QMI ports reported by ModemManager and shares the device through the existing `qmi-proxy`; see the [operations guide](docs/operations/sms-over-ims.md).
 - Official releases currently provide static Linux binaries for x86_64, aarch64, and armv7.
 
 ### Quick start

@@ -68,17 +68,28 @@ export const fr = {
 			unknown: "INCONNU",
 		},
 		smsOverIms: {
-			title: "SMS over IMS",
+			title: "Voix et messagerie IMS",
 			description:
 				"Signalé par le modem ; cela ne prouve pas la route utilisée par chaque message.",
 			field: {
-				configured: "Configuré",
+				lteVoiceSupport: "Capacité voix LTE",
+				imsVoiceSupport: "Capacité voix IMS",
+				volteConfigured: "VoLTE configuré",
+				vowifiConfigured: "VoWiFi configuré",
 				registration: "Enregistrement",
+				voiceService: "Service vocal",
+				voiceTechnology: "Technologie vocale",
+				smsConfigured: "SMS configuré",
+				smsStatus: "SMS over IMS",
 				smsService: "Service SMS",
 				technology: "Technologie",
-				qmicli: "qmicli",
+				detector: "Détecteur",
 				qmiDevice: "Périphérique QMI",
 				evidence: "Preuve",
+			},
+			voiceStatus: {
+				volte: "VoLTE actif",
+				vowifi: "VoWiFi actif",
 			},
 			enum: {
 				enabled: "Activé",
@@ -89,6 +100,7 @@ export const fr = {
 				notRegistered: "Non enregistré",
 				notAvailable: "Non disponible",
 				available: "Disponible",
+				unavailable: "Indisponible",
 				unknown: "Inconnu",
 			},
 			availableOverWlan: "Disponible via WLAN",
@@ -101,6 +113,9 @@ export const fr = {
 			evidence: {
 				qmiImsa: "QMI IMSA",
 				qmiIms: "QMI IMS",
+				qmiNas: "Capacité QMI NAS",
+				voice: "Voix",
+				sms: "SMS",
 				noEvidence: "Aucune preuve d'exécution",
 			},
 		},
@@ -128,31 +143,36 @@ export const fr = {
 			modemNotResolved:
 				"La sonde IMS a été ignorée car aucun modem n'a été résolu.",
 			modemDisabled: "La sonde IMS a été ignorée car le modem est désactivé.",
-			qmicliMissing: "qmicli n'est pas installé ou n'a pas pu être exécuté.",
-			qmicliPathInvalid: "Le chemin qmicli configuré est invalide.",
-			qmicliProbeFailed: "La détection de capacité qmicli a échoué.",
-			imsProbePermissionDenied:
-				"qmicli n'a pas pu être exécuté en raison des permissions.",
+			imsProbePermissionDenied: "La sonde QMI native manque de permissions.",
 			qmiPortUnavailable:
 				"Aucun port de contrôle QMI n'a été signalé par ModemManager.",
 			qmiPortAmbiguous: "Plus d'un port de contrôle QMI a été signalé.",
 			qmiProxyUnavailable: "Le proxy QMI est indisponible.",
+			nativeQmiProbeFailed: "La sonde QMI native a reçu une réponse invalide.",
 			imsProbeTimeout: "La sonde IMS a dépassé son budget de temps.",
 			imsServicesQueryFailed: "La requête de services IMS a échoué.",
 			imsServicesQueryUnavailable:
-				"qmicli n'expose pas la requête de services IMS.",
+				"Le modem n'expose pas la requête de services IMS.",
 			imsRegistrationQueryFailed: "La requête d'enregistrement IMS a échoué.",
 			imsRegistrationQueryUnavailable:
-				"qmicli n'expose pas la requête d'enregistrement IMS.",
+				"Le modem n'expose pas la requête d'enregistrement IMS.",
 			imsSettingsQueryFailed: "La requête de paramètres IMS a échoué.",
 			imsSettingsQueryUnavailable:
-				"qmicli n'expose pas la requête de paramètres IMS.",
+				"Le modem n'expose pas la requête de paramètres IMS.",
+			imsVoiceOutputUnrecognized:
+				"La réponse du service vocal IMS n'a pas été reconnue.",
 			imsServicesOutputUnrecognized:
 				"La réponse du service IMS n'a pas été reconnue.",
 			imsRegistrationOutputUnrecognized:
 				"La réponse d'enregistrement IMS n'a pas été reconnue.",
 			imsSettingsOutputUnrecognized:
 				"La réponse des paramètres IMS n'a pas été reconnue.",
+			imsVolteSettingUnavailable:
+				"Le modem n'a pas signalé le champ de configuration VoLTE.",
+			imsVowifiSettingUnavailable:
+				"Le modem n'a pas signalé le champ de configuration VoWiFi.",
+			imsSmsSettingUnavailable:
+				"Le modem n'a pas signalé le champ de configuration SMS IMS.",
 			imsServicesOutputNonstandard:
 				"La réponse du service IMS utilisait un libellé non standard.",
 			imsRegistrationOutputNonstandard:

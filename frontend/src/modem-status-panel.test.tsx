@@ -47,16 +47,23 @@ const status = {
 	},
 	sms_over_ims: {
 		status: "available" as const,
+		voice_over_ims: "vowifi" as const,
 		support: "supported" as const,
+		lte_voice_support: true,
+		ims_voice_support: true,
 		configured: "enabled" as const,
+		volte_configured: "enabled" as const,
+		vowifi_configured: "enabled" as const,
 		registration: "registered" as const,
+		voice_service: "available" as const,
+		voice_technology: "wlan" as const,
 		sms_service: "available" as const,
 		technology: "wlan" as const,
 		probe: {
-			tool: "qmicli",
+			tool: "native-qmi",
 			available: true,
-			version_raw: "qmicli 1.36.0",
-			transport: "direct_qmi" as const,
+			version_raw: "native QMI · CTL 1.5",
+			transport: "qmi_proxy" as const,
 			device: "/dev/wwan0qmi0",
 			capabilities: {
 				ims_settings: true,
@@ -68,6 +75,7 @@ const status = {
 			"qmi_ims_settings",
 			"qmi_imsa_registration",
 			"qmi_imsa_services",
+			"qmi_imsa_voice",
 		],
 		reasons: [],
 		warnings: [],
@@ -110,15 +118,57 @@ describe("ModemStatusPanel phone number", () => {
 	});
 });
 
-describe("ModemStatusPanel SMS over IMS", () => {
-	test("shows available IMS SMS over WLAN with its evidence", async () => {
+describe("ModemStatusPanel IMS detection", () => {
+	test("shows active VoWiFi and native QMI evidence", async () => {
 		mocks.fetchModemStatus.mockResolvedValue(status);
 
 		render(<ModemStatusPanel />);
 
-		expect(await screen.findByText("SMS over IMS")).toBeTruthy();
+		expect(await screen.findByText("IMS voice and messaging")).toBeTruthy();
+		expect(screen.getByText("VoWiFi active")).toBeTruthy();
 		expect(screen.getByText("Available over WLAN")).toBeTruthy();
-		expect(screen.getByText("QMI IMSA · WLAN")).toBeTruthy();
+		expect(screen.getByText("QMI IMSA · Voice WLAN · SMS WLAN")).toBeTruthy();
+		expect(screen.getByText("native QMI · CTL 1.5")).toBeTruthy();
+	});
+
+	test("shows voice and SMS access technologies independently", async () => {
+		mocks.fetchModemStatus.mockResolvedValue({
+			...status,
+			sms_over_ims: {
+				...status.sms_over_ims,
+				voice_over_ims: "volte",
+				voice_technology: "wwan",
+				technology: "wlan",
+			},
+		});
+
+		render(<ModemStatusPanel />);
+
+		expect(await screen.findByText("VoLTE active")).toBeTruthy();
+		expect(screen.getByText("QMI IMSA · Voice WWAN · SMS WLAN")).toBeTruthy();
+	});
+
+	test("keeps NAS IMS capability evidence separate from active VoLTE", async () => {
+		mocks.fetchModemStatus.mockResolvedValue({
+			...status,
+			sms_over_ims: {
+				...status.sms_over_ims,
+				status: "unknown",
+				voice_over_ims: "unknown",
+				registration: "unknown",
+				voice_service: "unknown",
+				voice_technology: "unknown",
+				sms_service: "unknown",
+				technology: "unknown",
+				evidence: ["qmi_nas_ims_voice_support"],
+				reasons: ["ims_registration_query_unavailable"],
+			},
+		});
+
+		render(<ModemStatusPanel />);
+
+		expect(await screen.findByText("QMI NAS capability")).toBeTruthy();
+		expect(screen.queryByText("VoLTE active")).toBeNull();
 	});
 
 	test.each([

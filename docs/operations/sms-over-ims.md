@@ -1,104 +1,73 @@
-# SMS over IMS diagnostics
+# Native IMS, VoLTE, and VoWiFi diagnostics
 
-The authenticated Modem page can show a best-effort `SMS over IMS` status. This
-is auxiliary diagnostic information: it does not change the main modem health
-and it is not queried by the public `/api/health` endpoint.
+The authenticated Modem page includes a read-only IMS probe implemented inside
+SmsRelayed. It does not execute or parse `qmicli`, and it does not change the
+main modem health or the public `/api/health` result.
 
-## What the status means
+## Evidence levels
 
-SmsRelayed asks the modem for three independent QMI values:
+The probe deliberately keeps three different claims separate:
 
-- IMSA SMS service status and its registration technology.
-- IMSA registration status.
-- The IMS SMS service enabled setting.
+- **Capability:** NAS `Get System Info` may report LTE voice support and IMS
+  voice support. These flags say that the modem/network combination advertises
+  the capability; they do not prove IMS registration or an active call route.
+- **Configuration:** IMS `Get Services Enabled` may report separate VoLTE,
+  VoWiFi, and SMS enable flags. An enabled flag is not proof that the service is
+  registered or currently usable.
+- **Runtime state:** IMSA registration, voice/SMS service status, and access
+  technology are the strongest available modem evidence.
 
-Runtime registration and service values determine the main status. The enabled
-setting is explanatory only. `Available over WLAN` means the modem reports IMS
-SMS service on WLAN or interworking WLAN. It does not prove the route used by an
-individual message.
+SmsRelayed reports **VoLTE active** only when IMSA reports all of the following:
 
-The first implementation supports only a direct QMI control port reported by
-ModemManager, for example `/dev/wwan0qmi0`. It always uses `qmi-proxy`. It does
-not probe QMI-over-MBIM, AT commands, or QRTR.
+1. IMS is registered;
+2. voice service is available; and
+3. the voice access technology is WWAN.
 
-An `Unknown` result is safe and expected when qmicli is absent, its IMS actions
-are missing, a QMI port cannot be selected unambiguously, the proxy is
-unavailable, or the modem does not return recognized fields. A recognized
-nonstandard label produces a warning while retaining the parsed result.
+It reports **VoWiFi active** only when the first two conditions hold and the
+voice access technology is WLAN or interworking WLAN. Missing or contradictory
+fields produce `Unknown`, `Limited`, or another conservative state instead of a
+positive claim.
 
-Some MSM8916/SD410 firmware enumerates vendor service IDs but rejects the
-standard IMS and IMSA clients with QMI `InvalidServiceType`. SmsRelayed reports
-this honestly as `Unknown` with fixed query-failure reasons; the service version
-IDs alone are not treated as IMS evidence.
+SMS over IMS remains a separate status. Even an available IMS SMS service does
+not prove the route used by each individual message.
 
-## Debian 12 and qmicli 1.36.0
+## Transport
 
-Debian 12 ships qmicli 1.32.x, which does not expose the required IMS/IMSA
-actions. The optional helper builds the official libqmi 1.36.0 source and
-installs it privately:
+SmsRelayed implements the required QMUX framing, qmi-proxy handshake, CTL client
+ID lifecycle, response validation, and these read-only QMI requests:
 
-```sh
-sudo scripts/install-private-qmicli-debian.sh
-```
+- CTL `Get Version Info` for service discovery;
+- NAS `Get System Info` for LTE/IMS voice capability;
+- IMSA `Get Registration Status` and `Get Services Status` for runtime state;
+- IMS `Get Services Enabled` for configuration evidence.
 
-The helper:
+The current transport supports a direct QMI control port reported by
+ModemManager, such as `/dev/wwan0qmi0`, and shares it through the existing
+abstract `qmi-proxy` socket. It does not yet support QMI-over-MBIM, QRTR, or AT
+command fallbacks.
 
-- verifies the pinned source archive with SHA-256;
-- builds only direct-QMI support and installs it under
-  `/opt/sms-relayed/libqmi-1.36.0`;
-- atomically points `/opt/sms-relayed/libqmi` at that version;
-- marks the version directory as helper-owned and refuses to overwrite
-  conflicting operator-managed paths;
-- writes
-  `/etc/systemd/system/sms-relayed.service.d/qmicli.conf` with
-  `SMS_RELAYED_QMICLI_PATH`;
-- restarts `sms-relayed.service` only if it was active before installation;
-- restores the previous symlink and drop-in if that restart fails.
+## Interpreting `Unknown`
 
-It does not replace Debian's system libqmi or qmicli packages.
+`Unknown` is expected when:
 
-Use `--no-restart` to leave an active service running:
+- ModemManager reports no unambiguous QMI port;
+- qmi-proxy is unavailable or access is denied;
+- the modem omits the IMS (`0x12`) or IMSA (`0x21`) standard services;
+- a service rejects the request or returns an unrecognized response; or
+- the five-second probe budget expires.
 
-```sh
-sudo scripts/install-private-qmicli-debian.sh --no-restart
-```
+Some MSM8916/SD410 firmware reports NAS IMS voice capability but does not expose
+the standard IMS/IMSA services. In that case SmsRelayed preserves the capability
+claim while leaving VoLTE/VoWiFi runtime state `Unknown`. Service IDs or enabled
+settings alone are never promoted to runtime evidence.
 
-Remove only the private version and managed systemd binding with:
+## Enabling services
 
-```sh
-sudo scripts/install-private-qmicli-debian.sh --uninstall
-```
+This probe is intentionally read-only. Enabling VoLTE or VoWiFi can require a
+carrier-specific modem profile, credentials, provisioning, and persistent NV or
+PDC changes. A generic write can break cellular registration, so SmsRelayed does
+not expose an enable action until a modem-specific transaction can be identified,
+validated, and rolled back safely.
 
-Uninstall refuses to recursively remove a version directory without the
-helper's ownership marker. It stages the managed binding and restores it if
-`daemon-reload` or the service restart fails.
-
-## Verification
-
-Check the private binary and service binding:
-
-```sh
-/opt/sms-relayed/libqmi/bin/qmicli-wrapper --version
-/opt/sms-relayed/libqmi/bin/qmicli-wrapper --help-all |
-  grep -E -- 'ims-get-ims-services-enabled-setting|imsa-get-ims-(registration|services)-status'
-systemctl cat sms-relayed.service
-systemctl status sms-relayed.service
-```
-
-For a direct QMI port such as `/dev/wwan0qmi0`, the three underlying diagnostic
-queries are:
-
-```sh
-sudo /opt/sms-relayed/libqmi/bin/qmicli-wrapper \
-  -d /dev/wwan0qmi0 --device-open-proxy \
-  --imsa-get-ims-services-status
-sudo /opt/sms-relayed/libqmi/bin/qmicli-wrapper \
-  -d /dev/wwan0qmi0 --device-open-proxy \
-  --imsa-get-ims-registration-status
-sudo /opt/sms-relayed/libqmi/bin/qmicli-wrapper \
-  -d /dev/wwan0qmi0 --device-open-proxy \
-  --ims-get-ims-services-enabled-setting
-```
-
-Do not include raw command output in public diagnostics or logs; modem output
-may contain network-specific details.
+Do not include raw QMI frames in public diagnostics or logs; responses may
+contain network-specific details.

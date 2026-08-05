@@ -10,21 +10,35 @@ export type SmsOverIms = {
 		| "not_registered"
 		| "unavailable"
 		| "unknown";
+	voice_over_ims:
+		| "volte"
+		| "vowifi"
+		| "registering"
+		| "limited"
+		| "not_registered"
+		| "unavailable"
+		| "unknown";
 	support: "supported" | "unsupported" | "unknown";
+	lte_voice_support: boolean | null;
+	ims_voice_support: boolean | null;
 	configured: "enabled" | "disabled" | "unknown";
+	volte_configured: "enabled" | "disabled" | "unknown";
+	vowifi_configured: "enabled" | "disabled" | "unknown";
 	registration:
 		| "registered"
 		| "registering"
 		| "limited"
 		| "not_registered"
 		| "unknown";
+	voice_service: "available" | "limited" | "unavailable" | "unknown";
+	voice_technology: "wwan" | "wlan" | "interworking_wlan" | "unknown";
 	sms_service: "available" | "limited" | "unavailable" | "unknown";
 	technology: "wwan" | "wlan" | "interworking_wlan" | "unknown";
 	probe: {
 		tool: string;
 		available: boolean;
 		version_raw: string | null;
-		transport: "direct_qmi" | "unknown";
+		transport: "qmi_proxy" | "unknown";
 		device: string | null;
 		capabilities: {
 			ims_settings: boolean;

@@ -1,17 +1,33 @@
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Serialize;
-use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Command;
+
+mod qmi;
+use qmi::{
+    NativeQmiError, ProxyQmiClient, QmiRequestClient, QmiResponse, QMI_CTL_GET_VERSION_INFO,
+    QMI_IMSA_GET_REGISTRATION_STATUS, QMI_IMSA_GET_SERVICES_STATUS, QMI_IMS_GET_SERVICES_ENABLED,
+    QMI_NAS_GET_SYSTEM_INFO, QMI_SERVICE_CTL, QMI_SERVICE_IMS, QMI_SERVICE_IMSA, QMI_SERVICE_NAS,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SmsOverImsStatus {
     Available,
+    Registering,
+    Limited,
+    NotRegistered,
+    Unavailable,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceOverImsStatus {
+    Volte,
+    Vowifi,
     Registering,
     Limited,
     NotRegistered,
@@ -48,7 +64,7 @@ pub enum ImsRegistration {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ImsSmsService {
+pub enum ImsServiceStatus {
     Available,
     Limited,
     Unavailable,
@@ -67,8 +83,7 @@ pub enum ImsTechnology {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImsTransport {
-    #[allow(dead_code)]
-    DirectQmi,
+    QmiProxy,
     Unknown,
 }
 
@@ -92,10 +107,17 @@ pub struct ImsProbeInfo {
 #[derive(Debug, Clone, Serialize)]
 pub struct SmsOverIms {
     pub status: SmsOverImsStatus,
+    pub voice_over_ims: VoiceOverImsStatus,
     pub support: ImsSupport,
+    pub lte_voice_support: Option<bool>,
+    pub ims_voice_support: Option<bool>,
     pub configured: ImsConfigured,
+    pub volte_configured: ImsConfigured,
+    pub vowifi_configured: ImsConfigured,
     pub registration: ImsRegistration,
-    pub sms_service: ImsSmsService,
+    pub voice_service: ImsServiceStatus,
+    pub voice_technology: ImsTechnology,
+    pub sms_service: ImsServiceStatus,
     pub technology: ImsTechnology,
     pub probe: ImsProbeInfo,
     pub evidence: Vec<String>,
@@ -107,13 +129,20 @@ impl Default for SmsOverIms {
     fn default() -> Self {
         Self {
             status: SmsOverImsStatus::Unknown,
+            voice_over_ims: VoiceOverImsStatus::Unknown,
             support: ImsSupport::Unknown,
+            lte_voice_support: None,
+            ims_voice_support: None,
             configured: ImsConfigured::Unknown,
+            volte_configured: ImsConfigured::Unknown,
+            vowifi_configured: ImsConfigured::Unknown,
             registration: ImsRegistration::Unknown,
-            sms_service: ImsSmsService::Unknown,
+            voice_service: ImsServiceStatus::Unknown,
+            voice_technology: ImsTechnology::Unknown,
+            sms_service: ImsServiceStatus::Unknown,
             technology: ImsTechnology::Unknown,
             probe: ImsProbeInfo {
-                tool: "qmicli",
+                tool: "native-qmi",
                 available: false,
                 version_raw: None,
                 transport: ImsTransport::Unknown,
@@ -130,18 +159,18 @@ impl Default for SmsOverIms {
 impl SmsOverIms {
     pub fn classify(&mut self) {
         self.support = if self.configured != ImsConfigured::Unknown
-            || self.sms_service != ImsSmsService::Unknown
+            || self.sms_service != ImsServiceStatus::Unknown
         {
             ImsSupport::Supported
         } else {
             ImsSupport::Unknown
         };
         self.status = if self.registration == ImsRegistration::Registered
-            && self.sms_service == ImsSmsService::Available
+            && self.sms_service == ImsServiceStatus::Available
         {
             SmsOverImsStatus::Available
         } else if self.registration == ImsRegistration::Limited
-            || self.sms_service == ImsSmsService::Limited
+            || self.sms_service == ImsServiceStatus::Limited
         {
             SmsOverImsStatus::Limited
         } else if self.registration == ImsRegistration::Registering {
@@ -149,446 +178,141 @@ impl SmsOverIms {
         } else if self.registration == ImsRegistration::NotRegistered {
             SmsOverImsStatus::NotRegistered
         } else if self.registration == ImsRegistration::Registered
-            && self.sms_service == ImsSmsService::Unavailable
+            && self.sms_service == ImsServiceStatus::Unavailable
         {
             SmsOverImsStatus::Unavailable
         } else {
             SmsOverImsStatus::Unknown
         };
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedImsaServices {
-    pub sms_service: ImsSmsService,
-    pub technology: ImsTechnology,
-    pub nonstandard: bool,
-}
-
-pub fn parse_imsa_services(raw: &str) -> ParsedImsaServices {
-    let mut parsed = ParsedImsaServices {
-        sms_service: ImsSmsService::Unknown,
-        technology: ImsTechnology::Unknown,
-        nonstandard: false,
-    };
-    let mut in_sms_section = false;
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.eq_ignore_ascii_case("SMS:") {
-            in_sms_section = true;
-            continue;
-        }
-        if trimmed.ends_with(':') {
-            in_sms_section = false;
-            continue;
-        }
-        let Some((label, value)) = line.trim().split_once(':') else {
-            continue;
-        };
-        let label = label.trim().to_ascii_lowercase();
-        let value = normalized_value(value);
-        if (in_sms_section && label == "status") || label == "ims sms service status" {
-            parsed.nonstandard |= label == "ims sms service status";
-            parsed.sms_service = match value.as_str() {
-                "available" | "full service" => ImsSmsService::Available,
-                "limited" | "limited service" => ImsSmsService::Limited,
-                "unavailable" | "no service" => ImsSmsService::Unavailable,
-                _ => ImsSmsService::Unknown,
-            };
-        } else if (in_sms_section && label == "technology")
-            || label == "ims sms service rat"
-            || label == "ims sms service technology"
+        self.voice_over_ims = if self.registration == ImsRegistration::Registered
+            && self.voice_service == ImsServiceStatus::Available
         {
-            parsed.nonstandard |= label != "technology";
-            parsed.technology = match value.as_str() {
-                "wwan" => ImsTechnology::Wwan,
-                "wlan" => ImsTechnology::Wlan,
-                "interworking wlan" | "interworking-wlan" | "iwlan" => {
-                    ImsTechnology::InterworkingWlan
-                }
-                _ => ImsTechnology::Unknown,
-            };
-        }
-    }
-    parsed
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedImsaRegistration {
-    pub registration: ImsRegistration,
-    pub nonstandard: bool,
-}
-
-pub fn parse_imsa_registration(raw: &str) -> ParsedImsaRegistration {
-    let mut parsed = ParsedImsaRegistration {
-        registration: ImsRegistration::Unknown,
-        nonstandard: false,
-    };
-    let mut in_registration_section = false;
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.to_ascii_lowercase().ends_with("ims registration:") {
-            in_registration_section = true;
-            continue;
-        }
-        let Some((label, value)) = line.trim().split_once(':') else {
-            continue;
-        };
-        let label = label.trim().to_ascii_lowercase();
-        if !(in_registration_section && label == "status")
-            && label != "ims registration status"
-            && label != "registration status"
+            match self.voice_technology {
+                ImsTechnology::Wwan => VoiceOverImsStatus::Volte,
+                ImsTechnology::Wlan | ImsTechnology::InterworkingWlan => VoiceOverImsStatus::Vowifi,
+                ImsTechnology::Unknown => VoiceOverImsStatus::Unknown,
+            }
+        } else if self.registration == ImsRegistration::Limited
+            || self.voice_service == ImsServiceStatus::Limited
         {
-            continue;
-        }
-        parsed.nonstandard |= label != "status";
-        parsed.registration = match normalized_value(value).as_str() {
-            "registered" => ImsRegistration::Registered,
-            "registering" => ImsRegistration::Registering,
-            "limited" | "limited service" => ImsRegistration::Limited,
-            "not registered" | "not-registered" => ImsRegistration::NotRegistered,
-            _ => ImsRegistration::Unknown,
-        };
-    }
-    parsed
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedImsSettings {
-    pub configured: ImsConfigured,
-    pub nonstandard: bool,
-}
-
-pub fn parse_ims_settings(raw: &str) -> ParsedImsSettings {
-    let mut parsed = ParsedImsSettings {
-        configured: ImsConfigured::Unknown,
-        nonstandard: false,
-    };
-    for line in raw.lines() {
-        let Some((label, value)) = line.trim().split_once(':') else {
-            continue;
-        };
-        let label = label.trim().to_ascii_lowercase();
-        if label != "sms service enabled"
-            && label != "ims sms service"
-            && label != "ims sms enabled"
+            VoiceOverImsStatus::Limited
+        } else if self.registration == ImsRegistration::Registering {
+            VoiceOverImsStatus::Registering
+        } else if self.registration == ImsRegistration::NotRegistered {
+            VoiceOverImsStatus::NotRegistered
+        } else if self.registration == ImsRegistration::Registered
+            && self.voice_service == ImsServiceStatus::Unavailable
         {
-            continue;
-        }
-        parsed.nonstandard |= label != "sms service enabled";
-        parsed.configured = match normalized_value(value).as_str() {
-            "enabled" | "yes" | "true" => ImsConfigured::Enabled,
-            "disabled" | "no" | "false" => ImsConfigured::Disabled,
-            _ => ImsConfigured::Unknown,
+            VoiceOverImsStatus::Unavailable
+        } else {
+            VoiceOverImsStatus::Unknown
         };
     }
-    parsed
 }
 
-fn normalized_value(value: &str) -> String {
-    value
-        .trim()
-        .trim_matches(|character| matches!(character, '\'' | '"'))
-        .trim()
-        .to_ascii_lowercase()
+fn qmi_imsa_registration(value: Option<u32>) -> ImsRegistration {
+    match value {
+        Some(0) => ImsRegistration::NotRegistered,
+        Some(1) => ImsRegistration::Registering,
+        Some(2) => ImsRegistration::Registered,
+        Some(3) => ImsRegistration::Limited,
+        _ => ImsRegistration::Unknown,
+    }
 }
 
-#[derive(Debug, Clone)]
-pub struct QmicliOutput {
-    pub stdout: String,
-    pub status_success: bool,
+fn qmi_imsa_service(value: Option<u32>) -> ImsServiceStatus {
+    match value {
+        Some(0) => ImsServiceStatus::Unavailable,
+        Some(1) => ImsServiceStatus::Limited,
+        Some(2) => ImsServiceStatus::Available,
+        _ => ImsServiceStatus::Unknown,
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QmicliRunError {
-    Missing,
-    PathInvalid,
-    PermissionDenied,
-    ProxyUnavailable,
-    Timeout,
-    Failed,
+fn qmi_imsa_technology(value: Option<u32>) -> ImsTechnology {
+    match value {
+        Some(0) => ImsTechnology::Wlan,
+        Some(1) => ImsTechnology::Wwan,
+        Some(2) => ImsTechnology::InterworkingWlan,
+        _ => ImsTechnology::Unknown,
+    }
 }
 
-pub trait QmicliRunner: Send + Sync {
-    fn run<'a>(
-        &'a self,
-        args: &'a [String],
-        timeout: Duration,
-    ) -> Pin<Box<dyn Future<Output = Result<QmicliOutput, QmicliRunError>> + Send + 'a>>;
+fn qmi_configured(value: Option<bool>) -> ImsConfigured {
+    match value {
+        Some(true) => ImsConfigured::Enabled,
+        Some(false) => ImsConfigured::Disabled,
+        None => ImsConfigured::Unknown,
+    }
+}
+
+#[derive(Debug)]
+struct QmiServiceVersions {
+    ctl_version: Option<(u16, u16)>,
+    nas: bool,
+    ims: bool,
+    imsa: bool,
+}
+
+fn parse_service_versions(response: &QmiResponse) -> Result<QmiServiceVersions, NativeQmiError> {
+    let value = response.tlvs.get(&0x01).ok_or(NativeQmiError::Protocol)?;
+    let (&count, services) = value.split_first().ok_or(NativeQmiError::Protocol)?;
+    if services.len() != usize::from(count) * 5 {
+        return Err(NativeQmiError::Protocol);
+    }
+    let mut parsed = QmiServiceVersions {
+        ctl_version: None,
+        nas: false,
+        ims: false,
+        imsa: false,
+    };
+    for service in services.chunks_exact(5) {
+        let version = (
+            u16::from_le_bytes([service[1], service[2]]),
+            u16::from_le_bytes([service[3], service[4]]),
+        );
+        match service[0] {
+            QMI_SERVICE_CTL => parsed.ctl_version = Some(version),
+            QMI_SERVICE_NAS => parsed.nas = true,
+            QMI_SERVICE_IMS => parsed.ims = true,
+            QMI_SERVICE_IMSA => parsed.imsa = true,
+            _ => {}
+        }
+    }
+    Ok(parsed)
 }
 
 #[derive(Clone)]
-pub struct RealQmicliRunner {
-    program: PathBuf,
-    path_valid: bool,
+pub struct NativeImsProbe {
+    client: Arc<dyn QmiRequestClient>,
 }
 
-impl RealQmicliRunner {
-    fn from_env() -> Self {
-        match std::env::var_os("SMS_RELAYED_QMICLI_PATH") {
-            Some(path) => {
-                let path = PathBuf::from(path);
-                let path_valid = path.is_absolute();
-                Self {
-                    program: path,
-                    path_valid,
-                }
-            }
-            None => Self {
-                program: PathBuf::from("qmicli"),
-                path_valid: true,
-            },
-        }
-    }
-}
-
-impl QmicliRunner for RealQmicliRunner {
-    fn run<'a>(
-        &'a self,
-        args: &'a [String],
-        timeout: Duration,
-    ) -> Pin<Box<dyn Future<Output = Result<QmicliOutput, QmicliRunError>> + Send + 'a>> {
-        Box::pin(async move {
-            if !self.path_valid {
-                return Err(QmicliRunError::PathInvalid);
-            }
-            let mut command = Command::new(&self.program);
-            command
-                .args(args)
-                .env("LC_ALL", "C")
-                .kill_on_drop(true)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            let mut child = command.spawn().map_err(map_spawn_error)?;
-            let stdout = child.stdout.take().ok_or(QmicliRunError::Failed)?;
-            let stderr = child.stderr.take().ok_or(QmicliRunError::Failed)?;
-            let (overflow_tx, mut overflow_rx) = tokio::sync::mpsc::channel(1);
-            let mut stdout_task = tokio::spawn(read_capped(stdout, overflow_tx.clone()));
-            let mut stderr_task = tokio::spawn(read_capped(stderr, overflow_tx.clone()));
-            let deadline = tokio::time::Instant::now() + timeout;
-
-            let status = tokio::time::timeout_at(deadline, async {
-                tokio::select! {
-                    status = child.wait() => status.map_err(|_| QmicliRunError::Failed),
-                    Some(()) = overflow_rx.recv() => Err(QmicliRunError::Failed),
-                }
-            })
-            .await;
-            let status = match status {
-                Ok(Ok(status)) => status,
-                Ok(Err(error)) => {
-                    terminate_child(&mut child);
-                    abort_readers(&mut stdout_task, &mut stderr_task).await;
-                    return Err(error);
-                }
-                Err(_) => {
-                    terminate_child(&mut child);
-                    abort_readers(&mut stdout_task, &mut stderr_task).await;
-                    return Err(QmicliRunError::Timeout);
-                }
-            };
-            drop(overflow_tx);
-            let drained = tokio::time::timeout_at(deadline, async {
-                let stdout = (&mut stdout_task)
-                    .await
-                    .map_err(|_| QmicliRunError::Failed)??;
-                let stderr = (&mut stderr_task)
-                    .await
-                    .map_err(|_| QmicliRunError::Failed)??;
-                Ok::<_, QmicliRunError>((stdout, stderr))
-            })
-            .await;
-            let (stdout, stderr) = match drained {
-                Ok(Ok(output)) => output,
-                Ok(Err(error)) => {
-                    terminate_child(&mut child);
-                    abort_readers(&mut stdout_task, &mut stderr_task).await;
-                    return Err(error);
-                }
-                Err(_) => {
-                    terminate_child(&mut child);
-                    abort_readers(&mut stdout_task, &mut stderr_task).await;
-                    return Err(QmicliRunError::Timeout);
-                }
-            };
-            let stderr = String::from_utf8_lossy(&stderr);
-            if !status.success() {
-                let lower = stderr.to_ascii_lowercase();
-                if lower.contains("permission denied") || lower.contains("operation not permitted")
-                {
-                    return Err(QmicliRunError::PermissionDenied);
-                }
-                if lower.contains("qmi-proxy") || lower.contains("proxy") {
-                    return Err(QmicliRunError::ProxyUnavailable);
-                }
-            }
-            Ok(QmicliOutput {
-                stdout: String::from_utf8_lossy(&stdout).to_string(),
-                status_success: status.success(),
-            })
-        })
-    }
-}
-
-const MAX_QMICLI_OUTPUT_BYTES: usize = 64 * 1024;
-
-fn map_spawn_error(error: std::io::Error) -> QmicliRunError {
-    if error.kind() == std::io::ErrorKind::NotFound {
-        QmicliRunError::Missing
-    } else if error.kind() == std::io::ErrorKind::PermissionDenied {
-        QmicliRunError::PermissionDenied
-    } else {
-        QmicliRunError::Failed
-    }
-}
-
-async fn read_capped<R>(
-    mut reader: R,
-    overflow: tokio::sync::mpsc::Sender<()>,
-) -> Result<Vec<u8>, QmicliRunError>
-where
-    R: AsyncRead + Unpin,
-{
-    let mut output = Vec::new();
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let read = reader
-            .read(&mut buffer)
-            .await
-            .map_err(|_| QmicliRunError::Failed)?;
-        if read == 0 {
-            return Ok(output);
-        }
-        let remaining = MAX_QMICLI_OUTPUT_BYTES.saturating_sub(output.len());
-        output.extend_from_slice(&buffer[..read.min(remaining)]);
-        if read > remaining {
-            let _ = overflow.try_send(());
-            return Err(QmicliRunError::Failed);
-        }
-    }
-}
-
-fn terminate_child(child: &mut tokio::process::Child) {
-    let _ = child.start_kill();
-}
-
-async fn abort_readers(
-    stdout: &mut tokio::task::JoinHandle<Result<Vec<u8>, QmicliRunError>>,
-    stderr: &mut tokio::task::JoinHandle<Result<Vec<u8>, QmicliRunError>>,
-) {
-    stdout.abort();
-    stderr.abort();
-    let _ = tokio::join!(stdout, stderr);
-}
-
-pub trait ImsProbe: Send + Sync {
-    fn probe<'a>(
-        &'a self,
-        modem_output: &'a str,
-        json: bool,
-        enabled: Option<bool>,
-    ) -> Pin<Box<dyn Future<Output = SmsOverIms> + Send + 'a>>;
-}
-
-#[cfg(test)]
-#[derive(Clone, Default)]
-pub struct NoopImsProbe;
-
-#[cfg(test)]
-impl ImsProbe for NoopImsProbe {
-    fn probe<'a>(
-        &'a self,
-        _modem_output: &'a str,
-        _json: bool,
-        _enabled: Option<bool>,
-    ) -> Pin<Box<dyn Future<Output = SmsOverIms> + Send + 'a>> {
-        Box::pin(async { SmsOverIms::default() })
-    }
-}
-
-#[derive(Clone)]
-struct ToolCapabilities {
-    version: Option<String>,
-    capabilities: ImsCapabilities,
-}
-
-#[derive(Clone)]
-pub struct RealImsProbe {
-    runner: Arc<dyn QmicliRunner>,
-    tool: Arc<Mutex<Option<Result<ToolCapabilities, QmicliRunError>>>>,
-    flight: Arc<tokio::sync::Mutex<()>>,
-    last: Arc<Mutex<Option<(Instant, SmsOverIms)>>>,
-}
-
-impl RealImsProbe {
+impl NativeImsProbe {
     pub fn new() -> Self {
-        Self::with_runner(RealQmicliRunner::from_env())
+        Self::with_client(ProxyQmiClient::new())
     }
 
-    pub fn with_runner<R>(runner: R) -> Self
+    fn with_client<C>(client: C) -> Self
     where
-        R: QmicliRunner + 'static,
+        C: QmiRequestClient + 'static,
     {
         Self {
-            runner: Arc::new(runner),
-            tool: Arc::new(Mutex::new(None)),
-            flight: Arc::new(tokio::sync::Mutex::new(())),
-            last: Arc::new(Mutex::new(None)),
+            client: Arc::new(client),
         }
     }
 
-    async fn detect_tool(
+    async fn request_response(
         &self,
+        device: &str,
+        service: u8,
+        message: u16,
         deadline: tokio::time::Instant,
-    ) -> Result<ToolCapabilities, QmicliRunError> {
-        if let Some(cached) = self.tool.lock().unwrap().clone() {
-            return cached;
-        }
-        let detected = async {
-            let help = self
-                .runner
-                .run(
-                    &["--help-all".to_string()],
-                    remaining_until(deadline).ok_or(QmicliRunError::Timeout)?,
-                )
-                .await?;
-            if !help.status_success {
-                return Err(QmicliRunError::Failed);
-            }
-            let version = match remaining_until(deadline) {
-                Some(remaining) => self
-                    .runner
-                    .run(
-                        &["--version".to_string()],
-                        remaining.min(Duration::from_millis(250)),
-                    )
-                    .await
-                    .ok()
-                    .filter(|output| output.status_success)
-                    .and_then(|output| output.stdout.lines().next().map(ToString::to_string)),
-                None => None,
-            };
-            Ok(ToolCapabilities {
-                version,
-                capabilities: ImsCapabilities {
-                    ims_settings: help
-                        .stdout
-                        .contains("--ims-get-ims-services-enabled-setting"),
-                    imsa_registration: help.stdout.contains("--imsa-get-ims-registration-status"),
-                    imsa_services: help.stdout.contains("--imsa-get-ims-services-status"),
-                },
-            })
-        };
-        let detected = detected.await;
-        if let Err(error) = detected.as_ref() {
-            log::warn!(
-                "SMS over IMS qmicli capability probe failed: {}",
-                tool_error_code(*error)
-            );
-            return detected;
-        }
-        *self.tool.lock().unwrap() = Some(detected.clone());
-        detected
+    ) -> Result<QmiResponse, NativeQmiError> {
+        let timeout = remaining_until(deadline).ok_or(NativeQmiError::Timeout)?;
+        self.client
+            .request(device, service, message, timeout)
+            .await
+            .and_then(|raw| QmiResponse::parse(&raw, service, message))
     }
 
     async fn probe_inner(
@@ -618,111 +342,147 @@ impl RealImsProbe {
                 return result;
             }
         };
-        result.probe.transport = ImsTransport::DirectQmi;
+        result.probe.tool = "native-qmi";
+        result.probe.transport = ImsTransport::QmiProxy;
         result.probe.device = Some(device.clone());
         result.reasons.clear();
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let tool = match self.detect_tool(deadline).await {
-            Ok(tool) => tool,
+        let versions = match self
+            .request_response(&device, QMI_SERVICE_CTL, QMI_CTL_GET_VERSION_INFO, deadline)
+            .await
+            .and_then(|response| parse_service_versions(&response))
+        {
+            Ok(versions) => versions,
             Err(error) => {
-                result.reasons.push(tool_error_code(error).to_string());
+                result.reasons.push(native_error_code(error).to_string());
                 return result;
             }
         };
         result.probe.available = true;
-        result.probe.version_raw = tool.version;
-        result.probe.capabilities = tool.capabilities.clone();
-
+        result.probe.version_raw = Some(match versions.ctl_version {
+            Some((major, minor)) => format!("native QMI · CTL {major}.{minor}"),
+            None => "native QMI".to_string(),
+        });
+        result.probe.capabilities = ImsCapabilities {
+            ims_settings: versions.ims,
+            imsa_registration: versions.imsa,
+            imsa_services: versions.imsa,
+        };
         let mut blockers = Vec::new();
-        if tool.capabilities.imsa_services {
-            match self
-                .run_query(
+
+        if versions.nas {
+            let nas = self
+                .request_response(&device, QMI_SERVICE_NAS, QMI_NAS_GET_SYSTEM_INFO, deadline)
+                .await;
+            if let Ok(response) = nas {
+                result.lte_voice_support = response.bool(0x21);
+                result.ims_voice_support = response.bool(0x29);
+                if result.ims_voice_support == Some(true) {
+                    result
+                        .evidence
+                        .push("qmi_nas_ims_voice_support".to_string());
+                }
+            }
+        }
+
+        if versions.imsa {
+            let services = self
+                .request_response(
                     &device,
-                    "--imsa-get-ims-services-status",
+                    QMI_SERVICE_IMSA,
+                    QMI_IMSA_GET_SERVICES_STATUS,
                     deadline,
-                    "ims_services_query_failed",
                 )
-                .await
-            {
-                Ok(output) => {
-                    let parsed = parse_imsa_services(&output);
-                    result.sms_service = parsed.sms_service;
-                    result.technology = parsed.technology;
-                    if parsed.sms_service == ImsSmsService::Unknown {
+                .await;
+            match services {
+                Ok(response) => {
+                    result.sms_service = qmi_imsa_service(response.u32(0x10));
+                    result.voice_service = qmi_imsa_service(response.u32(0x11));
+                    result.technology = qmi_imsa_technology(response.u32(0x13));
+                    result.voice_technology = qmi_imsa_technology(response.u32(0x14));
+                    if result.sms_service == ImsServiceStatus::Unknown {
                         blockers.push("ims_services_output_unrecognized".to_string());
                     } else {
                         result.evidence.push("qmi_imsa_services".to_string());
                     }
-                    if parsed.nonstandard {
-                        result
-                            .warnings
-                            .push("ims_services_output_nonstandard".to_string());
+                    if result.voice_service == ImsServiceStatus::Unknown {
+                        blockers.push("ims_voice_output_unrecognized".to_string());
+                    } else {
+                        result.evidence.push("qmi_imsa_voice".to_string());
                     }
                 }
-                Err(code) => blockers.push(code),
+                Err(error) => {
+                    blockers.push(native_query_error_code(error, "ims_services_query_failed"))
+                }
             }
-        } else {
-            blockers.push("ims_services_query_unavailable".to_string());
-        }
 
-        if tool.capabilities.imsa_registration {
-            match self
-                .run_query(
+            let registration = self
+                .request_response(
                     &device,
-                    "--imsa-get-ims-registration-status",
+                    QMI_SERVICE_IMSA,
+                    QMI_IMSA_GET_REGISTRATION_STATUS,
                     deadline,
-                    "ims_registration_query_failed",
                 )
-                .await
-            {
-                Ok(output) => {
-                    let parsed = parse_imsa_registration(&output);
-                    result.registration = parsed.registration;
-                    if parsed.registration == ImsRegistration::Unknown {
+                .await;
+            match registration {
+                Ok(response) => {
+                    result.registration = qmi_imsa_registration(response.u32(0x12));
+                    if result.registration == ImsRegistration::Unknown {
                         blockers.push("ims_registration_output_unrecognized".to_string());
                     } else {
                         result.evidence.push("qmi_imsa_registration".to_string());
                     }
-                    if parsed.nonstandard {
-                        result
-                            .warnings
-                            .push("ims_registration_output_nonstandard".to_string());
-                    }
                 }
-                Err(code) => blockers.push(code),
+                Err(error) => blockers.push(native_query_error_code(
+                    error,
+                    "ims_registration_query_failed",
+                )),
             }
         } else {
+            blockers.push("ims_services_query_unavailable".to_string());
             blockers.push("ims_registration_query_unavailable".to_string());
         }
 
-        if tool.capabilities.ims_settings {
-            match self
-                .run_query(
+        if versions.ims {
+            let settings = self
+                .request_response(
                     &device,
-                    "--ims-get-ims-services-enabled-setting",
+                    QMI_SERVICE_IMS,
+                    QMI_IMS_GET_SERVICES_ENABLED,
                     deadline,
-                    "ims_settings_query_failed",
                 )
-                .await
-            {
-                Ok(output) => {
-                    let parsed = parse_ims_settings(&output);
-                    result.configured = parsed.configured;
-                    if parsed.configured == ImsConfigured::Unknown {
+                .await;
+            match settings {
+                Ok(response) => {
+                    result.configured = qmi_configured(response.bool(0x1a));
+                    result.volte_configured = qmi_configured(response.bool(0x11));
+                    result.vowifi_configured = qmi_configured(response.bool(0x15));
+                    if result.volte_configured == ImsConfigured::Unknown {
                         result
                             .warnings
-                            .push("ims_settings_output_unrecognized".to_string());
-                    } else {
+                            .push("ims_volte_setting_unavailable".to_string());
+                    }
+                    if result.vowifi_configured == ImsConfigured::Unknown {
+                        result
+                            .warnings
+                            .push("ims_vowifi_setting_unavailable".to_string());
+                    }
+                    if result.configured == ImsConfigured::Unknown {
+                        result
+                            .warnings
+                            .push("ims_sms_setting_unavailable".to_string());
+                    }
+                    if result.volte_configured != ImsConfigured::Unknown
+                        || result.vowifi_configured != ImsConfigured::Unknown
+                        || result.configured != ImsConfigured::Unknown
+                    {
                         result.evidence.push("qmi_ims_settings".to_string());
                     }
-                    if parsed.nonstandard {
-                        result
-                            .warnings
-                            .push("ims_settings_output_nonstandard".to_string());
-                    }
                 }
-                Err(code) => result.warnings.push(code),
+                Err(error) => result
+                    .warnings
+                    .push(native_query_error_code(error, "ims_settings_query_failed")),
             }
         } else {
             result
@@ -730,82 +490,68 @@ impl RealImsProbe {
                 .push("ims_settings_query_unavailable".to_string());
         }
         result.classify();
-        if result.configured == ImsConfigured::Disabled
-            && result.status == SmsOverImsStatus::Available
+        if result.status == SmsOverImsStatus::Unknown
+            && result.voice_over_ims == VoiceOverImsStatus::Unknown
         {
-            result.warnings.push("ims_state_inconsistent".to_string());
-        }
-        if result.status == SmsOverImsStatus::Unknown {
             result.reasons = blockers;
         } else {
             result.warnings.extend(blockers);
         }
         result
     }
-
-    async fn run_query(
-        &self,
-        device: &str,
-        action: &str,
-        deadline: tokio::time::Instant,
-        failed_code: &str,
-    ) -> Result<String, String> {
-        let timeout = deadline
-            .checked_duration_since(tokio::time::Instant::now())
-            .ok_or_else(|| "ims_probe_timeout".to_string())?;
-        let args = vec![
-            "-d".to_string(),
-            device.to_string(),
-            "--device-open-proxy".to_string(),
-            action.to_string(),
-        ];
-        match self.runner.run(&args, timeout).await {
-            Ok(output) if output.status_success => Ok(output.stdout),
-            Ok(_) => Err(failed_code.to_string()),
-            Err(error) => Err(query_error_code(error, failed_code).to_string()),
-        }
-    }
 }
 
-impl ImsProbe for RealImsProbe {
+impl ImsProbe for NativeImsProbe {
     fn probe<'a>(
         &'a self,
         modem_output: &'a str,
         json: bool,
         enabled: Option<bool>,
     ) -> Pin<Box<dyn Future<Output = SmsOverIms> + Send + 'a>> {
-        Box::pin(async move {
-            let requested_at = Instant::now();
-            let _guard = self.flight.lock().await;
-            if let Some((completed_at, result)) = self.last.lock().unwrap().clone() {
-                if completed_at >= requested_at {
-                    return result;
-                }
-            }
-            let result = self.probe_inner(modem_output, json, enabled).await;
-            *self.last.lock().unwrap() = Some((Instant::now(), result.clone()));
-            result
-        })
+        Box::pin(async move { self.probe_inner(modem_output, json, enabled).await })
     }
 }
 
-fn tool_error_code(error: QmicliRunError) -> &'static str {
+fn native_error_code(error: NativeQmiError) -> &'static str {
     match error {
-        QmicliRunError::Missing => "qmicli_missing",
-        QmicliRunError::PathInvalid => "qmicli_path_invalid",
-        QmicliRunError::PermissionDenied => "ims_probe_permission_denied",
-        QmicliRunError::ProxyUnavailable => "qmi_proxy_unavailable",
-        QmicliRunError::Timeout => "ims_probe_timeout",
-        QmicliRunError::Failed => "qmicli_probe_failed",
+        NativeQmiError::PermissionDenied => "ims_probe_permission_denied",
+        NativeQmiError::ProxyUnavailable => "qmi_proxy_unavailable",
+        NativeQmiError::Timeout => "ims_probe_timeout",
+        NativeQmiError::Protocol | NativeQmiError::Qmi(_) => "native_qmi_probe_failed",
     }
 }
 
-fn query_error_code(error: QmicliRunError, failed_code: &str) -> &str {
+fn native_query_error_code(error: NativeQmiError, failed_code: &str) -> String {
     match error {
-        QmicliRunError::PermissionDenied => "ims_probe_permission_denied",
-        QmicliRunError::ProxyUnavailable => "qmi_proxy_unavailable",
-        QmicliRunError::Timeout => "ims_probe_timeout",
-        _ => failed_code,
+        NativeQmiError::PermissionDenied => "ims_probe_permission_denied".to_string(),
+        NativeQmiError::ProxyUnavailable => "qmi_proxy_unavailable".to_string(),
+        NativeQmiError::Timeout => "ims_probe_timeout".to_string(),
+        NativeQmiError::Protocol | NativeQmiError::Qmi(_) => failed_code.to_string(),
+    }
+}
+
+pub trait ImsProbe: Send + Sync {
+    fn probe<'a>(
+        &'a self,
+        modem_output: &'a str,
+        json: bool,
+        enabled: Option<bool>,
+    ) -> Pin<Box<dyn Future<Output = SmsOverIms> + Send + 'a>>;
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub struct NoopImsProbe;
+
+#[cfg(test)]
+impl ImsProbe for NoopImsProbe {
+    fn probe<'a>(
+        &'a self,
+        _modem_output: &'a str,
+        _json: bool,
+        _enabled: Option<bool>,
+    ) -> Pin<Box<dyn Future<Output = SmsOverIms> + Send + 'a>> {
+        Box::pin(async { SmsOverIms::default() })
     }
 }
 
@@ -896,91 +642,55 @@ fn qmi_port_basename(port: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
 
     use super::*;
 
     #[derive(Clone)]
-    struct FakeQmicliRunner {
-        outputs: Arc<Mutex<VecDeque<QmicliOutput>>>,
+    struct FakeNativeQmiClient {
+        responses: Arc<HashMap<(u8, u16), Vec<u8>>>,
     }
 
-    impl QmicliRunner for FakeQmicliRunner {
-        fn run<'a>(
+    impl QmiRequestClient for FakeNativeQmiClient {
+        fn request<'a>(
             &'a self,
-            _args: &'a [String],
-            _timeout: std::time::Duration,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<QmicliOutput, QmicliRunError>> + Send + 'a>,
-        > {
-            Box::pin(async move {
-                tokio::task::yield_now().await;
-                self.outputs
-                    .lock()
-                    .unwrap()
-                    .pop_front()
-                    .ok_or(QmicliRunError::Failed)
-            })
-        }
-    }
-
-    #[derive(Clone)]
-    struct ScriptedQmicliRunner {
-        results: Arc<Mutex<VecDeque<Result<QmicliOutput, QmicliRunError>>>>,
-    }
-
-    impl QmicliRunner for ScriptedQmicliRunner {
-        fn run<'a>(
-            &'a self,
-            _args: &'a [String],
+            _device: &'a str,
+            service: u8,
+            message: u16,
             _timeout: Duration,
-        ) -> Pin<Box<dyn Future<Output = Result<QmicliOutput, QmicliRunError>> + Send + 'a>>
-        {
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, NativeQmiError>> + Send + 'a>> {
             Box::pin(async move {
-                self.results
-                    .lock()
-                    .unwrap()
-                    .pop_front()
-                    .unwrap_or(Err(QmicliRunError::Failed))
+                self.responses
+                    .get(&(service, message))
+                    .cloned()
+                    .ok_or(NativeQmiError::Protocol)
             })
-        }
-    }
-
-    #[derive(Clone)]
-    struct ErrorQmicliRunner {
-        error: QmicliRunError,
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl QmicliRunner for ErrorQmicliRunner {
-        fn run<'a>(
-            &'a self,
-            _args: &'a [String],
-            _timeout: Duration,
-        ) -> Pin<Box<dyn Future<Output = Result<QmicliOutput, QmicliRunError>> + Send + 'a>>
-        {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async move { Err(self.error) })
         }
     }
 
     #[tokio::test]
-    async fn probe_reports_available_from_qmi_runtime_evidence() {
-        let outputs = [
-            success(
-                "--ims-get-ims-services-enabled-setting\n\
-                 --imsa-get-ims-registration-status\n\
-                 --imsa-get-ims-services-status",
-            ),
-            success("qmicli 1.36.0"),
-            success("IMS SMS service status: 'available'\nIMS SMS service RAT: 'wwan'"),
-            success("IMS registration status: 'registered'"),
-            success("IMS SMS service: 'enabled'"),
+    async fn native_probe_preserves_network_ims_voice_support_without_claiming_registration() {
+        // Known QMUX responses derived from the QMI CTL Get Version Info and
+        // NAS Get System Info wire formats. The modem exposes NAS 1.25 but no
+        // IMS/IMSA services; NAS reports both LTE voice and IMS voice support.
+        let service_versions = vec![
+            0x01, 0x1b, 0x00, 0x80, 0x00, 0x00, 0x01, 0x01, 0x21, 0x00, 0x10, 0x00, 0x02, 0x04,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x06, 0x00, 0x01, 0x03, 0x01, 0x00, 0x19, 0x00,
         ];
-        let probe = RealImsProbe::with_runner(FakeQmicliRunner {
-            outputs: Arc::new(Mutex::new(outputs.into())),
+        let system_info = vec![
+            0x01, 0x1b, 0x00, 0x80, 0x03, 0x01, 0x02, 0x01, 0x00, 0x4d, 0x00, 0x0f, 0x00, 0x02,
+            0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0x01, 0x00, 0x01, 0x29, 0x01, 0x00, 0x01,
+        ];
+        let probe = NativeImsProbe::with_client(FakeNativeQmiClient {
+            responses: Arc::new(HashMap::from([
+                (
+                    (QMI_SERVICE_CTL, QMI_CTL_GET_VERSION_INFO),
+                    service_versions,
+                ),
+                ((QMI_SERVICE_NAS, QMI_NAS_GET_SYSTEM_INFO), system_info),
+            ])),
         });
 
         let status = probe
@@ -991,60 +701,62 @@ mod tests {
             )
             .await;
 
-        assert_eq!(status.status, SmsOverImsStatus::Available);
-        assert_eq!(status.configured, ImsConfigured::Enabled);
-        assert_eq!(status.probe.device.as_deref(), Some("/dev/wwan0qmi0"));
-        assert!(status.reasons.is_empty());
-    }
-
-    #[tokio::test]
-    async fn old_qmicli_capabilities_report_unknown_without_running_queries() {
-        let probe = RealImsProbe::with_runner(FakeQmicliRunner {
-            outputs: Arc::new(Mutex::new(
-                [success("--help-wms"), success("qmicli 1.32.2")].into(),
-            )),
-        });
-
-        let status = probe
-            .probe(
-                r#"{"modem":{"generic":{"ports":["wwan0qmi0 (qmi)"]}}}"#,
-                true,
-                Some(true),
-            )
-            .await;
-
+        assert_eq!(status.probe.tool, "native-qmi");
+        assert!(status.probe.available);
+        assert_eq!(status.lte_voice_support, Some(true));
+        assert_eq!(status.ims_voice_support, Some(true));
+        assert_eq!(status.registration, ImsRegistration::Unknown);
+        assert_eq!(status.voice_over_ims, VoiceOverImsStatus::Unknown);
         assert_eq!(status.status, SmsOverImsStatus::Unknown);
-        assert_eq!(status.probe.version_raw.as_deref(), Some("qmicli 1.32.2"));
         assert!(status
-            .reasons
-            .contains(&"ims_services_query_unavailable".to_string()));
+            .evidence
+            .contains(&"qmi_nas_ims_voice_support".to_string()));
         assert!(status
             .reasons
             .contains(&"ims_registration_query_unavailable".to_string()));
     }
 
     #[tokio::test]
-    async fn version_failure_does_not_block_supported_ims_queries() {
-        let outputs = [
-            success(
-                "--ims-get-ims-services-enabled-setting\n\
-                 --imsa-get-ims-registration-status\n\
-                 --imsa-get-ims-services-status",
-            ),
-            QmicliOutput {
-                stdout: String::new(),
-                status_success: false,
-            },
-            success(
-                "SMS:\n\
-                 \tStatus: 'full service'\n\
-                 \tTechnology: 'wwan'\n",
-            ),
-            success("IMS registration:\n\tStatus: 'registered'\n"),
-            success("SMS service enabled: yes\n"),
+    async fn native_probe_reports_volte_only_from_registered_available_wwan_voice_service() {
+        let service_versions = vec![
+            0x01, 0x25, 0x00, 0x80, 0x00, 0x00, 0x01, 0x01, 0x21, 0x00, 0x1a, 0x00, 0x02, 0x04,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x10, 0x00, 0x03, 0x03, 0x01, 0x00, 0x19, 0x00,
+            0x12, 0x01, 0x00, 0x00, 0x00, 0x21, 0x01, 0x00, 0x00, 0x00,
         ];
-        let probe = RealImsProbe::with_runner(FakeQmicliRunner {
-            outputs: Arc::new(Mutex::new(outputs.into())),
+        let system_info = vec![
+            0x01, 0x1b, 0x00, 0x80, 0x03, 0x01, 0x02, 0x01, 0x00, 0x4d, 0x00, 0x0f, 0x00, 0x02,
+            0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0x01, 0x00, 0x01, 0x29, 0x01, 0x00, 0x01,
+        ];
+        let services = vec![
+            0x01, 0x2f, 0x00, 0x80, 0x21, 0x01, 0x02, 0x01, 0x00, 0x21, 0x00, 0x23, 0x00, 0x02,
+            0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x04, 0x00, 0x02, 0x00, 0x00, 0x00, 0x11,
+            0x04, 0x00, 0x02, 0x00, 0x00, 0x00, 0x13, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x14,
+            0x04, 0x00, 0x01, 0x00, 0x00, 0x00,
+        ];
+        let registration = vec![
+            0x01, 0x21, 0x00, 0x80, 0x21, 0x01, 0x02, 0x01, 0x00, 0x20, 0x00, 0x15, 0x00, 0x02,
+            0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x04, 0x00, 0x02, 0x00, 0x00, 0x00, 0x14,
+            0x04, 0x00, 0x01, 0x00, 0x00, 0x00,
+        ];
+        let settings = vec![
+            0x01, 0x1f, 0x00, 0x80, 0x12, 0x01, 0x02, 0x01, 0x00, 0x90, 0x00, 0x13, 0x00, 0x02,
+            0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x01, 0x00, 0x01, 0x15, 0x01, 0x00, 0x00,
+            0x1a, 0x01, 0x00, 0x01,
+        ];
+        let probe = NativeImsProbe::with_client(FakeNativeQmiClient {
+            responses: Arc::new(HashMap::from([
+                (
+                    (QMI_SERVICE_CTL, QMI_CTL_GET_VERSION_INFO),
+                    service_versions,
+                ),
+                ((QMI_SERVICE_NAS, QMI_NAS_GET_SYSTEM_INFO), system_info),
+                ((QMI_SERVICE_IMSA, QMI_IMSA_GET_SERVICES_STATUS), services),
+                (
+                    (QMI_SERVICE_IMSA, QMI_IMSA_GET_REGISTRATION_STATUS),
+                    registration,
+                ),
+                ((QMI_SERVICE_IMS, QMI_IMS_GET_SERVICES_ENABLED), settings),
+            ])),
         });
 
         let status = probe
@@ -1055,106 +767,37 @@ mod tests {
             )
             .await;
 
-        assert_eq!(status.status, SmsOverImsStatus::Available);
-        assert_eq!(status.probe.version_raw, None);
+        assert_eq!(status.voice_over_ims, VoiceOverImsStatus::Volte);
+        assert_eq!(status.registration, ImsRegistration::Registered);
+        assert_eq!(status.voice_service, ImsServiceStatus::Available);
+        assert_eq!(status.voice_technology, ImsTechnology::Wwan);
+        assert_eq!(status.sms_service, ImsServiceStatus::Available);
+        assert_eq!(status.technology, ImsTechnology::Wwan);
+        assert_eq!(status.configured, ImsConfigured::Enabled);
+        assert_eq!(status.volte_configured, ImsConfigured::Enabled);
+        assert_eq!(status.vowifi_configured, ImsConfigured::Disabled);
+        assert!(status.reasons.is_empty());
+        assert!(status.evidence.contains(&"qmi_imsa_voice".to_string()));
     }
 
     #[tokio::test]
-    async fn disabled_modem_skips_port_selection_and_qmicli() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let probe = RealImsProbe::with_runner(ErrorQmicliRunner {
-            error: QmicliRunError::Failed,
-            calls: calls.clone(),
-        });
-
-        let status = probe.probe("{}", true, Some(false)).await;
-
-        assert_eq!(status.status, SmsOverImsStatus::Unknown);
-        assert_eq!(status.reasons, ["modem_disabled"]);
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn capability_failures_return_fixed_safe_codes() {
-        for (error, code) in [
-            (QmicliRunError::Missing, "qmicli_missing"),
-            (
-                QmicliRunError::PermissionDenied,
-                "ims_probe_permission_denied",
-            ),
-            (QmicliRunError::Timeout, "ims_probe_timeout"),
-        ] {
-            let probe = RealImsProbe::with_runner(ErrorQmicliRunner {
-                error,
-                calls: Arc::new(AtomicUsize::new(0)),
-            });
-            let status = probe
-                .probe(
-                    r#"{"modem":{"generic":{"ports":["wwan0qmi0 (qmi)"]}}}"#,
-                    true,
-                    Some(true),
-                )
-                .await;
-
-            assert_eq!(status.status, SmsOverImsStatus::Unknown);
-            assert_eq!(status.reasons, [code]);
-        }
-    }
-
-    #[tokio::test]
-    async fn capability_probe_recovers_after_a_transient_failure() {
-        let results = [
-            Err(QmicliRunError::Missing),
-            Ok(success(
-                "--ims-get-ims-services-enabled-setting\n\
-                 --imsa-get-ims-registration-status\n\
-                 --imsa-get-ims-services-status",
-            )),
-            Ok(success("qmicli 1.36.0")),
-            Ok(success(
-                "SMS:\n\
-                 \tStatus: 'full service'\n\
-                 \tTechnology: 'wwan'\n",
-            )),
-            Ok(success("IMS registration:\n\tStatus: 'registered'\n")),
-            Ok(success("SMS service enabled: yes\n")),
+    async fn native_probe_keeps_partial_ims_configuration_as_evidence() {
+        let service_versions = vec![
+            0x01, 0x1b, 0x00, 0x80, 0x00, 0x00, 0x01, 0x01, 0x21, 0x00, 0x10, 0x00, 0x02, 0x04,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x06, 0x00, 0x01, 0x12, 0x01, 0x00, 0x00, 0x00,
         ];
-        let probe = RealImsProbe::with_runner(ScriptedQmicliRunner {
-            results: Arc::new(Mutex::new(results.into())),
-        });
-        let modem =
-            r#"{"modem":{"generic":{"primary-port":"wwan0qmi0","ports":["wwan0qmi0 (qmi)"]}}}"#;
-
-        let first = probe.probe(modem, true, Some(true)).await;
-        let recovered = probe.probe(modem, true, Some(true)).await;
-
-        assert_eq!(first.status, SmsOverImsStatus::Unknown);
-        assert_eq!(first.reasons, ["qmicli_missing"]);
-        assert_eq!(recovered.status, SmsOverImsStatus::Available);
-        assert!(recovered.reasons.is_empty());
-    }
-
-    #[tokio::test]
-    async fn query_failures_and_unrecognized_output_degrade_to_unknown() {
-        let outputs = [
-            success(
-                "--ims-get-ims-services-enabled-setting\n\
-                 --imsa-get-ims-registration-status\n\
-                 --imsa-get-ims-services-status",
-            ),
-            success("qmicli 1.36.0"),
-            QmicliOutput {
-                stdout: String::new(),
-                status_success: false,
-            },
-            success("unexpected registration output"),
-            QmicliOutput {
-                stdout: String::new(),
-                status_success: false,
-            },
+        let settings = vec![
+            0x01, 0x17, 0x00, 0x80, 0x12, 0x01, 0x02, 0x01, 0x00, 0x90, 0x00, 0x0b, 0x00, 0x02,
+            0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x01, 0x00, 0x01,
         ];
-        let probe = RealImsProbe::with_runner(FakeQmicliRunner {
-            outputs: Arc::new(Mutex::new(outputs.into())),
+        let probe = NativeImsProbe::with_client(FakeNativeQmiClient {
+            responses: Arc::new(HashMap::from([
+                (
+                    (QMI_SERVICE_CTL, QMI_CTL_GET_VERSION_INFO),
+                    service_versions,
+                ),
+                ((QMI_SERVICE_IMS, QMI_IMS_GET_SERVICES_ENABLED), settings),
+            ])),
         });
 
         let status = probe
@@ -1165,92 +808,160 @@ mod tests {
             )
             .await;
 
-        assert_eq!(status.status, SmsOverImsStatus::Unknown);
-        assert!(status
-            .reasons
-            .contains(&"ims_services_query_failed".to_string()));
-        assert!(status
-            .reasons
-            .contains(&"ims_registration_output_unrecognized".to_string()));
+        assert_eq!(status.volte_configured, ImsConfigured::Enabled);
+        assert_eq!(status.vowifi_configured, ImsConfigured::Unknown);
+        assert_eq!(status.configured, ImsConfigured::Unknown);
+        assert!(status.evidence.contains(&"qmi_ims_settings".to_string()));
         assert!(status
             .warnings
-            .contains(&"ims_settings_query_failed".to_string()));
+            .contains(&"ims_vowifi_setting_unavailable".to_string()));
+        assert!(status
+            .warnings
+            .contains(&"ims_sms_setting_unavailable".to_string()));
     }
 
-    #[tokio::test]
-    async fn capped_reader_signals_and_retains_only_the_output_limit() {
-        let (mut writer, reader) = tokio::io::duplex(MAX_QMICLI_OUTPUT_BYTES * 2);
-        let payload = vec![b'x'; MAX_QMICLI_OUTPUT_BYTES + 1];
-        let writer_task = tokio::spawn(async move {
-            use tokio::io::AsyncWriteExt;
-            writer.write_all(&payload).await.unwrap();
-        });
-        let (overflow_tx, mut overflow_rx) = tokio::sync::mpsc::channel(1);
+    #[test]
+    fn registered_available_wlan_voice_is_vowifi() {
+        let mut status = SmsOverIms {
+            registration: ImsRegistration::Registered,
+            voice_service: ImsServiceStatus::Available,
+            voice_technology: ImsTechnology::Wlan,
+            ..SmsOverIms::default()
+        };
 
-        let output = read_capped(reader, overflow_tx).await;
+        status.classify();
 
-        writer_task.await.unwrap();
-        assert_eq!(output, Err(QmicliRunError::Failed));
-        assert_eq!(overflow_rx.recv().await, Some(()));
+        assert_eq!(status.voice_over_ims, VoiceOverImsStatus::Vowifi);
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn runner_deadline_includes_pipe_drain_after_child_exit() {
-        let runner = RealQmicliRunner {
-            program: PathBuf::from("/bin/sh"),
-            path_valid: true,
-        };
-        let args = vec!["-c".to_string(), "(sleep 2) & exit 0".to_string()];
-        let started = Instant::now();
+    async fn native_probe_reads_network_support_through_qmi_proxy_wire_protocol() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::UnixListener;
 
-        let result = runner.run(&args, Duration::from_millis(50)).await;
-
-        assert!(matches!(result, Err(QmicliRunError::Timeout)));
-        assert!(started.elapsed() < Duration::from_secs(1));
-    }
-
-    #[tokio::test]
-    async fn concurrent_requests_share_the_in_flight_probe_result() {
-        let outputs = [
-            success(
-                "--ims-get-ims-services-enabled-setting\n\
-                 --imsa-get-ims-registration-status\n\
-                 --imsa-get-ims-services-status",
-            ),
-            success("qmicli 1.36.0"),
-            success("IMS SMS service status: 'available'\nIMS SMS service RAT: 'wwan'"),
-            success("IMS registration status: 'registered'"),
-            success("IMS SMS service: 'enabled'"),
-        ];
-        let probe = RealImsProbe::with_runner(FakeQmicliRunner {
-            outputs: Arc::new(Mutex::new(outputs.into())),
-        });
-        let raw =
-            r#"{"modem":{"generic":{"primary-port":"wwan0qmi0","ports":["wwan0qmi0 (qmi)"]}}}"#;
-
-        let (first, second) = tokio::join!(
-            probe.probe(raw, true, Some(true)),
-            probe.probe(raw, true, Some(true))
-        );
-
-        assert_eq!(first.status, SmsOverImsStatus::Available);
-        assert_eq!(second.status, SmsOverImsStatus::Available);
-    }
-
-    fn success(stdout: &str) -> QmicliOutput {
-        QmicliOutput {
-            stdout: stdout.to_string(),
-            status_success: true,
+        async fn read_frame(stream: &mut tokio::net::UnixStream) -> Vec<u8> {
+            let mut prefix = [0_u8; 3];
+            stream.read_exact(&mut prefix).await.unwrap();
+            let length = usize::from(u16::from_le_bytes([prefix[1], prefix[2]])) + 1;
+            let mut frame = vec![0_u8; length];
+            frame[..3].copy_from_slice(&prefix);
+            stream.read_exact(&mut frame[3..]).await.unwrap();
+            frame
         }
+
+        fn message_id(frame: &[u8]) -> u16 {
+            let offset = if frame[4] == QMI_SERVICE_CTL { 8 } else { 9 };
+            u16::from_le_bytes([frame[offset], frame[offset + 1]])
+        }
+
+        fn ctl_success(transaction: u8, message: u16, extra_tlvs: &[u8]) -> Vec<u8> {
+            let tlv_length = 7 + extra_tlvs.len();
+            let total = 1 + 5 + 6 + tlv_length;
+            let mut frame = vec![
+                0x01,
+                (total - 1) as u8,
+                0x00,
+                0x80,
+                QMI_SERVICE_CTL,
+                0x00,
+                0x01,
+                transaction,
+                message as u8,
+                (message >> 8) as u8,
+                tlv_length as u8,
+                0x00,
+                0x02,
+                0x04,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+            ];
+            frame.extend_from_slice(extra_tlvs);
+            frame
+        }
+
+        let socket_path = PathBuf::from("/tmp").join(format!(
+            "srq-{}.sock",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ));
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let service_versions = vec![
+            0x01, 0x1b, 0x00, 0x80, 0x00, 0x00, 0x01, 0x02, 0x21, 0x00, 0x10, 0x00, 0x02, 0x04,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x06, 0x00, 0x01, 0x03, 0x01, 0x00, 0x19, 0x00,
+        ];
+        let system_info = vec![
+            0x01, 0x1b, 0x00, 0x80, 0x03, 0x01, 0x02, 0x01, 0x00, 0x4d, 0x00, 0x0f, 0x00, 0x02,
+            0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0x01, 0x00, 0x01, 0x29, 0x01, 0x00, 0x01,
+        ];
+        let server = tokio::spawn(async move {
+            let (mut ctl, _) = listener.accept().await.unwrap();
+            let open = read_frame(&mut ctl).await;
+            assert_eq!(message_id(&open), 0xff00);
+            ctl.write_all(&ctl_success(open[7], 0xff00, &[]))
+                .await
+                .unwrap();
+            let request = read_frame(&mut ctl).await;
+            assert_eq!(
+                (request[4], message_id(&request)),
+                (QMI_SERVICE_CTL, 0x0021)
+            );
+            ctl.write_all(&service_versions).await.unwrap();
+            drop(ctl);
+
+            let (mut nas, _) = listener.accept().await.unwrap();
+            let open = read_frame(&mut nas).await;
+            nas.write_all(&ctl_success(open[7], 0xff00, &[]))
+                .await
+                .unwrap();
+            let allocate = read_frame(&mut nas).await;
+            assert_eq!(message_id(&allocate), 0x0022);
+            nas.write_all(&ctl_success(
+                allocate[7],
+                0x0022,
+                &[0x01, 0x02, 0x00, QMI_SERVICE_NAS, 0x01],
+            ))
+            .await
+            .unwrap();
+            let request = read_frame(&mut nas).await;
+            assert_eq!(
+                (request[4], message_id(&request)),
+                (QMI_SERVICE_NAS, 0x004d)
+            );
+            nas.write_all(&system_info).await.unwrap();
+            let release = read_frame(&mut nas).await;
+            assert_eq!(message_id(&release), 0x0023);
+            nas.write_all(&ctl_success(release[7], 0x0023, &[]))
+                .await
+                .unwrap();
+        });
+
+        let probe =
+            NativeImsProbe::with_client(ProxyQmiClient::with_socket_path(socket_path.clone()));
+        let status = probe
+            .probe(
+                r#"{"modem":{"generic":{"ports":["wwan0qmi0 (qmi)"]}}}"#,
+                true,
+                Some(true),
+            )
+            .await;
+
+        server.await.unwrap();
+        std::fs::remove_file(socket_path).unwrap();
+        assert_eq!(status.ims_voice_support, Some(true));
+        assert_eq!(status.voice_over_ims, VoiceOverImsStatus::Unknown);
     }
 
     #[test]
     fn registered_available_sms_is_available_over_wwan() {
-        let mut status = SmsOverIms::default();
-        status.registration = ImsRegistration::Registered;
-        status.sms_service = ImsSmsService::Available;
-        status.technology = ImsTechnology::Wwan;
+        let mut status = SmsOverIms {
+            registration: ImsRegistration::Registered,
+            sms_service: ImsServiceStatus::Available,
+            technology: ImsTechnology::Wwan,
+            ..SmsOverIms::default()
+        };
 
         status.classify();
 
@@ -1262,7 +973,7 @@ mod tests {
     fn limited_evidence_takes_priority_over_registering() {
         let mut status = SmsOverIms {
             registration: ImsRegistration::Registering,
-            sms_service: ImsSmsService::Limited,
+            sms_service: ImsServiceStatus::Limited,
             ..SmsOverIms::default()
         };
 
@@ -1275,7 +986,7 @@ mod tests {
     fn registered_unavailable_sms_is_unavailable() {
         let mut status = SmsOverIms {
             registration: ImsRegistration::Registered,
-            sms_service: ImsSmsService::Unavailable,
+            sms_service: ImsServiceStatus::Unavailable,
             ..SmsOverIms::default()
         };
 
@@ -1289,22 +1000,22 @@ mod tests {
         for (registration, sms_service, expected) in [
             (
                 ImsRegistration::Registering,
-                ImsSmsService::Unknown,
+                ImsServiceStatus::Unknown,
                 SmsOverImsStatus::Registering,
             ),
             (
                 ImsRegistration::Limited,
-                ImsSmsService::Available,
+                ImsServiceStatus::Available,
                 SmsOverImsStatus::Limited,
             ),
             (
                 ImsRegistration::Registered,
-                ImsSmsService::Limited,
+                ImsServiceStatus::Limited,
                 SmsOverImsStatus::Limited,
             ),
             (
                 ImsRegistration::NotRegistered,
-                ImsSmsService::Unknown,
+                ImsServiceStatus::Unknown,
                 SmsOverImsStatus::NotRegistered,
             ),
         ] {
@@ -1316,45 +1027,6 @@ mod tests {
             status.classify();
             assert_eq!(status.status, expected);
         }
-    }
-
-    #[test]
-    fn parses_available_sms_service_over_wlan() {
-        let parsed = parse_imsa_services(
-            "[/dev/wwan0qmi0] IMS services:\n\
-             \tSMS:\n\
-             \t\tStatus: 'full service'\n\
-             \t\tTechnology: 'wlan'\n\
-             \tVoice:\n\
-             \t\tStatus: 'no service'\n\
-             \t\tTechnology: 'wwan'\n",
-        );
-
-        assert_eq!(parsed.sms_service, ImsSmsService::Available);
-        assert_eq!(parsed.technology, ImsTechnology::Wlan);
-        assert!(!parsed.nonstandard);
-    }
-
-    #[test]
-    fn parses_registration_and_sms_enabled_setting() {
-        assert_eq!(
-            parse_imsa_registration(
-                "[/dev/wwan0qmi0] IMS registration:\n\
-                 \t    Status: 'registered'\n\
-                 \tTechnology: 'wwan'\n"
-            )
-            .registration,
-            ImsRegistration::Registered
-        );
-        assert_eq!(
-            parse_ims_settings(
-                "[/dev/wwan0qmi0] IMS services:\n\
-                 \tVoice service enabled: no\n\
-                 \tSMS service enabled: yes\n"
-            )
-            .configured,
-            ImsConfigured::Enabled
-        );
     }
 
     #[test]
