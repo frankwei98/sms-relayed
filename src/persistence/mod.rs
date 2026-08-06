@@ -21,6 +21,9 @@ pub use delivery::{
 };
 
 const MODEM_FINGERPRINT_META_KEY: &str = "modem_fingerprint";
+const MODEM_DEDUPE_NAMESPACE_META_KEY: &str = "modem_dedupe_namespace";
+const RUNTIME_MODEM_FINGERPRINT_META_KEY: &str = "runtime_modem_fingerprint";
+const MODEM_IDENTITY_MISMATCH_META_KEY_PREFIX: &str = "modem_identity_mismatch:";
 
 fn outbound_phase_to_str(phase: OutboundPhase) -> &'static str {
     match phase {
@@ -98,6 +101,8 @@ pub struct Store {
     #[cfg(test)]
     outbound_finalization_failures: Arc<AtomicUsize>,
     #[cfg(test)]
+    modem_identity_mismatch_failures: Arc<AtomicUsize>,
+    #[cfg(test)]
     outbound_creation_pause: Arc<Mutex<Option<OutboundCreationPause>>>,
 }
 
@@ -114,6 +119,8 @@ impl From<MessageStore> for Store {
             sqlite,
             #[cfg(test)]
             outbound_finalization_failures: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            modem_identity_mismatch_failures: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             outbound_creation_pause: Arc::new(Mutex::new(None)),
         }
@@ -155,16 +162,16 @@ impl Store {
     ) -> Result<InboundOutcome> {
         let result = self
             .run(move |sqlite| {
-                let fingerprint = sqlite
-                    .get_meta(MODEM_FINGERPRINT_META_KEY)?
+                let dedupe_namespace = sqlite
+                    .inbound_dedupe_namespace()?
                     .filter(|value| !value.is_empty())
-                    .ok_or_else(|| anyhow::anyhow!("modem fingerprint is not enrolled"))?;
+                    .ok_or_else(|| anyhow::anyhow!("modem dedupe namespace is not enrolled"))?;
                 let message = NewMessage::modem_inbound(
                     &input.phone_number,
                     &input.body,
                     &input.timestamp,
                     &input.modem_sms_path,
-                    &fingerprint,
+                    &dedupe_namespace,
                 );
                 sqlite.insert_inbound_message_with_deliveries(message, &profile_keys)
             })
@@ -413,6 +420,73 @@ impl Store {
 
     pub async fn set_modem_fingerprint(&self, fingerprint: String) -> Result<()> {
         self.run(move |sqlite| sqlite.set_meta(MODEM_FINGERPRINT_META_KEY, &fingerprint))
+            .await
+    }
+
+    pub async fn runtime_modem_fingerprint(&self) -> Result<Option<String>> {
+        self.run(|sqlite| sqlite.get_meta(RUNTIME_MODEM_FINGERPRINT_META_KEY))
+            .await
+    }
+
+    pub async fn set_runtime_modem_fingerprint(&self, fingerprint: String) -> Result<()> {
+        self.run(move |sqlite| sqlite.set_meta(RUNTIME_MODEM_FINGERPRINT_META_KEY, &fingerprint))
+            .await
+    }
+
+    pub async fn modem_identity_mismatch_fingerprint(
+        &self,
+        modem_path: String,
+    ) -> Result<Option<String>> {
+        let key = format!("{MODEM_IDENTITY_MISMATCH_META_KEY_PREFIX}{modem_path}");
+        self.run(move |sqlite| sqlite.get_meta(&key)).await
+    }
+
+    pub async fn mark_modem_identity_mismatch(
+        &self,
+        modem_path: String,
+        enrolled_fingerprint: String,
+    ) -> Result<()> {
+        #[cfg(test)]
+        if self
+            .modem_identity_mismatch_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            anyhow::bail!("injected modem identity mismatch persistence failure");
+        }
+        let key = format!("{MODEM_IDENTITY_MISMATCH_META_KEY_PREFIX}{modem_path}");
+        self.run(move |sqlite| sqlite.set_meta(&key, &enrolled_fingerprint))
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_modem_identity_mismatch_marks(&self, count: usize) {
+        self.modem_identity_mismatch_failures
+            .store(count, Ordering::SeqCst);
+    }
+
+    pub async fn clear_modem_identity_mismatch(&self, modem_path: String) -> Result<()> {
+        let key = format!("{MODEM_IDENTITY_MISMATCH_META_KEY_PREFIX}{modem_path}");
+        self.run(move |sqlite| sqlite.delete_meta(&key)).await
+    }
+
+    pub async fn migrate_legacy_modem_fingerprint(
+        &self,
+        legacy_fingerprint: String,
+    ) -> Result<bool> {
+        self.run(move |sqlite| sqlite.migrate_legacy_modem_fingerprint(&legacy_fingerprint))
+            .await
+    }
+
+    pub async fn ensure_modem_dedupe_namespace(&self) -> Result<String> {
+        self.ensure_modem_dedupe_namespace_with(uuid::Uuid::new_v4().to_string())
+            .await
+    }
+
+    pub async fn ensure_modem_dedupe_namespace_with(&self, candidate: String) -> Result<String> {
+        self.run(move |sqlite| sqlite.ensure_meta(MODEM_DEDUPE_NAMESPACE_META_KEY, &candidate))
             .await
     }
 

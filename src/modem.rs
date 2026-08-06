@@ -537,6 +537,56 @@ pub enum ModemAction {
     Reset,
 }
 
+/// The independently resolved paths for SMS traffic and modem control actions.
+/// Fields remain private so callers can only publish one complete snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ModemTargets {
+    runtime: Option<String>,
+    action: Option<String>,
+}
+
+impl ModemTargets {
+    pub(crate) fn runtime_only(path: impl Into<String>) -> Self {
+        Self {
+            runtime: Some(path.into()),
+            action: None,
+        }
+    }
+
+    pub(crate) fn verified(path: impl Into<String>) -> Self {
+        let path = path.into();
+        Self {
+            runtime: Some(path.clone()),
+            action: Some(path),
+        }
+    }
+
+    pub(crate) fn separate(
+        runtime_path: impl Into<String>,
+        action_path: impl Into<String>,
+    ) -> Self {
+        Self {
+            runtime: Some(runtime_path.into()),
+            action: Some(action_path.into()),
+        }
+    }
+
+    pub(crate) fn action_only(path: impl Into<String>) -> Self {
+        Self {
+            runtime: None,
+            action: Some(path.into()),
+        }
+    }
+
+    pub(crate) fn runtime_path(&self) -> Option<&str> {
+        self.runtime.as_deref()
+    }
+
+    pub(crate) fn action_path(&self) -> Option<&str> {
+        self.action.as_deref()
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ActionResponse {
     pub accepted: bool,
@@ -647,7 +697,8 @@ pub struct ModemService {
     pub(crate) action_lock: Arc<tokio::sync::Mutex<()>>,
     reset_limits: Arc<Mutex<HashMap<String, Instant>>>,
     health_refresh_lock: Arc<tokio::sync::Mutex<()>>,
-    verified_path: Arc<Mutex<Option<String>>>,
+    modem_targets: Arc<Mutex<ModemTargets>>,
+    pending_identity_mismatches: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl ModemService {
@@ -676,16 +727,85 @@ impl ModemService {
             action_lock: Arc::new(tokio::sync::Mutex::new(())),
             reset_limits: Arc::new(Mutex::new(HashMap::new())),
             health_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
-            verified_path: Arc::new(Mutex::new(None)),
+            modem_targets: Arc::new(Mutex::new(ModemTargets::default())),
+            pending_identity_mismatches: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
+    pub(crate) fn set_modem_targets(&self, targets: ModemTargets) {
+        *self.modem_targets.lock().unwrap() = targets;
+    }
+
+    pub(crate) fn remember_pending_identity_mismatch(
+        &self,
+        modem_path: impl Into<String>,
+        enrolled_fingerprint: impl Into<String>,
+    ) {
+        self.pending_identity_mismatches
+            .lock()
+            .unwrap()
+            .insert(modem_path.into(), enrolled_fingerprint.into());
+    }
+
+    pub(crate) fn pending_identity_mismatch(&self, modem_path: &str) -> Option<String> {
+        self.pending_identity_mismatches
+            .lock()
+            .unwrap()
+            .get(modem_path)
+            .cloned()
+    }
+
+    pub(crate) fn pending_identity_mismatches(&self) -> Vec<(String, String)> {
+        self.pending_identity_mismatches
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(path, fingerprint)| (path.clone(), fingerprint.clone()))
+            .collect()
+    }
+
+    pub(crate) fn finish_pending_identity_mismatch(
+        &self,
+        modem_path: &str,
+        enrolled_fingerprint: &str,
+    ) {
+        let mut pending = self.pending_identity_mismatches.lock().unwrap();
+        if pending.get(modem_path).map(String::as_str) == Some(enrolled_fingerprint) {
+            pending.remove(modem_path);
+        }
+    }
+
+    pub(crate) fn clear_pending_identity_mismatch(&self, modem_path: &str) {
+        self.pending_identity_mismatches
+            .lock()
+            .unwrap()
+            .remove(modem_path);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_runtime_path(&self, path: Option<String>) {
+        self.set_modem_targets(path.map(ModemTargets::runtime_only).unwrap_or_default());
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_verified_path(&self, path: Option<String>) {
-        *self.verified_path.lock().unwrap() = path;
+        self.set_modem_targets(path.map(ModemTargets::verified).unwrap_or_default());
+    }
+
+    pub fn runtime_path(&self) -> Option<String> {
+        self.modem_targets
+            .lock()
+            .unwrap()
+            .runtime_path()
+            .map(ToString::to_string)
     }
 
     pub fn verified_path(&self) -> Option<String> {
-        self.verified_path.lock().unwrap().clone()
+        self.modem_targets
+            .lock()
+            .unwrap()
+            .action_path()
+            .map(ToString::to_string)
     }
 
     pub async fn status(&self, configured_path: &str) -> ModemStatus {
