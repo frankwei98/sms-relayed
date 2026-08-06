@@ -451,10 +451,15 @@ fn should_ignore_storage(storage: u32, filters: &[StorageType]) -> bool {
         .any(|filter| !matches!(filter, StorageType::All) && filter.should_ignore(storage))
 }
 
-/// Resolve the actual modem path for monitoring and outbound SMS.
-/// First tries the configured path directly, then scans for an enrolled
-/// fingerprint. When exactly one modem is available, it is selected as the
-/// runtime path even if its ModemManager object path changed.
+/// Resolve independent runtime and action modem targets.
+///
+/// A verified identity can serve both roles. When the configured action path
+/// has no readable identity but a different runtime modem is matched, the
+/// targets remain separate. A modem selected only by an observed runtime
+/// fingerprint or because it is the sole available candidate is runtime-only
+/// and must never receive control actions. An action-only result preserves an
+/// exact configured target when runtime selection is unavailable or ambiguous;
+/// the empty default means neither role could be resolved safely.
 pub(crate) async fn resolve_monitor_path(
     configured_path: &str,
     modem_service: &ModemService,
@@ -1472,11 +1477,20 @@ mod tests {
         assert_eq!(store.runtime_modem_fingerprint().await.unwrap(), None);
 
         *candidate_identity.lock().unwrap() = Some("target");
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let expected = ModemService::compute_fingerprint("target");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while store.runtime_modem_fingerprint().await.unwrap().as_deref()
+                != Some(expected.as_str())
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the refresh observes the recovered runtime identity");
 
         assert_eq!(
             store.runtime_modem_fingerprint().await.unwrap().as_deref(),
-            Some(ModemService::compute_fingerprint("target").as_str())
+            Some(expected.as_str())
         );
         assert_eq!(modem_service.verified_path(), None);
 
