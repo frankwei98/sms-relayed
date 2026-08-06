@@ -487,11 +487,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_message_uses_the_verified_runtime_modem_path() {
+    async fn send_message_uses_the_runtime_modem_path() {
         let sender = RecordingSmsSender::default();
         let store = crate::storage::MessageStore::open_in_memory().unwrap();
         let modem = crate::modem::ModemService::new();
-        modem.set_verified_path(Some("/org/freedesktop/ModemManager1/Modem/1".to_string()));
+        modem.set_runtime_path(Some("/org/freedesktop/ModemManager1/Modem/1".to_string()));
         let state = super::super::ApiState {
             config: std::sync::Arc::new(crate::config::AppConfig::default()),
             config_path: std::path::PathBuf::from("/tmp/not-used.toml"),

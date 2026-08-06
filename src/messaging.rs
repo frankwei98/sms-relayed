@@ -62,7 +62,7 @@ pub struct Messaging {
     events: EventBus,
     delivery_wakeup: DeliveryWakeup,
     sms_sender: Arc<dyn SmsSender>,
-    verified_modem: Option<crate::modem::ModemService>,
+    modem_service: Option<crate::modem::ModemService>,
 }
 
 impl Messaging {
@@ -82,12 +82,12 @@ impl Messaging {
             events,
             delivery_wakeup,
             sms_sender,
-            verified_modem: None,
+            modem_service: None,
         }
     }
 
-    pub fn with_verified_modem(mut self, modem: crate::modem::ModemService) -> Self {
-        self.verified_modem = Some(modem);
+    pub fn with_modem_service(mut self, modem: crate::modem::ModemService) -> Self {
+        self.modem_service = Some(modem);
         self
     }
 
@@ -115,10 +115,10 @@ impl Messaging {
         mut request: SendMessage,
         owner: String,
     ) -> anyhow::Result<SendOutcome> {
-        if let Some(modem) = self.verified_modem.as_ref() {
+        if let Some(modem) = self.modem_service.as_ref() {
             request.modem_path = modem
-                .verified_path()
-                .ok_or_else(|| anyhow::anyhow!("verified modem identity is not ready"))?;
+                .runtime_path()
+                .ok_or_else(|| anyhow::anyhow!("runtime modem path is not ready"))?;
         }
         let SendMessage {
             ref phone_number,
@@ -595,11 +595,11 @@ impl Messaging {
         owner: &str,
         modem_sms_path: &str,
     ) -> anyhow::Result<SmsSnapshot> {
-        let verified_path = match self.verified_modem.as_ref() {
+        let runtime_path = match self.modem_service.as_ref() {
             Some(modem) => Some(
                 modem
-                    .verified_path()
-                    .ok_or_else(|| anyhow::anyhow!("verified modem identity is not ready"))?,
+                    .runtime_path()
+                    .ok_or_else(|| anyhow::anyhow!("runtime modem path is not ready"))?,
             ),
             None => None,
         };
@@ -607,7 +607,7 @@ impl Messaging {
             message_id,
             owner,
             self.sms_sender
-                .sms_snapshot(verified_path.as_deref(), modem_sms_path),
+                .sms_snapshot(runtime_path.as_deref(), modem_sms_path),
         )
         .await
     }
@@ -1863,7 +1863,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inbound_without_an_enrolled_fingerprint_is_not_persisted() {
+    async fn inbound_without_a_dedupe_namespace_is_not_persisted() {
         let store = Store::open_in_memory().unwrap();
         let messaging = Messaging::new(
             store.clone(),

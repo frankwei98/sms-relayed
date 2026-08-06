@@ -35,7 +35,7 @@ pub async fn run_forwarding(config_path: &Path) -> Result<()> {
         delivery_wakeup.clone(),
         sms_sender.clone(),
     )
-    .with_verified_modem(modem_service.clone());
+    .with_modem_service(modem_service.clone());
 
     let client = Arc::new(build_http_client(&config.http));
     let webhook_client = Arc::new(build_webhook_http_client(&config.http));
@@ -167,13 +167,14 @@ pub async fn send_interactive(config_path: &Path) -> Result<()> {
     let sms_sender = Arc::new(dbus::SystemSmsSender::connect().await?);
     let store = Store::open(Path::new(&config.api.database_path)).await?;
     let modem_service = ModemService::new();
-    let verified_path =
-        inbound::resolve_monitor_path(&config.app.modem_path, &modem_service, &store)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("no verified modem identity available"))?;
-    modem_service.set_verified_path(Some(verified_path));
+    let modem_targets =
+        inbound::resolve_monitor_path(&config.app.modem_path, &modem_service, &store).await?;
+    if modem_targets.runtime_path().is_none() {
+        return Err(anyhow::anyhow!("no runtime modem path available"));
+    }
+    modem_service.set_modem_targets(modem_targets);
     let messaging = Messaging::new(store, EventBus::new(), DeliveryWakeup::new(), sms_sender)
-        .with_verified_modem(modem_service);
+        .with_modem_service(modem_service);
     if messaging.has_pending_outbound().await?
         && !Confirm::new(
             "An outbound SMS is unresolved. Sending another may duplicate it. Continue anyway?",
