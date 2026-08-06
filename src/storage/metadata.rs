@@ -162,7 +162,7 @@ mod tests {
 
         assert!(
             error.to_string().contains("no such table: meta"),
-            "expected the fingerprint query error, got: {error:#}"
+            "expected the dedupe namespace query error, got: {error:#}"
         );
     }
 }
