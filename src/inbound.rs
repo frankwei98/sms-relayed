@@ -218,6 +218,10 @@ impl InboundWorker {
 
         info!("SMS monitor ready on {}", actual_path);
 
+        for sms in subscription.take_initial_sms() {
+            self.spawn_incoming_sms(sms, children).await?;
+        }
+
         loop {
             let sms = tokio::select! {
                 _ = identity_refresh.tick() => {
@@ -232,27 +236,36 @@ impl InboundWorker {
                 }
                 sms = subscription.next_sms() => sms?,
             };
-            info!("SmsPath:\n{}", sms.path());
-
-            let permit = self
-                .inbound_limit
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| anyhow::anyhow!("inbound task limiter closed"))?;
-            let storage_filters = self.settings.ignored_storage.clone();
-            let profile_keys = self.settings.profile_keys.clone();
-            let messaging = self.messaging.clone();
-            children.spawn(async move {
-                let _permit = permit;
-                if process_incoming_sms(sms, &storage_filters, messaging, profile_keys)
-                    .await
-                    .is_err()
-                {
-                    report_child_failure();
-                }
-            });
+            self.spawn_incoming_sms(sms, children).await?;
         }
+    }
+
+    async fn spawn_incoming_sms(
+        &self,
+        sms: Box<dyn InboundSmsAdapter>,
+        children: &mut JoinSet<()>,
+    ) -> Result<()> {
+        info!("SmsPath:\n{}", sms.path());
+
+        let permit = self
+            .inbound_limit
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow::anyhow!("inbound task limiter closed"))?;
+        let storage_filters = self.settings.ignored_storage.clone();
+        let profile_keys = self.settings.profile_keys.clone();
+        let messaging = self.messaging.clone();
+        children.spawn(async move {
+            let _permit = permit;
+            if process_incoming_sms(sms, &storage_filters, messaging, profile_keys)
+                .await
+                .is_err()
+            {
+                report_child_failure();
+            }
+        });
+        Ok(())
     }
 
     async fn observe_runtime_identity(&self, actual_path: &str) -> Result<()> {
@@ -641,6 +654,8 @@ trait InboundSourceAdapter: Send + Sync {
 }
 
 trait InboundSubscriptionAdapter: Send {
+    fn take_initial_sms(&mut self) -> Vec<Box<dyn InboundSmsAdapter>>;
+
     fn next_sms<'a>(&'a mut self) -> BoxFuture<'a, Result<Box<dyn InboundSmsAdapter>>>;
 }
 
@@ -668,6 +683,14 @@ impl InboundSourceAdapter for SystemSourceAdapter {
 struct SystemSubscriptionAdapter(InboundSubscription);
 
 impl InboundSubscriptionAdapter for SystemSubscriptionAdapter {
+    fn take_initial_sms(&mut self) -> Vec<Box<dyn InboundSmsAdapter>> {
+        self.0
+            .take_initial_sms()
+            .into_iter()
+            .map(|sms| Box::new(SystemSmsAdapter(sms)) as Box<dyn InboundSmsAdapter>)
+            .collect()
+    }
+
     fn next_sms<'a>(&'a mut self) -> BoxFuture<'a, Result<Box<dyn InboundSmsAdapter>>> {
         Box::pin(async move {
             let InboundEvent::Added(sms) = self.0.next().await?;
@@ -779,6 +802,10 @@ mod tests {
     }
 
     impl InboundSubscriptionAdapter for ScriptedSubscription {
+        fn take_initial_sms(&mut self) -> Vec<Box<dyn InboundSmsAdapter>> {
+            Vec::new()
+        }
+
         fn next_sms<'a>(&'a mut self) -> BoxFuture<'a, Result<Box<dyn InboundSmsAdapter>>> {
             self.reads.fetch_add(1, Ordering::SeqCst);
             let message = self.messages.pop_front();
@@ -798,7 +825,7 @@ mod tests {
     }
 
     impl ScriptedSource {
-        fn new(subscription: ScriptedSubscription) -> Self {
+        fn new(subscription: impl InboundSubscriptionAdapter + 'static) -> Self {
             Self {
                 subscription: Mutex::new(Some(Box::new(subscription))),
                 subscribed: Arc::new(Notify::new()),
@@ -1082,6 +1109,131 @@ mod tests {
         })
         .await
         .expect("counter reached expected value");
+    }
+
+    async fn wait_for_messages(query: &Messaging) -> Vec<crate::message::Message> {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let messages = query
+                    .list(crate::message::MessageFilter::default())
+                    .await
+                    .unwrap();
+                if !messages.is_empty() {
+                    break messages;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("inbound SMS reaches the messaging query seam")
+    }
+
+    struct SnapshotSubscription {
+        initial_messages: Vec<Box<dyn InboundSmsAdapter>>,
+        live_messages: VecDeque<Box<dyn InboundSmsAdapter>>,
+        live_reads: Arc<AtomicUsize>,
+    }
+
+    impl InboundSubscriptionAdapter for SnapshotSubscription {
+        fn take_initial_sms(&mut self) -> Vec<Box<dyn InboundSmsAdapter>> {
+            std::mem::take(&mut self.initial_messages)
+        }
+
+        fn next_sms<'a>(&'a mut self) -> BoxFuture<'a, Result<Box<dyn InboundSmsAdapter>>> {
+            self.live_reads.fetch_add(1, Ordering::SeqCst);
+            let message = self.live_messages.pop_front();
+            Box::pin(async move {
+                match message {
+                    Some(message) => Ok(message),
+                    None => std::future::pending().await,
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_snapshot_is_persisted_without_a_live_added_signal() {
+        let source = Arc::new(ScriptedSource::new(SnapshotSubscription {
+            initial_messages: vec![Box::new(ScriptedSms::new(
+                SMS_PATH,
+                vec![PropertyAction::Return(Ok(properties(
+                    "arrived while offline",
+                    StorageType::Me as u32,
+                )))],
+            ))],
+            live_messages: VecDeque::new(),
+            live_reads: Arc::new(AtomicUsize::new(0)),
+        }));
+        let store = Store::open_in_memory().unwrap();
+        store
+            .set_modem_fingerprint("snapshot-fingerprint".to_string())
+            .await
+            .unwrap();
+        let query = messaging(store.clone());
+        let worker = worker(store, source, settings(Vec::new(), Vec::new()));
+
+        let run = tokio::spawn(async move {
+            let mut children = JoinSet::new();
+            worker.run_subscription(MODEM_PATH, &mut children).await
+        });
+
+        let messages = wait_for_messages(&query).await;
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].body, "arrived while offline");
+        run.abort();
+        let _ = run.await;
+    }
+
+    #[tokio::test]
+    async fn startup_snapshot_overlapping_a_live_signal_is_persisted_once() {
+        let live_reads = Arc::new(AtomicUsize::new(0));
+        let duplicate_properties = || {
+            PropertyAction::Return(Ok(properties(
+                "same SMS from snapshot and signal",
+                StorageType::Me as u32,
+            )))
+        };
+        let source = Arc::new(ScriptedSource::new(SnapshotSubscription {
+            initial_messages: vec![Box::new(ScriptedSms::new(
+                SMS_PATH,
+                vec![duplicate_properties()],
+            ))],
+            live_messages: vec![
+                Box::new(ScriptedSms::new(SMS_PATH, vec![duplicate_properties()]))
+                    as Box<dyn InboundSmsAdapter>,
+            ]
+            .into(),
+            live_reads: live_reads.clone(),
+        }));
+        let store = Store::open_in_memory().unwrap();
+        store
+            .set_modem_fingerprint("snapshot-overlap-fingerprint".to_string())
+            .await
+            .unwrap();
+        let query = messaging(store.clone());
+        let worker = worker(store, source, settings(Vec::new(), Vec::new()));
+
+        let run = tokio::spawn(async move {
+            let mut children = JoinSet::new();
+            worker.run_subscription(MODEM_PATH, &mut children).await
+        });
+
+        wait_for_count(&live_reads, 1).await;
+        let messages = wait_for_messages(&query).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            query
+                .list(crate::message::MessageFilter::default())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        run.abort();
+        let _ = run.await;
     }
 
     #[tokio::test]
