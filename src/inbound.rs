@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
 use log::{error, info, warn};
 use tokio::sync::Semaphore;
@@ -20,6 +20,15 @@ const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
 const BODY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_BODY_POLLS: usize = 600;
+const MAX_PROPERTY_READ_ATTEMPTS: usize = 5;
+#[cfg(not(test))]
+const INITIAL_PROPERTY_READ_RETRY_DELAY: Duration = Duration::from_millis(100);
+#[cfg(test)]
+const INITIAL_PROPERTY_READ_RETRY_DELAY: Duration = Duration::from_millis(1);
+#[cfg(not(test))]
+const MAX_PROPERTY_READ_RETRY_DELAY: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const MAX_PROPERTY_READ_RETRY_DELAY: Duration = Duration::from_millis(4);
 const INITIAL_PERSISTENCE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const MAX_PERSISTENCE_RETRY_DELAY: Duration = Duration::from_secs(30);
 const LEGACY_SINGLE_MODEM_FINGERPRINT_SEED: &str = "sms-relayed-single-modem";
@@ -165,7 +174,7 @@ impl InboundWorker {
             }
             let Some(path) = current_path.clone() else {
                 warn!("no runtime modem path available; retrying resolution");
-                tokio::time::sleep(delay).await;
+                wait_for_reconnect(delay, &mut children).await;
                 delay = next_reconnect_delay(delay);
                 continue;
             };
@@ -205,12 +214,16 @@ impl InboundWorker {
             }
 
             info!("reconnecting in {}s...", delay.as_secs_f64());
-            tokio::time::sleep(delay).await;
+            wait_for_reconnect(delay, &mut children).await;
             delay = next_reconnect_delay(delay);
         }
     }
 
-    async fn run_subscription(&self, actual_path: &str, children: &mut JoinSet<()>) -> Result<()> {
+    async fn run_subscription(
+        &self,
+        actual_path: &str,
+        children: &mut JoinSet<Result<()>>,
+    ) -> Result<()> {
         let mut subscription = self.source.subscribe(actual_path).await?;
         let mut identity_refresh = tokio::time::interval(RUNTIME_IDENTITY_REFRESH_INTERVAL);
         identity_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -243,7 +256,7 @@ impl InboundWorker {
     async fn spawn_incoming_sms(
         &self,
         sms: Box<dyn InboundSmsAdapter>,
-        children: &mut JoinSet<()>,
+        children: &mut JoinSet<Result<()>>,
     ) -> Result<()> {
         info!("SmsPath:\n{}", sms.path());
 
@@ -258,12 +271,7 @@ impl InboundWorker {
         let messaging = self.messaging.clone();
         children.spawn(async move {
             let _permit = permit;
-            if process_incoming_sms(sms, &storage_filters, messaging, profile_keys)
-                .await
-                .is_err()
-            {
-                report_child_failure();
-            }
+            process_incoming_sms(sms, &storage_filters, messaging, profile_keys).await
         });
         Ok(())
     }
@@ -341,15 +349,35 @@ impl InboundWorker {
     }
 }
 
-fn report_child_result(joined: Option<Result<(), tokio::task::JoinError>>) {
-    if matches!(joined, Some(Err(_))) {
-        report_child_failure();
+fn report_child_result(joined: Option<Result<Result<()>, tokio::task::JoinError>>) {
+    match joined {
+        Some(Ok(Ok(()))) | None => {}
+        Some(Ok(Err(error))) => {
+            error!("incoming SMS processing task failed: {error:#}");
+            report_child_failure();
+        }
+        Some(Err(error)) => {
+            error!("incoming SMS processing task failed to join: {error}");
+            report_child_failure();
+        }
     }
 }
 
 fn report_child_failure() {
-    error!("incoming SMS processing task failed");
     crate::monitoring::capture_failure("dbus", "dbus.inbound_processing_failed");
+}
+
+async fn wait_for_reconnect(delay: Duration, children: &mut JoinSet<Result<()>>) {
+    let sleep = tokio::time::sleep(delay);
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            _ = &mut sleep => return,
+            joined = children.join_next(), if !children.is_empty() => {
+                report_child_result(joined);
+            }
+        }
+    }
 }
 
 fn publish_resolved_path(modem_service: &ModemService, resolved: ModemTargets) -> Option<String> {
@@ -402,6 +430,42 @@ fn next_persistence_retry_delay(delay: Duration) -> Duration {
     (delay * 2).min(MAX_PERSISTENCE_RETRY_DELAY)
 }
 
+fn next_property_read_retry_delay(delay: Duration) -> Duration {
+    (delay * 2).min(MAX_PROPERTY_READ_RETRY_DELAY)
+}
+
+async fn read_sms_properties_with_retry(
+    sms: &dyn InboundSmsAdapter,
+) -> Result<InboundSmsProperties> {
+    let mut delay = INITIAL_PROPERTY_READ_RETRY_DELAY;
+    for attempt in 1..=MAX_PROPERTY_READ_ATTEMPTS {
+        match sms.properties().await {
+            Ok(properties) => return Ok(properties),
+            Err(error) if attempt == MAX_PROPERTY_READ_ATTEMPTS => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to read SMS properties for {} after {} attempts",
+                        sms.path(),
+                        MAX_PROPERTY_READ_ATTEMPTS
+                    )
+                });
+            }
+            Err(error) => {
+                warn!(
+                    "read SMS properties failed for {} on attempt {}/{}; retrying: {}",
+                    sms.path(),
+                    attempt,
+                    MAX_PROPERTY_READ_ATTEMPTS,
+                    error
+                );
+                tokio::time::sleep(delay).await;
+                delay = next_property_read_retry_delay(delay);
+            }
+        }
+    }
+    unreachable!("property read loop returns on success or final failure")
+}
+
 async fn process_incoming_sms(
     sms: Box<dyn InboundSmsAdapter>,
     storage_filters: &[StorageType],
@@ -410,7 +474,7 @@ async fn process_incoming_sms(
 ) -> Result<()> {
     let mut retries = 0;
     loop {
-        let properties = sms.properties().await?;
+        let properties = read_sms_properties_with_retry(sms.as_ref()).await?;
 
         if should_ignore_storage(properties.storage, storage_filters) {
             warn!("已过滤不转发");
@@ -1128,6 +1192,16 @@ mod tests {
         .expect("inbound SMS reaches the messaging query seam")
     }
 
+    #[tokio::test]
+    async fn reconnect_delay_drains_completed_processing_tasks() {
+        let mut children = JoinSet::new();
+        children.spawn(async { Err(anyhow::anyhow!("last property source")) });
+
+        wait_for_reconnect(Duration::from_millis(10), &mut children).await;
+
+        assert!(children.is_empty());
+    }
+
     struct SnapshotSubscription {
         initial_messages: Vec<Box<dyn InboundSmsAdapter>>,
         live_messages: VecDeque<Box<dyn InboundSmsAdapter>>,
@@ -1364,6 +1438,80 @@ mod tests {
         assert!(
             subscription_dropped.load(Ordering::SeqCst),
             "cancelling the runtime-owned worker future must drop its active subscription"
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_property_failure_retries_then_reaches_messaging_query() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .set_modem_fingerprint("property-retry-fingerprint".to_string())
+            .await
+            .unwrap();
+        let query = messaging(store);
+        let sms = ScriptedSms::new(
+            SMS_PATH,
+            vec![
+                PropertyAction::Return(Err(anyhow::anyhow!("temporary property timeout"))),
+                PropertyAction::Return(Ok(properties(
+                    "available after retry",
+                    StorageType::Me as u32,
+                ))),
+            ],
+        );
+        let calls = sms.calls.clone();
+
+        process_incoming_sms(Box::new(sms), &[], query.clone(), Vec::new())
+            .await
+            .unwrap();
+
+        let messages = query
+            .list(crate::message::MessageFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].body, "available after retry");
+    }
+
+    #[tokio::test]
+    async fn terminal_property_failure_preserves_path_attempts_and_last_source() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .set_modem_fingerprint("terminal-property-failure".to_string())
+            .await
+            .unwrap();
+        let expected_attempts = 5;
+        let mut actions = (1..expected_attempts)
+            .map(|attempt| {
+                PropertyAction::Return(Err(anyhow::anyhow!("earlier property failure {attempt}")))
+            })
+            .collect::<Vec<_>>();
+        actions.push(PropertyAction::Return(Err(anyhow::anyhow!(
+            "last property source"
+        ))));
+        actions.push(PropertyAction::Wait {
+            started: Arc::new(AtomicUsize::new(0)),
+            dropped: Arc::new(AtomicUsize::new(0)),
+        });
+        let sms = ScriptedSms::new(SMS_PATH, actions);
+        let calls = sms.calls.clone();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            process_incoming_sms(Box::new(sms), &[], messaging(store), Vec::new()),
+        )
+        .await
+        .expect("property retry budget must be bounded");
+        let error = result.unwrap_err();
+        let error_chain = format!("{error:#}");
+
+        assert_eq!(calls.load(Ordering::SeqCst), expected_attempts);
+        assert!(error_chain.contains(SMS_PATH), "{error_chain}");
+        assert!(error_chain.contains("after 5 attempts"), "{error_chain}");
+        assert!(
+            error_chain.contains("last property source"),
+            "{error_chain}"
         );
     }
 
