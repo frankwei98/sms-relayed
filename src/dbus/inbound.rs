@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::Result;
 use futures_util::{future::BoxFuture, StreamExt};
 use zbus::names::OwnedUniqueName;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use zbus::{Connection, Message, MessageStream};
 
 use super::{
@@ -15,6 +15,7 @@ use super::{
 
 const DBUS_METHOD_TIMEOUT: Duration = Duration::from_secs(10);
 const DBUS_PROPERTIES_TIMEOUT: Duration = Duration::from_secs(5);
+const MM_SMS_STATE_RECEIVED: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InboundSmsProperties {
@@ -95,15 +96,18 @@ impl SystemInboundSource {
         add_match_rule(&connection, &removed_rule).await?;
 
         let reader = Arc::new(ZbusSmsPropertiesReader {
-            connection,
+            connection: connection.clone(),
             owner: owner.clone(),
         });
+        let initial_sms =
+            list_received_sms(&connection, &owner, modem_path, reader.clone()).await?;
         Ok(InboundSubscription::new(
             modem_path.to_string(),
             owner.to_string(),
             Box::new(ZbusSessionBackend { stream }),
             reader,
-        ))
+        )
+        .with_initial_sms(initial_sms))
     }
 }
 
@@ -112,6 +116,7 @@ pub(crate) struct InboundSubscription {
     owner: String,
     backend: Box<dyn SessionBackend>,
     reader: Arc<dyn SmsPropertiesReader>,
+    initial_sms: Vec<InboundSms>,
     terminal_error: Option<&'static str>,
 }
 
@@ -127,8 +132,18 @@ impl InboundSubscription {
             owner,
             backend,
             reader,
+            initial_sms: Vec::new(),
             terminal_error: None,
         }
+    }
+
+    fn with_initial_sms(mut self, initial_sms: Vec<InboundSms>) -> Self {
+        self.initial_sms = initial_sms;
+        self
+    }
+
+    pub(crate) fn take_initial_sms(&mut self) -> Vec<InboundSms> {
+        std::mem::take(&mut self.initial_sms)
     }
 
     pub(crate) async fn next(&mut self) -> Result<InboundEvent> {
@@ -177,6 +192,63 @@ impl InboundSubscription {
             }
         }
     }
+}
+
+async fn list_received_sms(
+    connection: &Connection,
+    owner: &OwnedUniqueName,
+    modem_path: &str,
+    reader: Arc<dyn SmsPropertiesReader>,
+) -> Result<Vec<InboundSms>> {
+    let list_call = connection.call_method(
+        Some(owner),
+        modem_path,
+        Some(MM_MESSAGING_INTERFACE),
+        "List",
+        &(),
+    );
+    let list_reply = tokio::time::timeout(DBUS_METHOD_TIMEOUT, list_call)
+        .await
+        .map_err(|_| anyhow::anyhow!("dbus SMS list timeout"))??;
+    let paths: Vec<OwnedObjectPath> = list_reply.body().deserialize()?;
+    let mut received = Vec::with_capacity(paths.len());
+    for path in paths {
+        let sms_path = path.to_string();
+        if sms_is_received(connection, owner, &sms_path).await? {
+            received.push(InboundSms {
+                path: sms_path,
+                reader: reader.clone(),
+            });
+        }
+    }
+    Ok(received)
+}
+
+async fn sms_is_received(
+    connection: &Connection,
+    owner: &OwnedUniqueName,
+    sms_path: &str,
+) -> Result<bool> {
+    let call = connection.call_method(
+        Some(owner),
+        sms_path,
+        Some(DBUS_PROPERTIES_INTERFACE),
+        "GetAll",
+        &(MM_SMS_INTERFACE,),
+    );
+    let reply = tokio::time::timeout(DBUS_PROPERTIES_TIMEOUT, call)
+        .await
+        .map_err(|_| anyhow::anyhow!("dbus SMS snapshot state timeout"))??;
+    let properties: HashMap<String, OwnedValue> = reply.body().deserialize()?;
+    let state = properties
+        .get("State")
+        .ok_or_else(|| anyhow::anyhow!("dbus SMS snapshot has no State property"))?;
+    let Value::U32(state) = (**state).clone() else {
+        return Err(anyhow::anyhow!(
+            "dbus SMS snapshot State property has unexpected type"
+        ));
+    };
+    Ok(state == MM_SMS_STATE_RECEIVED)
 }
 
 trait SessionBackend: Send {
