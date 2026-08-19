@@ -3,8 +3,6 @@ use std::fs;
 use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant};
 
@@ -48,8 +46,6 @@ pub struct SessionStore {
     store: Store,
     password: Arc<str>,
     login_failures: Arc<Mutex<HashMap<IpAddr, LoginFailures>>>,
-    #[cfg(test)]
-    invalidate_all_failure: Arc<AtomicBool>,
 }
 
 impl SessionStore {
@@ -69,8 +65,6 @@ impl SessionStore {
             store,
             password: Arc::from(password),
             login_failures: Arc::new(Mutex::new(HashMap::new())),
-            #[cfg(test)]
-            invalidate_all_failure: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -103,19 +97,6 @@ impl SessionStore {
         self.store
             .delete_auth_session(token_hash(token).to_vec())
             .await
-    }
-
-    pub async fn invalidate_all(&self) -> anyhow::Result<()> {
-        #[cfg(test)]
-        if self.invalidate_all_failure.swap(false, Ordering::SeqCst) {
-            anyhow::bail!("injected session invalidation failure");
-        }
-        self.store.delete_all_auth_sessions().await
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fail_next_invalidate_all(&self) {
-        self.invalidate_all_failure.store(true, Ordering::SeqCst);
     }
 
     fn authenticate(&self, peer: IpAddr, password: &str, expected_password: &str) -> LoginResult {
@@ -543,20 +524,5 @@ mod tests {
             .await
             .unwrap());
         let _ = fs::remove_file(credential_secret_path(&config_path));
-    }
-
-    #[tokio::test]
-    async fn invalidated_sessions_do_not_return_when_the_password_is_reused() {
-        let store = crate::persistence::Store::open_in_memory().unwrap();
-        let sessions = SessionStore::new(store.clone(), "reused-password");
-        let token = sessions.create_session().await.unwrap();
-
-        sessions.invalidate_all().await.unwrap();
-        let sessions_after_password_reuse = SessionStore::new(store, "reused-password");
-
-        assert!(!sessions_after_password_reuse
-            .is_valid(&token)
-            .await
-            .unwrap());
     }
 }

@@ -1,5 +1,5 @@
 import { apiFetch, apiRequest } from "#/lib/api";
-import type { AppConfig } from "#/lib/config-model";
+import type { AppConfig, StatusResponse } from "#/lib/config-model";
 
 export type ConfigDocument = {
 	config: AppConfig;
@@ -90,4 +90,8 @@ export async function saveConfig(
 
 export async function scheduleRestart(): Promise<void> {
 	await apiFetch("/api/service/restart", { method: "POST" });
+}
+
+export async function loadServiceStatus(): Promise<StatusResponse> {
+	return apiFetch<StatusResponse>("/api/status");
 }

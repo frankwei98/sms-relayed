@@ -204,30 +204,20 @@ async fn save_config(
                 .await
                 .map_err(|error| ApiError::internal(error.to_string()))?
                 .map_err(|error| ApiError::internal(error.to_string()))?;
-        if password_changed {
-            state
-                .sessions
-                .invalidate_all()
-                .await
-                .map_err(super::auth::session_storage_error)?;
-        }
         tokio::task::spawn_blocking(move || prepared.commit())
             .await
-            .map_err(|error| config_commit_error(error, password_changed))?
-            .map_err(|error| config_commit_error(error, password_changed))?;
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .map_err(|error| ApiError::internal(error.to_string()))?;
     }
 
-    let restart_scheduled = options.restart_after_save;
-    if restart_scheduled {
-        super::service::schedule_restart(&state);
-    }
+    let restart_scheduled = options.restart_after_save && super::service::schedule_restart(&state);
     state.events.send(AppEvent::ConfigSaved);
 
     let body = ConfigSaveResponse {
         revision: candidate_revision.clone(),
         requires_restart,
         restart_scheduled,
-        session_invalidated: password_changed,
+        session_invalidated: false,
     };
     let mut response = Json(body).into_response();
     apply_document_headers(
@@ -236,15 +226,6 @@ async fn save_config(
         Some(requires_restart),
     )?;
     Ok(response)
-}
-
-fn config_commit_error(error: impl std::fmt::Display, sessions_invalidated: bool) -> ApiError {
-    if sessions_invalidated {
-        log::error!(
-            "configuration commit failed after sessions were invalidated for an API password change; authentication state may require operator attention"
-        );
-    }
-    ApiError::internal(error.to_string())
 }
 
 fn load_config_document_sync(path: &Path) -> anyhow::Result<ConfigDocument> {

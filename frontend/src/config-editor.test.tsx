@@ -104,6 +104,14 @@ type PreviewOverrides = Partial<{
 	hasChanges: boolean;
 	passwordChange: boolean;
 	warnings: string[];
+	restartStatus: "idle" | "scheduled" | "command_completed" | "command_failed";
+	restartStatusSequence: Array<
+		| "idle"
+		| "scheduled"
+		| "command_completed"
+		| "command_failed"
+		| "network_error"
+	>;
 }>;
 
 function previewResponse(previewOverrides: PreviewOverrides = {}) {
@@ -140,6 +148,9 @@ function installApi(
 	nextPreview?: () => Promise<Response>,
 ) {
 	const requests: Array<{ url: string; init?: RequestInit }> = [];
+	const restartStatusSequence = [
+		...(previewOverrides.restartStatusSequence ?? []),
+	];
 	const fetchMock = vi.fn(
 		async (input: RequestInfo | URL, init?: RequestInit) => {
 			const url = String(input);
@@ -169,7 +180,25 @@ function installApi(
 						revision: "saved-revision",
 						requires_restart: true,
 						restart_scheduled: url.includes("restart_after_save=true"),
-						session_invalidated: url.includes("restart_after_save=true"),
+						session_invalidated: false,
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/status") {
+				const nextStatus = restartStatusSequence.shift();
+				if (nextStatus === "network_error") {
+					throw new Error("temporary connection failure");
+				}
+				return new Response(
+					JSON.stringify({
+						version: "test",
+						uptime_seconds: 1,
+						api_bind: "0.0.0.0",
+						api_port: 8080,
+						database_path: "/tmp/sms-relayed.sqlite",
+						restart_status:
+							nextStatus ?? previewOverrides.restartStatus ?? "scheduled",
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);
@@ -530,32 +559,25 @@ describe("ConfigEditor workspace", () => {
 		await screen.findByText("Check failed: invalid device name");
 	});
 
-	test("uses combined save and restart for a password change then signs out", async () => {
+	test("keeps the current session when a password-change restart command fails", async () => {
 		const setAuth = vi.fn();
-		const leavingConfig = {
-			current: { pathname: "/config" },
-			next: { pathname: "/login" },
-		};
 		const { requests } = installApi({
 			passwordChange: true,
 			warnings: ["password_change"],
+			restartStatus: "command_failed",
 		});
 		render(<EditorHarness initialSection="api" setAuth={setAuth} />);
 
 		fireEvent.change(await screen.findByLabelText("Password"), {
 			target: { value: "new-password" },
 		});
-		expect(routerMocks.shouldBlockFn(leavingConfig)).toBe(true);
-		routerMocks.navigate.mockImplementation(async () => {
-			expect(routerMocks.shouldBlockFn(leavingConfig)).toBe(false);
-		});
 		fireEvent.click(screen.getByRole("button", { name: "Save" }));
 		fireEvent.click(
 			await screen.findByRole("button", { name: "Save and schedule restart" }),
 		);
 
-		await waitFor(() =>
-			expect(setAuth).toHaveBeenCalledWith({ authenticated: false }),
+		await screen.findByText(
+			"Service restart command failed. Your current session is still active; retry restart.",
 		);
 		const saveRequest = requests.find(
 			(request) => request.init?.method === "PUT",
@@ -564,12 +586,73 @@ describe("ConfigEditor workspace", () => {
 		expect(
 			requests.some((request) => request.url === "/api/service/restart"),
 		).toBe(false);
-		expect(routerMocks.navigate).toHaveBeenCalledWith(
-			expect.objectContaining({
-				to: "/login",
-				search: { notice: "config_saved_restart_scheduled" },
-			}),
+		expect(requests.some((request) => request.url === "/api/status")).toBe(
+			true,
 		);
+		expect(setAuth).not.toHaveBeenCalled();
+		expect(routerMocks.navigate).not.toHaveBeenCalled();
+		expect(screen.getByText(/Restart required/)).toBeTruthy();
+	});
+
+	test("continues monitoring after a transient restart status failure", async () => {
+		const setAuth = vi.fn();
+		const { requests } = installApi({
+			passwordChange: true,
+			warnings: ["password_change"],
+			restartStatusSequence: ["network_error", "command_failed"],
+		});
+		render(<EditorHarness initialSection="api" setAuth={setAuth} />);
+
+		fireEvent.change(await screen.findByLabelText("Password"), {
+			target: { value: "new-password" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "Save" }));
+		fireEvent.click(
+			await screen.findByRole("button", { name: "Save and schedule restart" }),
+		);
+
+		await screen.findByText(
+			"Service restart command failed. Your current session is still active; retry restart.",
+		);
+		expect(
+			requests.filter((request) => request.url === "/api/status"),
+		).toHaveLength(2);
+		expect(setAuth).not.toHaveBeenCalled();
+		expect(routerMocks.navigate).not.toHaveBeenCalled();
+	});
+
+	test("keeps the success message after the restart command completes", async () => {
+		installApi({
+			passwordChange: true,
+			warnings: ["password_change"],
+			restartStatusSequence: ["command_completed", "command_failed"],
+		});
+		render(<EditorHarness initialSection="api" />);
+
+		fireEvent.change(await screen.findByLabelText("Password"), {
+			target: { value: "new-password" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "Save" }));
+		fireEvent.click(
+			await screen.findByRole("button", { name: "Save and schedule restart" }),
+		);
+
+		await screen.findByText("Configuration saved. Restart required.");
+		await act(
+			() =>
+				new Promise((resolve) => {
+					window.setTimeout(resolve, 600);
+				}),
+		);
+
+		expect(
+			screen.getByText("Configuration saved. Restart required."),
+		).toBeTruthy();
+		expect(
+			screen.queryByText(
+				"Service restart command failed. Your current session is still active; retry restart.",
+			),
+		).toBeNull();
 	});
 
 	test("uses singular category copy for one changed section", async () => {

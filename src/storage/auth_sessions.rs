@@ -109,12 +109,6 @@ impl MessageStore {
         Ok(())
     }
 
-    pub fn delete_all_auth_sessions(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM auth_sessions", [])?;
-        Ok(())
-    }
-
     #[cfg(test)]
     pub fn expire_auth_session(&self, token_hash: &[u8]) -> Result<()> {
         let conn = self.conn.lock().unwrap();

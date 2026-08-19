@@ -1,4 +1,4 @@
-import { useBlocker, useNavigate } from "@tanstack/react-router";
+import { useBlocker } from "@tanstack/react-router";
 import {
 	AlertTriangle,
 	CheckCircle2,
@@ -30,11 +30,12 @@ import {
 	DialogTitle,
 } from "#/components/ui/dialog";
 import { WorkspaceLayout } from "#/components/ui/workspace-layout";
-import { useAuth } from "#/lib/auth";
+import { ApiRequestError } from "#/lib/api";
 import {
 	type ConfigDocument,
 	type ConfigWarning,
 	loadConfigDocument,
+	loadServiceStatus,
 	scheduleRestart,
 } from "#/lib/config-api";
 
@@ -118,13 +119,11 @@ function ConfigWorkspace({
 	backgroundError,
 }: ConfigWorkspaceProps) {
 	const draft = useConfigDraft(initialDocument);
-	const { setAuth } = useAuth();
-	const navigate = useNavigate();
 	const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
 	const [restartOpen, setRestartOpen] = useState(false);
 	const [restartBusy, setRestartBusy] = useState(false);
 	const [actionMessage, setActionMessage] = useState("");
-	const allowNavigation = useRef(false);
+	const restartMonitorGeneration = useRef(0);
 	const { t } = useTranslation();
 	const activeSection = useMemo(
 		() =>
@@ -136,7 +135,6 @@ function ConfigWorkspace({
 
 	const blocker = useBlocker({
 		shouldBlockFn: ({ current, next }) =>
-			!allowNavigation.current &&
 			draft.isDirty &&
 			current.pathname === "/config" &&
 			next.pathname !== "/config",
@@ -145,29 +143,59 @@ function ConfigWorkspace({
 		withResolver: true,
 	});
 
+	useEffect(
+		() => () => {
+			restartMonitorGeneration.current += 1;
+		},
+		[],
+	);
+
+	async function monitorRestart() {
+		const generation = restartMonitorGeneration.current + 1;
+		restartMonitorGeneration.current = generation;
+		for (let attempt = 0; attempt < 60; attempt += 1) {
+			if (attempt > 0) {
+				await new Promise((resolve) => window.setTimeout(resolve, 500));
+			}
+			if (restartMonitorGeneration.current !== generation) return;
+			try {
+				const status = await loadServiceStatus();
+				if (restartMonitorGeneration.current !== generation) return;
+				if (status.restart_status === "command_failed") {
+					setActionMessage(t("config.status.restartCommandFailed"));
+					return;
+				}
+				if (
+					status.restart_status === "command_completed" ||
+					status.restart_status === "idle"
+				) {
+					return;
+				}
+			} catch (statusError) {
+				// A 401 is handled globally and proves that a new process with changed
+				// credentials is serving requests. Other failures are inconclusive.
+				if (
+					statusError instanceof ApiRequestError &&
+					statusError.status === 401
+				) {
+					return;
+				}
+			}
+		}
+		if (restartMonitorGeneration.current === generation) {
+			setActionMessage(t("config.status.restartStatusUnavailable"));
+		}
+	}
+
 	async function handleConfirmSave() {
 		const result = await draft.confirmSave();
 		if (!result) return;
-		if (result.session_invalidated) {
-			allowNavigation.current = true;
-			try {
-				setAuth({ authenticated: false });
-				await navigate({
-					to: "/login",
-					search: {
-						notice: "config_saved_restart_scheduled",
-					},
-				});
-			} finally {
-				allowNavigation.current = false;
-			}
-			return;
-		}
 		setActionMessage(
 			result.requires_restart
 				? t("config.status.savedRestart")
 				: t("config.status.saved"),
 		);
+		if (result.restart_scheduled) void monitorRestart();
 	}
 
 	async function handleRestart() {
@@ -177,6 +205,7 @@ function ConfigWorkspace({
 			await scheduleRestart();
 			setActionMessage(t("config.status.restartScheduled"));
 			setRestartOpen(false);
+			void monitorRestart();
 		} catch (restartError) {
 			setActionMessage(
 				t("config.status.restartFailed", {

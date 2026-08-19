@@ -434,6 +434,9 @@ export const zhCN = {
 			savedRestart: "配置已保存。需要重启。",
 			restartScheduled: "重启已安排。仪表盘可能短暂断开。",
 			restartFailed: "重启失败：{{message}}",
+			restartCommandFailed: "服务重启命令失败。当前会话仍然有效；请重试重启。",
+			restartStatusUnavailable:
+				"无法确认服务是否已重启。当前会话仍然有效；请重试重启。",
 		},
 		restartDialog: {
 			title: "安排服务重启？",
@@ -466,7 +469,8 @@ export const zhCN = {
 			saveAndRestart: "保存并安排重启",
 		},
 		warnings: {
-			passwordChange: "保存并安排重启后，所有会话将被登出。",
+			passwordChange:
+				"服务重启前当前会话保持有效；新服务启动后所有会话才会失效。",
 			apiDisable: "重启后仪表盘将不可用。",
 			apiEndpointChange: "重启后仪表盘地址可能更改。",
 			trustedProxiesChange: "重启后，登录限流将使用更新后的可信代理列表。",
@@ -533,7 +537,8 @@ export const zhCN = {
 				ipv6: "IPv6 辅助地址",
 				ipv6Description: "当可以推断出安全的 IPv6 辅助地址时，也监听该地址。",
 				password: "密码",
-				passwordDescription: "更改此值将一步保存并安排重启，然后登出所有会话。",
+				passwordDescription:
+					"更改此值将一步保存并安排重启。只有新服务启动后，所有会话才会失效。",
 				databasePath: "数据库路径",
 			},
 			timeouts: {

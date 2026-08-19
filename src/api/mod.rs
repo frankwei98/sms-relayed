@@ -492,10 +492,23 @@ mod route_tests {
     }
 
     impl service::ServiceRestarter for RecordingServiceRestarter {
-        fn restart(&self) {
+        fn restart(&self) -> anyhow::Result<()> {
             if let Some(completed) = &self.completed {
                 let _ = completed.send(());
             }
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct FailingServiceRestarter {
+        completed: tokio::sync::mpsc::UnboundedSender<()>,
+    }
+
+    impl service::ServiceRestarter for FailingServiceRestarter {
+        fn restart(&self) -> anyhow::Result<()> {
+            let _ = self.completed.send(());
+            anyhow::bail!("sensitive restart command details")
         }
     }
 
@@ -795,14 +808,72 @@ mod route_tests {
     }
 
     #[tokio::test]
-    async fn changing_the_api_password_schedules_restart_and_invalidates_sessions() {
+    async fn restart_failure_is_reported_safely_and_the_current_session_can_retry() {
+        let mut state = test_state();
+        let (completed, mut restarts) = tokio::sync::mpsc::unbounded_channel();
+        state.service_control = service::ServiceControl::new(FailingServiceRestarter { completed });
+        let service_control = state.service_control.clone();
+        let token = state.sessions.create_session().await.unwrap();
+        let app = router(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/service/restart")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        expect_restart_completed(&mut restarts).await;
+        expect_restart_idle(&service_control).await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status["restart_status"], "command_failed");
+        assert!(!String::from_utf8_lossy(&body).contains("sensitive restart command details"));
+
+        let retry = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/service/restart")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::ACCEPTED);
+        expect_restart_completed(&mut restarts).await;
+    }
+
+    #[tokio::test]
+    async fn changing_the_api_password_schedules_restart_without_invalidating_current_sessions() {
         let mut state = test_state();
         let (config_path, base_revision) = write_config_file(&state.config, "password-change");
         state.config_path = config_path.clone();
         let (restarter, mut restarts) = RecordingServiceRestarter::with_completion_signal();
         state.service_control = service::ServiceControl::new(restarter);
         let token = state.sessions.create_session().await.unwrap();
-        let sessions = state.sessions.clone();
         let mut updated_config = (*state.config).clone();
         updated_config.api.password = "new-password".to_string();
         let candidate_revision =
@@ -810,6 +881,7 @@ mod route_tests {
         let app = router(state);
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method(Method::PUT)
@@ -832,8 +904,76 @@ mod route_tests {
         )
         .unwrap();
         assert_eq!(body["restart_scheduled"], true);
-        assert_eq!(body["session_invalidated"], true);
-        assert!(!sessions.is_valid(&token).await.unwrap());
+        assert_eq!(body["session_invalidated"], false);
+
+        let authenticated_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authenticated_response.status(), StatusCode::OK);
+        expect_restart_completed(&mut restarts).await;
+
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
+    async fn config_save_reports_when_its_restart_request_was_not_accepted() {
+        let mut state = test_state();
+        let (config_path, base_revision) =
+            write_config_file(&state.config, "restart-already-scheduled");
+        state.config_path = config_path.clone();
+        let (restarter, mut restarts) = RecordingServiceRestarter::with_completion_signal();
+        state.service_control = service::ServiceControl::new(restarter);
+        let token = state.sessions.create_session().await.unwrap();
+        let mut updated_config = (*state.config).clone();
+        updated_config.app.device_name = "saved-while-restart-pending".to_string();
+        let candidate_revision =
+            crate::config::config_revision(&updated_config.canonical_toml().unwrap());
+        let app = router(state);
+
+        let restart_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/service/restart")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(restart_response.status(), StatusCode::ACCEPTED);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/config?restart_after_save=true")
+                    .header("cookie", format!("sms-relayed-session={token}"))
+                    .header("content-type", "application/json")
+                    .header("if-match", base_revision)
+                    .header("x-config-candidate-revision", candidate_revision)
+                    .body(Body::from(serde_json::to_vec(&updated_config).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["restart_scheduled"], false);
         expect_restart_completed(&mut restarts).await;
 
         let _ = std::fs::remove_file(config_path);
@@ -872,54 +1012,12 @@ mod route_tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(!sessions.is_valid(&token).await.unwrap());
+        assert!(sessions.is_valid(&token).await.unwrap());
         assert_eq!(
             std::fs::read_to_string(&config_path).unwrap(),
             candidate_toml
         );
         expect_restart_completed(&mut restarts).await;
-
-        let _ = std::fs::remove_file(config_path);
-    }
-
-    #[tokio::test]
-    async fn password_change_does_not_schedule_restart_when_session_invalidation_fails() {
-        let mut state = test_state();
-        let (config_path, base_revision) =
-            write_config_file(&state.config, "password-invalidation-failure");
-        state.config_path = config_path.clone();
-        let original = std::fs::read_to_string(&config_path).unwrap();
-        state.service_control = service::ServiceControl::new(RecordingServiceRestarter::default());
-        let service_control = state.service_control.clone();
-        let token = state.sessions.create_session().await.unwrap();
-        state.sessions.fail_next_invalidate_all();
-        let mut updated_config = (*state.config).clone();
-        updated_config.api.password = "new-password".to_string();
-        let candidate_revision =
-            crate::config::config_revision(&updated_config.canonical_toml().unwrap());
-        let app = router(state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::PUT)
-                    .uri("/api/config?restart_after_save=true")
-                    .header("cookie", format!("sms-relayed-session={token}"))
-                    .header("content-type", "application/json")
-                    .header("if-match", base_revision.clone())
-                    .header("x-config-candidate-revision", candidate_revision)
-                    .body(Body::from(serde_json::to_vec(&updated_config).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let saved = std::fs::read_to_string(&config_path).unwrap();
-        assert_eq!(saved, original);
-        assert_eq!(crate::config::config_revision(&saved), base_revision);
-        assert!(config_temporary_files(&config_path).is_empty());
-        assert!(!service_control.restart_pending());
 
         let _ = std::fs::remove_file(config_path);
     }
@@ -969,7 +1067,7 @@ mod route_tests {
     }
 
     #[tokio::test]
-    async fn password_change_commit_failure_invalidates_sessions_and_returns_internal_error() {
+    async fn password_change_commit_failure_preserves_sessions_and_returns_internal_error() {
         let mut state = test_state();
         let (config_path, base_revision) =
             write_config_file(&state.config, "password-commit-failure");
@@ -1009,7 +1107,7 @@ mod route_tests {
         )
         .unwrap();
         assert_eq!(body["error"]["code"], "internal_error");
-        assert!(!sessions.is_valid(&token).await.unwrap());
+        assert!(sessions.is_valid(&token).await.unwrap());
         let saved = std::fs::read_to_string(&config_path).unwrap();
         assert_eq!(saved, original);
         assert_eq!(crate::config::config_revision(&saved), base_revision);

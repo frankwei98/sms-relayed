@@ -47,10 +47,6 @@ impl Store {
             .await
     }
 
-    pub async fn delete_all_auth_sessions(&self) -> Result<()> {
-        self.run(|sqlite| sqlite.delete_all_auth_sessions()).await
-    }
-
     #[cfg(test)]
     pub async fn expire_auth_session(&self, token_hash: Vec<u8>) -> Result<()> {
         self.run(move |sqlite| sqlite.expire_auth_session(&token_hash))
