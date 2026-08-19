@@ -453,6 +453,10 @@ export const en = {
 			restartScheduled:
 				"Restart scheduled. The dashboard may disconnect briefly.",
 			restartFailed: "Restart failed: {{message}}",
+			restartCommandFailed:
+				"Service restart command failed. Your current session is still active; retry restart.",
+			restartStatusUnavailable:
+				"Unable to confirm the service restart. Your current session is still active; retry restart.",
 		},
 		restartDialog: {
 			title: "Schedule service restart?",
@@ -487,7 +491,7 @@ export const en = {
 		},
 		warnings: {
 			passwordChange:
-				"All sessions will be signed out after Save + Restart is scheduled.",
+				"Current sessions stay active until the service restarts, then all sessions are signed out.",
 			apiDisable: "The dashboard will be unavailable after restart.",
 			apiEndpointChange: "The dashboard address may change after restart.",
 			trustedProxiesChange:
@@ -564,7 +568,7 @@ export const en = {
 					"Also listen on a safe IPv6 companion address when one can be inferred.",
 				password: "Password",
 				passwordDescription:
-					"Changing this value saves and schedules restart in one step, then signs out every session.",
+					"Changing this value saves and schedules restart in one step. Sessions are signed out only after the new service starts.",
 				databasePath: "Database path",
 			},
 			timeouts: {

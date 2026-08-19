@@ -65,4 +65,5 @@ export type StatusResponse = {
 	api_bind: string;
 	api_port: number;
 	database_path: string;
+	restart_status: "idle" | "scheduled" | "command_completed" | "command_failed";
 };

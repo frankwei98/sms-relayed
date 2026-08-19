@@ -468,6 +468,10 @@ export const fr = {
 			restartScheduled:
 				"Redémarrage planifié. Le tableau de bord peut se déconnecter brièvement.",
 			restartFailed: "Échec du redémarrage : {{message}}",
+			restartCommandFailed:
+				"La commande de redémarrage du service a échoué. Votre session actuelle reste active ; réessayez le redémarrage.",
+			restartStatusUnavailable:
+				"Impossible de confirmer le redémarrage du service. Votre session actuelle reste active ; réessayez.",
 		},
 		restartDialog: {
 			title: "Planifier le redémarrage du service ?",
@@ -502,7 +506,7 @@ export const fr = {
 		},
 		warnings: {
 			passwordChange:
-				"Toutes les sessions seront déconnectées après l'enregistrement et la planification du redémarrage.",
+				"Les sessions actuelles restent actives jusqu'au redémarrage du service, puis elles sont toutes déconnectées.",
 			apiDisable: "Le tableau de bord sera indisponible après le redémarrage.",
 			apiEndpointChange:
 				"L'adresse du tableau de bord peut changer après le redémarrage.",
@@ -580,7 +584,7 @@ export const fr = {
 					"Écoute également sur une adresse compagnon IPv6 sûre lorsqu'elle peut être déduite.",
 				password: "Mot de passe",
 				passwordDescription:
-					"Modifier cette valeur enregistre et planifie le redémarrage en une seule étape, puis déconnecte toutes les sessions.",
+					"Modifier cette valeur enregistre et planifie le redémarrage en une seule étape. Les sessions ne sont déconnectées qu'au démarrage du nouveau service.",
 				databasePath: "Chemin de la base de données",
 			},
 			timeouts: {

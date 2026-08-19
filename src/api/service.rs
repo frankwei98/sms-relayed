@@ -1,5 +1,5 @@
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,16 +20,28 @@ struct StatusResponse {
     api_bind: String,
     api_port: u16,
     database_path: String,
+    restart_status: RestartStatus,
 }
 
 pub trait ServiceRestarter: Send + Sync {
-    fn restart(&self);
+    fn restart(&self) -> anyhow::Result<()>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[repr(u8)]
+#[serde(rename_all = "snake_case")]
+pub enum RestartStatus {
+    Idle,
+    Scheduled,
+    CommandCompleted,
+    CommandFailed,
 }
 
 #[derive(Clone)]
 pub struct ServiceControl {
     restarter: Arc<dyn ServiceRestarter>,
     restart_pending: Arc<AtomicBool>,
+    restart_status: Arc<AtomicU8>,
 }
 
 impl ServiceControl {
@@ -37,6 +49,7 @@ impl ServiceControl {
         Self {
             restarter: Arc::new(restarter),
             restart_pending: Arc::new(AtomicBool::new(false)),
+            restart_status: Arc::new(AtomicU8::new(RestartStatus::Idle as u8)),
         }
     }
 
@@ -51,14 +64,36 @@ impl ServiceControl {
 
         let restarter = self.restarter.clone();
         let restart_pending = self.restart_pending.clone();
+        let restart_status = self.restart_status.clone();
+        restart_status.store(RestartStatus::Scheduled as u8, Ordering::Release);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            if let Err(error) = tokio::task::spawn_blocking(move || restarter.restart()).await {
-                log::warn!("service restart task failed: {}", error);
-            }
+            let status = match tokio::task::spawn_blocking(move || restarter.restart()).await {
+                Ok(Ok(())) => RestartStatus::CommandCompleted,
+                Ok(Err(error)) => {
+                    log::warn!("service restart command failed: {}", error);
+                    RestartStatus::CommandFailed
+                }
+                Err(error) => {
+                    log::warn!("service restart task failed: {}", error);
+                    RestartStatus::CommandFailed
+                }
+            };
+            restart_status.store(status as u8, Ordering::Release);
             restart_pending.store(false, Ordering::Release);
         });
         true
+    }
+
+    pub fn restart_status(&self) -> RestartStatus {
+        match self.restart_status.load(Ordering::Acquire) {
+            value if value == RestartStatus::Scheduled as u8 => RestartStatus::Scheduled,
+            value if value == RestartStatus::CommandCompleted as u8 => {
+                RestartStatus::CommandCompleted
+            }
+            value if value == RestartStatus::CommandFailed as u8 => RestartStatus::CommandFailed,
+            _ => RestartStatus::Idle,
+        }
     }
 
     #[cfg(test)]
@@ -76,26 +111,20 @@ impl Default for ServiceControl {
 struct SystemServiceRestarter;
 
 impl ServiceRestarter for SystemServiceRestarter {
-    fn restart(&self) {
+    fn restart(&self) -> anyhow::Result<()> {
         let initd = "/etc/init.d/sms-relayed";
-        let result = if std::path::Path::new(initd).exists() {
+        let status = if std::path::Path::new(initd).exists() {
             Command::new(initd).arg("restart").status()
         } else {
             Command::new("systemctl")
                 .args(["restart", "sms-relayed"])
                 .status()
-        };
-        match result {
-            Ok(status) if status.success() => {
-                log::info!("service restart command completed successfully");
-            }
-            Ok(status) => {
-                log::warn!("service restart command exited with status {}", status);
-            }
-            Err(error) => {
-                log::warn!("failed to run service restart command: {}", error);
-            }
+        }?;
+        if !status.success() {
+            anyhow::bail!("service restart command exited with status {status}");
         }
+        log::info!("service restart command completed successfully");
+        Ok(())
     }
 }
 
@@ -120,6 +149,7 @@ async fn status(State(state): State<ApiState>) -> ApiResult<Json<StatusResponse>
         api_bind: state.config.api.bind.clone(),
         api_port: state.config.api.port,
         database_path: state.config.api.database_path.clone(),
+        restart_status: state.service_control.restart_status(),
     }))
 }
 

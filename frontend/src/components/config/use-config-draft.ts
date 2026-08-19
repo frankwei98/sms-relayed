@@ -202,9 +202,7 @@ export function useConfigDraft(initialDocument: ConfigDocument) {
 				setBaseline(structuredClone(snapshot));
 				setDraft(structuredClone(snapshot));
 				setBaseRevision(result.revision);
-				setRestartRequired(
-					result.requires_restart && !result.restart_scheduled,
-				);
+				setRestartRequired(result.requires_restart);
 				draftVersion.current += 1;
 				setCheck({ status: "idle" });
 				setPreview({ status: "closed" });

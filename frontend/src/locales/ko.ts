@@ -452,6 +452,10 @@ export const ko = {
 			restartScheduled:
 				"재시작이 예약되었습니다. 대시보드가 잠시 끊길 수 있습니다.",
 			restartFailed: "재시작 실패: {{message}}",
+			restartCommandFailed:
+				"서비스 재시작 명령이 실패했습니다. 현재 세션은 계속 유효합니다. 재시작을 다시 시도하세요.",
+			restartStatusUnavailable:
+				"서비스 재시작을 확인할 수 없습니다. 현재 세션은 계속 유효합니다. 재시작을 다시 시도하세요.",
 		},
 		restartDialog: {
 			title: "서비스 재시작을 예약하시겠습니까?",
@@ -485,7 +489,8 @@ export const ko = {
 			saveAndRestart: "저장 및 재시작 예약",
 		},
 		warnings: {
-			passwordChange: "저장 및 재시작 예약 후 모든 세션에서 로그아웃됩니다.",
+			passwordChange:
+				"서비스가 재시작될 때까지 현재 세션은 유지되며, 새 서비스가 시작된 후 모든 세션이 무효화됩니다.",
 			apiDisable: "재시작 후 대시보드를 사용할 수 없습니다.",
 			apiEndpointChange: "재시작 후 대시보드 주소가 변경될 수 있습니다.",
 			trustedProxiesChange:
@@ -561,7 +566,7 @@ export const ko = {
 					"안전한 IPv6 동반 주소를 추론할 수 있을 때 해당 주소에서도 수신합니다.",
 				password: "비밀번호",
 				passwordDescription:
-					"이 값을 변경하면 한 단계로 저장 및 재시작이 예약된 후 모든 세션에서 로그아웃됩니다.",
+					"이 값을 변경하면 한 단계로 저장 및 재시작이 예약됩니다. 새 서비스가 시작된 후에만 모든 세션이 무효화됩니다.",
 				databasePath: "데이터베이스 경로",
 			},
 			timeouts: {

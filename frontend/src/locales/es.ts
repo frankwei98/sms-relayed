@@ -471,6 +471,10 @@ export const es = {
 			restartScheduled:
 				"Reinicio programado. El panel puede desconectarse brevemente.",
 			restartFailed: "Reinicio fallido: {{message}}",
+			restartCommandFailed:
+				"El comando de reinicio del servicio falló. La sesión actual sigue activa; vuelve a intentar el reinicio.",
+			restartStatusUnavailable:
+				"No se pudo confirmar el reinicio del servicio. La sesión actual sigue activa; vuelve a intentarlo.",
 		},
 		restartDialog: {
 			title: "¿Programar reinicio del servicio?",
@@ -505,7 +509,7 @@ export const es = {
 		},
 		warnings: {
 			passwordChange:
-				"Todas las sesiones se cerrarán tras programar Guardar + Reiniciar.",
+				"Las sesiones actuales siguen activas hasta que el servicio se reinicie; después se cerrarán todas.",
 			apiDisable: "El panel no estará disponible tras el reinicio.",
 			apiEndpointChange:
 				"La dirección del panel puede cambiar tras el reinicio.",
@@ -583,7 +587,7 @@ export const es = {
 					"Escuchar también en una dirección IPv6 complementaria segura cuando se pueda inferir una.",
 				password: "Contraseña",
 				passwordDescription:
-					"Cambiar este valor guarda y programa el reinicio en un solo paso y luego cierra todas las sesiones.",
+					"Cambiar este valor guarda y programa el reinicio en un solo paso. Las sesiones se cierran solo cuando inicia el nuevo servicio.",
 				databasePath: "Ruta de la base de datos",
 			},
 			timeouts: {
