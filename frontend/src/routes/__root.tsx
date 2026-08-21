@@ -7,7 +7,16 @@ import {
 	useNavigate,
 } from "@tanstack/react-router";
 import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools";
-import { Globe, LogOut } from "lucide-react";
+import {
+	Cpu,
+	Forward,
+	Globe,
+	LogOut,
+	type LucideIcon,
+	MessageSquare,
+	Settings,
+	Star,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "#/components/ui/button";
@@ -34,6 +43,21 @@ const languageTranslationKeys = {
 	fr: "language.fr",
 	es: "language.es",
 } as const satisfies Record<SupportedLanguage, string>;
+
+const navigationItems = [
+	{ to: "/", label: "nav.sms", icon: MessageSquare },
+	{ to: "/modem", label: "nav.modem", icon: Cpu },
+	{ to: "/favorites", label: "nav.favorites", icon: Star },
+	{ to: "/forwarding", label: "nav.forwarding", icon: Forward },
+	{ to: "/config", label: "nav.config", icon: Settings },
+] as const satisfies ReadonlyArray<{
+	to: "/" | "/modem" | "/favorites" | "/forwarding" | "/config";
+	label: `nav.${string}`;
+	icon: LucideIcon;
+}>;
+
+const navigationLinkClassName =
+	"inline-flex shrink-0 items-center gap-2 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground";
 
 export const Route = createRootRoute({
 	component: RootComponent,
@@ -110,47 +134,7 @@ function RootComponent() {
 					<h1 className="shrink-0 text-base font-semibold md:text-lg">
 						SMS Relayed
 					</h1>
-					<nav
-						className="flex min-w-0 flex-1 gap-1 overflow-x-auto"
-						aria-label={t("header.ariaPrimary")}
-					>
-						<Link
-							to="/"
-							activeOptions={{ exact: true }}
-							className="shrink-0 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-							activeProps={{ className: "bg-accent text-accent-foreground" }}
-						>
-							{t("nav.sms")}
-						</Link>
-						<Link
-							to="/modem"
-							className="shrink-0 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-							activeProps={{ className: "bg-accent text-accent-foreground" }}
-						>
-							{t("nav.modem")}
-						</Link>
-						<Link
-							to="/favorites"
-							className="shrink-0 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-							activeProps={{ className: "bg-accent text-accent-foreground" }}
-						>
-							{t("nav.favorites")}
-						</Link>
-						<Link
-							to="/forwarding"
-							className="shrink-0 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-							activeProps={{ className: "bg-accent text-accent-foreground" }}
-						>
-							{t("nav.forwarding")}
-						</Link>
-						<Link
-							to="/config"
-							className="shrink-0 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-							activeProps={{ className: "bg-accent text-accent-foreground" }}
-						>
-							{t("nav.config")}
-						</Link>
-					</nav>
+					<PrimaryNavigation />
 					<div className="flex shrink-0 items-center gap-1">
 						<LanguageSwitcher />
 						<Button
@@ -179,6 +163,32 @@ function RootComponent() {
 				/>
 			</div>
 		</AuthContext.Provider>
+	);
+}
+
+function PrimaryNavigation() {
+	const { t } = useTranslation();
+
+	return (
+		<nav
+			className="flex min-w-0 flex-1 gap-1 overflow-x-auto"
+			aria-label={t("header.ariaPrimary")}
+		>
+			{navigationItems.map(({ to, label, icon: Icon }) => (
+				<Link
+					key={to}
+					to={to}
+					activeOptions={to === "/" ? { exact: true } : undefined}
+					className={navigationLinkClassName}
+					activeProps={{
+						className: `${navigationLinkClassName} bg-accent text-accent-foreground`,
+					}}
+				>
+					<Icon className="size-4" aria-hidden="true" />
+					{t(label)}
+				</Link>
+			))}
+		</nav>
 	);
 }
 
