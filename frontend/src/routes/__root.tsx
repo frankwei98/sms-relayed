@@ -124,8 +124,8 @@ function RootComponent() {
 		location.pathname,
 	);
 	const mainClassName = isWorkspace
-		? "min-h-0 flex-1 overflow-hidden p-0 md:p-4"
-		: "flex-1 overflow-auto p-4 md:p-6";
+		? "mobile-navigation-offset min-h-0 flex-1 overflow-hidden p-0 md:p-4"
+		: "mobile-navigation-offset flex-1 overflow-auto p-4 md:p-6";
 
 	return (
 		<AuthContext.Provider value={{ auth, setAuth }}>
@@ -152,6 +152,7 @@ function RootComponent() {
 				<main className={mainClassName}>
 					<Outlet />
 				</main>
+				<MobileNavigation />
 				<TanStackDevtools
 					config={{ position: "bottom-right" }}
 					plugins={[
@@ -171,7 +172,7 @@ function PrimaryNavigation() {
 
 	return (
 		<nav
-			className="flex min-w-0 flex-1 gap-1 overflow-x-auto"
+			className="hidden min-w-0 flex-1 gap-1 overflow-x-auto md:flex"
 			aria-label={t("header.ariaPrimary")}
 		>
 			{navigationItems.map(({ to, label, icon: Icon }) => (
@@ -186,6 +187,33 @@ function PrimaryNavigation() {
 				>
 					<Icon className="size-4" aria-hidden="true" />
 					{t(label)}
+				</Link>
+			))}
+		</nav>
+	);
+}
+
+function MobileNavigation() {
+	const { t } = useTranslation();
+
+	return (
+		<nav
+			className="mobile-navigation fixed inset-x-3 z-50 mx-auto flex h-[4.5rem] max-w-md items-center gap-1 rounded-[1.75rem] border border-border/80 bg-background/85 p-1.5 shadow-xl shadow-black/10 backdrop-blur-2xl md:hidden"
+			aria-label={t("header.ariaPrimary")}
+		>
+			{navigationItems.map(({ to, label, icon: Icon }) => (
+				<Link
+					key={to}
+					to={to}
+					activeOptions={to === "/" ? { exact: true } : undefined}
+					className="flex min-w-0 flex-1 flex-col items-center justify-center gap-1 rounded-[1.25rem] px-1 py-1.5 text-[0.65rem] font-medium leading-none text-muted-foreground transition-[background-color,color,transform] duration-200 hover:bg-accent hover:text-accent-foreground active:scale-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+					activeProps={{
+						className:
+							"flex min-w-0 flex-1 flex-col items-center justify-center gap-1 rounded-[1.25rem] bg-primary px-1 py-1.5 text-[0.65rem] font-medium leading-none text-primary-foreground shadow-sm transition-[background-color,color,transform] duration-200 active:scale-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+					}}
+				>
+					<Icon className="size-5" strokeWidth={1.9} aria-hidden="true" />
+					<span className="truncate">{t(label)}</span>
 				</Link>
 			))}
 		</nav>

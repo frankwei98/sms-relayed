@@ -36,6 +36,14 @@ body {
     position: fixed;
     inset: 0;
   }
+
+  .mobile-navigation-offset {
+    padding-bottom: calc(5.75rem + env(safe-area-inset-bottom));
+  }
+
+  .mobile-navigation {
+    bottom: calc(0.75rem + env(safe-area-inset-bottom));
+  }
 }
 
 @theme inline {
