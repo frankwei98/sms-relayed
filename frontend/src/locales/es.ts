@@ -10,7 +10,19 @@ export const es = {
 		favorites: "Favoritos",
 		modem: "Módem",
 		forwarding: "Reenvío",
+		status: "Estado",
 		config: "Configuración",
+	},
+	status: {
+		eyebrow: "Estado del sistema",
+		title: "Estado",
+		description:
+			"Consulta el módem y el canal de reenvío desde una sola vista.",
+		ariaTabs: "Secciones de estado",
+		tabs: {
+			modem: "Módem",
+			forwarding: "Reenvío",
+		},
 	},
 	header: {
 		ariaPrimary: "Principal",

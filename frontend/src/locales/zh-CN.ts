@@ -10,7 +10,18 @@ export const zhCN = {
 		favorites: "收藏",
 		modem: "调制解调器",
 		forwarding: "转发",
+		status: "状态",
 		config: "配置",
+	},
+	status: {
+		eyebrow: "系统状态",
+		title: "状态",
+		description: "在一个页面查看调制解调器和转发链路。",
+		ariaTabs: "状态视图",
+		tabs: {
+			modem: "调制解调器",
+			forwarding: "转发",
+		},
 	},
 	header: {
 		ariaPrimary: "主导航",

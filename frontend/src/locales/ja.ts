@@ -10,7 +10,18 @@ export const ja = {
 		favorites: "お気に入り",
 		modem: "モデム",
 		forwarding: "転送",
+		status: "ステータス",
 		config: "設定",
+	},
+	status: {
+		eyebrow: "システム状態",
+		title: "ステータス",
+		description: "モデムと転送パイプラインを一つの画面で確認できます。",
+		ariaTabs: "ステータス表示",
+		tabs: {
+			modem: "モデム",
+			forwarding: "転送",
+		},
 	},
 	header: {
 		ariaPrimary: "メインナビゲーション",

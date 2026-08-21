@@ -9,6 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as StatusRouteImport } from './routes/status'
 import { Route as ModemRouteImport } from './routes/modem'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as ForwardingRouteImport } from './routes/forwarding'
@@ -16,6 +17,11 @@ import { Route as FavoritesRouteImport } from './routes/favorites'
 import { Route as ConfigRouteImport } from './routes/config'
 import { Route as IndexRouteImport } from './routes/index'
 
+const StatusRoute = StatusRouteImport.update({
+  id: '/status',
+  path: '/status',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ModemRoute = ModemRouteImport.update({
   id: '/modem',
   path: '/modem',
@@ -54,6 +60,7 @@ export interface FileRoutesByFullPath {
   '/forwarding': typeof ForwardingRoute
   '/login': typeof LoginRoute
   '/modem': typeof ModemRoute
+  '/status': typeof StatusRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -62,6 +69,7 @@ export interface FileRoutesByTo {
   '/forwarding': typeof ForwardingRoute
   '/login': typeof LoginRoute
   '/modem': typeof ModemRoute
+  '/status': typeof StatusRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -71,13 +79,27 @@ export interface FileRoutesById {
   '/forwarding': typeof ForwardingRoute
   '/login': typeof LoginRoute
   '/modem': typeof ModemRoute
+  '/status': typeof StatusRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    '/' | '/config' | '/favorites' | '/forwarding' | '/login' | '/modem'
+    | '/'
+    | '/config'
+    | '/favorites'
+    | '/forwarding'
+    | '/login'
+    | '/modem'
+    | '/status'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/config' | '/favorites' | '/forwarding' | '/login' | '/modem'
+  to:
+    | '/'
+    | '/config'
+    | '/favorites'
+    | '/forwarding'
+    | '/login'
+    | '/modem'
+    | '/status'
   id:
     | '__root__'
     | '/'
@@ -86,6 +108,7 @@ export interface FileRouteTypes {
     | '/forwarding'
     | '/login'
     | '/modem'
+    | '/status'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -95,10 +118,18 @@ export interface RootRouteChildren {
   ForwardingRoute: typeof ForwardingRoute
   LoginRoute: typeof LoginRoute
   ModemRoute: typeof ModemRoute
+  StatusRoute: typeof StatusRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/status': {
+      id: '/status'
+      path: '/status'
+      fullPath: '/status'
+      preLoaderRoute: typeof StatusRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/modem': {
       id: '/modem'
       path: '/modem'
@@ -151,6 +182,7 @@ const rootRouteChildren: RootRouteChildren = {
   ForwardingRoute: ForwardingRoute,
   LoginRoute: LoginRoute,
   ModemRoute: ModemRoute,
+  StatusRoute: StatusRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
