@@ -8,8 +8,7 @@ import {
 } from "@tanstack/react-router";
 import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools";
 import {
-	Cpu,
-	Forward,
+	Activity,
 	Globe,
 	LogOut,
 	type LucideIcon,
@@ -46,12 +45,11 @@ const languageTranslationKeys = {
 
 const navigationItems = [
 	{ to: "/", label: "nav.sms", icon: MessageSquare },
-	{ to: "/modem", label: "nav.modem", icon: Cpu },
+	{ to: "/status", label: "nav.status", icon: Activity },
 	{ to: "/favorites", label: "nav.favorites", icon: Star },
-	{ to: "/forwarding", label: "nav.forwarding", icon: Forward },
 	{ to: "/config", label: "nav.config", icon: Settings },
 ] as const satisfies ReadonlyArray<{
-	to: "/" | "/modem" | "/favorites" | "/forwarding" | "/config";
+	to: "/" | "/status" | "/favorites" | "/config";
 	label: `nav.${string}`;
 	icon: LucideIcon;
 }>;
@@ -120,9 +118,7 @@ function RootComponent() {
 		}
 	}
 
-	const isWorkspace = ["/", "/forwarding", "/config"].includes(
-		location.pathname,
-	);
+	const isWorkspace = ["/", "/status", "/config"].includes(location.pathname);
 	const mainClassName = isWorkspace
 		? "mobile-navigation-offset min-h-0 flex-1 overflow-hidden p-0 md:p-4"
 		: "mobile-navigation-offset flex-1 overflow-auto p-4 md:p-6";

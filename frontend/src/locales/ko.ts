@@ -10,7 +10,18 @@ export const ko = {
 		favorites: "즐겨찾기",
 		modem: "모뎀",
 		forwarding: "전달",
+		status: "상태",
 		config: "구성",
+	},
+	status: {
+		eyebrow: "시스템 상태",
+		title: "상태",
+		description: "모뎀과 전달 파이프라인을 한 화면에서 확인합니다.",
+		ariaTabs: "상태 섹션",
+		tabs: {
+			modem: "모뎀",
+			forwarding: "전달",
+		},
 	},
 	header: {
 		ariaPrimary: "기본",

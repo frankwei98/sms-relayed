@@ -1,10 +1,10 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { ModemStatusPanel } from "#/components/modem/modem-status-panel";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 
 export const Route = createFileRoute("/modem")({
-	component: ModemPage,
+	beforeLoad: () => {
+		throw redirect({
+			to: "/status",
+			search: { section: "modem" },
+		});
+	},
 });
-
-function ModemPage() {
-	return <ModemStatusPanel />;
-}

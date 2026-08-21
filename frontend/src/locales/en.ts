@@ -4,7 +4,18 @@ export const en = {
 		favorites: "Favorites",
 		modem: "Modem",
 		forwarding: "Forwarding",
+		status: "Status",
 		config: "Config",
+	},
+	status: {
+		eyebrow: "System health",
+		title: "Status",
+		description: "A single view of your modem and forwarding pipeline.",
+		ariaTabs: "Status sections",
+		tabs: {
+			modem: "Modem",
+			forwarding: "Forwarding",
+		},
 	},
 	header: {
 		ariaPrimary: "Primary",

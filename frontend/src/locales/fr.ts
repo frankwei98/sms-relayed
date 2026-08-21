@@ -10,7 +10,19 @@ export const fr = {
 		favorites: "Favoris",
 		modem: "Modem",
 		forwarding: "Transfert",
+		status: "État",
 		config: "Configuration",
+	},
+	status: {
+		eyebrow: "État du système",
+		title: "État",
+		description:
+			"Surveillez le modem et le pipeline de transfert depuis une seule vue.",
+		ariaTabs: "Sections d’état",
+		tabs: {
+			modem: "Modem",
+			forwarding: "Transfert",
+		},
 	},
 	header: {
 		ariaPrimary: "Principal",
