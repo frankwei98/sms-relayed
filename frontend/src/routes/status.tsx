@@ -1,11 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { Cpu, Forward, type LucideIcon } from "lucide-react";
+import { type KeyboardEvent, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { ForwardingStatusPanel } from "#/components/forwarding/forwarding-status-panel";
 import { ModemStatusPanel } from "#/components/modem/modem-status-panel";
 import { cn } from "#/lib/utils";
 
-type StatusSection = "modem" | "forwarding";
+export type StatusSection = "modem" | "forwarding";
 
 type StatusSearch = {
 	section?: StatusSection;
@@ -62,34 +63,7 @@ function StatusPage() {
 					</p>
 				</div>
 
-				<div
-					className="inline-flex w-fit items-center gap-1 rounded-xl border bg-muted/60 p-1"
-					role="tablist"
-					aria-label={t("status.ariaTabs")}
-				>
-					{statusSections.map(({ key, label, icon: Icon }) => {
-						const isActive = activeSection === key;
-
-						return (
-							<button
-								key={key}
-								type="button"
-								id={`status-tab-${key}`}
-								role="tab"
-								aria-selected={isActive}
-								aria-controls="status-panel"
-								onClick={() => changeSection(key)}
-								className={cn(
-									"inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
-									isActive && "bg-background text-foreground shadow-sm",
-								)}
-							>
-								<Icon className="size-4" aria-hidden="true" />
-								{t(label)}
-							</button>
-						);
-					})}
-				</div>
+				<StatusTabs activeSection={activeSection} onChange={changeSection} />
 			</header>
 
 			<div
@@ -113,6 +87,81 @@ function StatusPage() {
 					/>
 				)}
 			</div>
+		</div>
+	);
+}
+
+type StatusTabsProps = {
+	activeSection: StatusSection;
+	onChange: (section: StatusSection) => void;
+};
+
+export function StatusTabs({ activeSection, onChange }: StatusTabsProps) {
+	const { t } = useTranslation();
+	const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
+	function handleKeyDown(
+		event: KeyboardEvent<HTMLButtonElement>,
+		index: number,
+	) {
+		let nextIndex: number | null = null;
+
+		switch (event.key) {
+			case "ArrowLeft":
+				nextIndex = (index - 1 + statusSections.length) % statusSections.length;
+				break;
+			case "ArrowRight":
+				nextIndex = (index + 1) % statusSections.length;
+				break;
+			case "Home":
+				nextIndex = 0;
+				break;
+			case "End":
+				nextIndex = statusSections.length - 1;
+				break;
+		}
+
+		if (nextIndex === null) return;
+
+		event.preventDefault();
+		const nextSection = statusSections[nextIndex].key;
+		onChange(nextSection);
+		tabRefs.current[nextIndex]?.focus();
+	}
+
+	return (
+		<div
+			className="inline-flex w-fit items-center gap-1 rounded-xl border bg-muted/60 p-1"
+			role="tablist"
+			aria-label={t("status.ariaTabs")}
+		>
+			{statusSections.map(({ key, label, icon: Icon }, index) => {
+				const isActive = activeSection === key;
+
+				return (
+					<button
+						key={key}
+						type="button"
+						id={`status-tab-${key}`}
+						role="tab"
+						aria-selected={isActive}
+						aria-controls="status-panel"
+						tabIndex={isActive ? 0 : -1}
+						ref={(element) => {
+							tabRefs.current[index] = element;
+						}}
+						onKeyDown={(event) => handleKeyDown(event, index)}
+						onClick={() => onChange(key)}
+						className={cn(
+							"inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+							isActive && "bg-background text-foreground shadow-sm",
+						)}
+					>
+						<Icon className="size-4" aria-hidden="true" />
+						{t(label)}
+					</button>
+				);
+			})}
 		</div>
 	);
 }
