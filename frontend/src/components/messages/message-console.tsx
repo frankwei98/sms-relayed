@@ -206,6 +206,8 @@ export function MessageConsole({
 			? `${initialPhone}:${targetMessageId}`
 			: null;
 	const markingReadPhonesRef = useRef<Set<string>>(new Set());
+	const markingReadPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
+	const manualUnreadMessageIdsRef = useRef<Map<string, Set<number>>>(new Map());
 	const hasLoadedConversationsRef = useRef(false);
 	const loadedMessageCountRef = useRef(0);
 	const pendingSendRef = useRef<{
@@ -562,20 +564,33 @@ export function MessageConsole({
 	useEffect(() => {
 		if (!selectedPhone || isComposingNew) return;
 		if (markingReadPhonesRef.current.has(selectedPhone)) return;
-		const hasUnread = messages.some(
+		const unreadMessages = messages.filter(
 			(message) =>
 				message.phone_number === selectedPhone &&
 				message.direction === "inbound" &&
 				message.read_at === null,
 		);
-		if (!hasUnread) return;
+		if (unreadMessages.length === 0) return;
 
 		const phone = selectedPhone;
+		const manualUnreadIds = manualUnreadMessageIdsRef.current.get(phone);
+		const autoReadMessages = manualUnreadIds
+			? unreadMessages.filter((message) => !manualUnreadIds.has(message.id))
+			: unreadMessages;
+		if (autoReadMessages.length === 0) return;
 		markingReadPhonesRef.current.add(phone);
 
-		apiFetch(`/api/conversations/${encodeURIComponent(phone)}/read`, {
-			method: "POST",
-		})
+		const markRead = manualUnreadIds
+			? Promise.all(
+					autoReadMessages.map((message) =>
+						apiFetch(`/api/messages/${message.id}/read`, { method: "POST" }),
+					),
+				)
+			: apiFetch(`/api/conversations/${encodeURIComponent(phone)}/read`, {
+					method: "POST",
+				});
+
+		const operation = markRead
 			.then(
 				() =>
 					reloadActiveViews().catch((err) => {
@@ -589,7 +604,11 @@ export function MessageConsole({
 			)
 			.finally(() => {
 				markingReadPhonesRef.current.delete(phone);
+				if (markingReadPromisesRef.current.get(phone) === operation) {
+					markingReadPromisesRef.current.delete(phone);
+				}
 			});
+		markingReadPromisesRef.current.set(phone, operation);
 	}, [isComposingNew, messages, reloadActiveViews, selectedPhone]);
 
 	const filteredConversations = useMemo(() => {
@@ -628,6 +647,7 @@ export function MessageConsole({
 
 	function selectConversation(phone: string) {
 		if (!isComposingNew && phone === selectedPhone) return;
+		manualUnreadMessageIdsRef.current.delete(phone);
 		resetMessageWindow();
 		setSelectedPhone(phone);
 		setPhoneNumber(phone);
@@ -637,6 +657,9 @@ export function MessageConsole({
 	}
 
 	function startNewMessage() {
+		if (selectedPhone) {
+			manualUnreadMessageIdsRef.current.delete(selectedPhone);
+		}
 		setSelectedPhone(null);
 		setPhoneNumber("");
 		resetMessageWindow();
@@ -646,6 +669,9 @@ export function MessageConsole({
 	}
 
 	function closeMobileThread() {
+		if (selectedPhone) {
+			manualUnreadMessageIdsRef.current.delete(selectedPhone);
+		}
 		resetMessageWindow();
 		setIsComposingNew(false);
 		setSelectedPhone(null);
@@ -725,6 +751,7 @@ export function MessageConsole({
 			console.error(err);
 			return;
 		}
+		manualUnreadMessageIdsRef.current.delete(selectedPhone);
 		try {
 			await reloadActiveViews();
 		} catch (err) {
@@ -735,8 +762,23 @@ export function MessageConsole({
 
 	async function handleMarkSelected(read: boolean) {
 		const ids = Array.from(selectedIds);
+		const phone = selectedPhone;
 		if (ids.length === 0) return;
 		setOperationError(null);
+		if (phone) {
+			const manualUnreadIds =
+				manualUnreadMessageIdsRef.current.get(phone) ?? new Set<number>();
+			for (const id of ids) {
+				if (read) manualUnreadIds.delete(id);
+				else manualUnreadIds.add(id);
+			}
+			if (manualUnreadIds.size > 0) {
+				manualUnreadMessageIdsRef.current.set(phone, manualUnreadIds);
+			} else {
+				manualUnreadMessageIdsRef.current.delete(phone);
+			}
+			await markingReadPromisesRef.current.get(phone);
+		}
 		try {
 			await Promise.all(
 				ids.map((id) =>
@@ -852,6 +894,7 @@ export function MessageConsole({
 			});
 			setDeleteConversationTarget(null);
 			if (selectedPhone === phone) {
+				manualUnreadMessageIdsRef.current.delete(phone);
 				resetMessageWindow();
 				setSelectedPhone(null);
 				setIsComposingNew(false);

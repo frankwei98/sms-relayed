@@ -1300,6 +1300,205 @@ describe("MessageConsole bulk read", () => {
 		resolveRead?.();
 		await waitFor(() => expect(markedRead).toBe(true));
 	});
+
+	test("preserves a manually unread message across refreshes while reading new arrivals", async () => {
+		const readAt = "2026-07-11T00:01:00Z";
+		let serverMessages = [
+			{ ...unreadMessage, read_at: readAt as string | null },
+		];
+		const mutationRequests: string[] = [];
+		let resolveUnreadResponse: (() => void) | undefined;
+		mocks.apiFetch.mockImplementation((input: string, init?: RequestInit) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: unreadMessage.phone_number,
+						last_message: serverMessages[0],
+						unread_count: serverMessages.filter(
+							(message) => message.read_at === null,
+						).length,
+						total_count: serverMessages.length,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?") && init?.method !== "POST") {
+				return Promise.resolve(
+					serverMessages.map((message) => ({ ...message })),
+				);
+			}
+			if (init?.method === "POST") {
+				mutationRequests.push(input);
+				if (input === `/api/messages/${unreadMessage.id}/unread`) {
+					serverMessages = serverMessages.map((message) =>
+						message.id === unreadMessage.id
+							? { ...message, read_at: null }
+							: message,
+					);
+					mocks.handlers["message.read_state_changed"]?.();
+					return new Promise((resolve) => {
+						resolveUnreadResponse = () => resolve({});
+					});
+				}
+				const readMatch = input.match(/^\/api\/messages\/(\d+)\/read$/);
+				if (readMatch) {
+					const id = Number(readMatch[1]);
+					serverMessages = serverMessages.map((message) =>
+						message.id === id ? { ...message, read_at: readAt } : message,
+					);
+				}
+				if (input.includes("/api/conversations/")) {
+					serverMessages = serverMessages.map((message) => ({
+						...message,
+						read_at: readAt,
+					}));
+				}
+				return Promise.resolve({});
+			}
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+		fireEvent.click(
+			await screen.findByRole("button", { name: /\+15550000001/ }),
+		);
+		await screen.findByText("test body");
+		fireEvent.click(
+			screen.getByRole("button", { name: "Conversation actions" }),
+		);
+		fireEvent.click(
+			await screen.findByRole("menuitem", { name: "Select messages" }),
+		);
+		fireEvent.click(screen.getByRole("checkbox"));
+		fireEvent.click(
+			screen.getByRole("button", { name: "Conversation actions" }),
+		);
+		fireEvent.click(
+			await screen.findByRole("menuitem", { name: "Mark unread (1)" }),
+		);
+
+		await waitFor(() =>
+			expect(mutationRequests).toContain(
+				`/api/messages/${unreadMessage.id}/unread`,
+			),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		expect(
+			serverMessages.find((message) => message.id === 1)?.read_at,
+		).toBeNull();
+		expect(
+			mutationRequests.some((request) =>
+				request.includes("/api/conversations/"),
+			),
+		).toBe(false);
+		resolveUnreadResponse?.();
+		await waitFor(() => expect(screen.queryByRole("checkbox")).toBeNull());
+		mocks.handlers["message.read_state_changed"]?.();
+		const newMessage = {
+			...unreadMessage,
+			id: 2,
+			body: "new arrival",
+			read_at: null,
+		};
+		serverMessages = [newMessage, ...serverMessages];
+		mocks.handlers["message.created"]?.({ payload: newMessage });
+
+		await waitFor(() =>
+			expect(mutationRequests).toContain(`/api/messages/${newMessage.id}/read`),
+		);
+		expect(
+			serverMessages.find((message) => message.id === 1)?.read_at,
+		).toBeNull();
+		expect(serverMessages.find((message) => message.id === 2)?.read_at).toBe(
+			readAt,
+		);
+		expect(
+			mutationRequests.some((request) =>
+				request.includes("/api/conversations/"),
+			),
+		).toBe(false);
+	});
+
+	test("applies manual unread after an in-flight automatic read", async () => {
+		const readAt = "2026-07-11T00:01:00Z";
+		let serverMessage = {
+			...unreadMessage,
+			read_at: null as string | null,
+		};
+		const mutationRequests: string[] = [];
+		let resolveAutomaticRead: (() => void) | undefined;
+		mocks.apiFetch.mockImplementation((input: string, init?: RequestInit) => {
+			if (input === "/api/conversations") {
+				return Promise.resolve([
+					{
+						phone_number: unreadMessage.phone_number,
+						last_message: serverMessage,
+						unread_count: serverMessage.read_at === null ? 1 : 0,
+						total_count: 1,
+					},
+				]);
+			}
+			if (input.startsWith("/api/messages?") && init?.method !== "POST") {
+				return Promise.resolve([{ ...serverMessage }]);
+			}
+			if (init?.method === "POST") {
+				mutationRequests.push(input);
+				if (input.includes("/api/conversations/")) {
+					return new Promise((resolve) => {
+						resolveAutomaticRead = () => {
+							serverMessage = { ...serverMessage, read_at: readAt };
+							resolve({});
+						};
+					});
+				}
+				if (input === `/api/messages/${unreadMessage.id}/unread`) {
+					serverMessage = { ...serverMessage, read_at: null };
+				}
+				return Promise.resolve({});
+			}
+			return Promise.resolve({});
+		});
+
+		render(<MessageConsole />);
+		fireEvent.click(
+			await screen.findByRole("button", { name: /\+15550000001/ }),
+		);
+		await waitFor(() =>
+			expect(
+				mutationRequests.some((request) =>
+					request.includes("/api/conversations/"),
+				),
+			).toBe(true),
+		);
+		fireEvent.click(
+			screen.getByRole("button", { name: "Conversation actions" }),
+		);
+		fireEvent.click(
+			await screen.findByRole("menuitem", { name: "Select messages" }),
+		);
+		fireEvent.click(screen.getByRole("checkbox"));
+		fireEvent.click(
+			screen.getByRole("button", { name: "Conversation actions" }),
+		);
+		fireEvent.click(
+			await screen.findByRole("menuitem", { name: "Mark unread (1)" }),
+		);
+
+		await Promise.resolve();
+		expect(mutationRequests).not.toContain(
+			`/api/messages/${unreadMessage.id}/unread`,
+		);
+		resolveAutomaticRead?.();
+		await waitFor(() =>
+			expect(mutationRequests).toContain(
+				`/api/messages/${unreadMessage.id}/unread`,
+			),
+		);
+		expect(serverMessage.read_at).toBeNull();
+		expect(mutationRequests).toEqual([
+			expect.stringContaining("/api/conversations/"),
+			`/api/messages/${unreadMessage.id}/unread`,
+		]);
+	});
 });
 
 describe("MessageConsole timeline pagination", () => {
