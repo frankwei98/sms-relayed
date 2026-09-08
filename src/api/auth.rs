@@ -28,6 +28,9 @@ const MAX_LOGIN_FAILURES: u32 = 5;
 const LOGIN_FAILURE_WINDOW: StdDuration = StdDuration::from_secs(5 * 60);
 const CREDENTIAL_SECRET_BYTES: usize = 32;
 
+#[derive(Clone)]
+pub(super) struct AuthenticatedSession(pub String);
+
 #[derive(Clone, Copy)]
 struct LoginFailures {
     window_started: Instant,

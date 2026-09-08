@@ -1,11 +1,12 @@
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
+use std::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
@@ -21,6 +22,11 @@ use crate::messaging::SendMessage;
 use crate::storage::NewMessage;
 
 use super::{ApiError, ApiResult, ApiState};
+
+#[cfg(not(test))]
+const EVENT_SESSION_REVALIDATE_INTERVAL: Duration = Duration::from_secs(15);
+#[cfg(test)]
+const EVENT_SESSION_REVALIDATE_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Deserialize)]
 pub struct SendRequest {
@@ -401,17 +407,58 @@ async fn export_messages(
     Ok((headers, body).into_response())
 }
 
-async fn events(State(state): State<ApiState>) -> impl IntoResponse {
+async fn events(
+    State(state): State<ApiState>,
+    Extension(session): Extension<super::auth::AuthenticatedSession>,
+) -> impl IntoResponse {
     let rx = state.events.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
-        Ok(event) => match serde_json::to_string(&event) {
-            Ok(data) => Some(Ok::<_, std::convert::Infallible>(
-                Event::default().event(event.name()).data(data),
-            )),
-            Err(_) => None,
+    let sessions = state.sessions.clone();
+    let token = session.0;
+    let mut revalidate = tokio::time::interval(EVENT_SESSION_REVALIDATE_INTERVAL);
+    revalidate.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let stream = futures_util::stream::unfold(
+        (BroadcastStream::new(rx), revalidate, sessions, token),
+        |(mut events, mut revalidate, sessions, token)| async move {
+            loop {
+                let event = tokio::select! {
+                    _ = revalidate.tick() => {
+                        match sessions.is_valid(&token).await {
+                            Ok(true) => continue,
+                            Ok(false) => return None,
+                            Err(error) => {
+                                log::error!("event stream session validation failed: {error:#}");
+                                return None;
+                            }
+                        }
+                    }
+                    result = events.next() => {
+                        match result {
+                            Some(Ok(event)) => event,
+                            Some(Err(_)) => continue,
+                            None => return None,
+                        }
+                    }
+                };
+
+                match sessions.is_valid(&token).await {
+                    Ok(true) => {}
+                    Ok(false) => return None,
+                    Err(error) => {
+                        log::error!("event stream session validation failed: {error:#}");
+                        return None;
+                    }
+                }
+                let Ok(data) = serde_json::to_string(&event) else {
+                    continue;
+                };
+                let event = Event::default().event(event.name()).data(data);
+                return Some((
+                    Ok::<_, std::convert::Infallible>(event),
+                    (events, revalidate, sessions, token),
+                ));
+            }
         },
-        Err(_) => None,
-    });
+    );
     Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
 }
 
@@ -420,8 +467,113 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use super::*;
+
+    fn sse_test_state() -> super::super::ApiState {
+        let store = crate::storage::MessageStore::open_in_memory().unwrap();
+        super::super::ApiState {
+            config: std::sync::Arc::new(crate::config::AppConfig::default()),
+            config_path: std::path::PathBuf::from("/tmp/not-used.toml"),
+            config_save_lock: Arc::new(tokio::sync::Mutex::new(())),
+            store: store.into(),
+            events: crate::events::EventBus::new(),
+            delivery_wakeup: crate::delivery::DeliveryWakeup::new(),
+            started_at: std::time::Instant::now(),
+            sessions: super::super::auth::SessionStore::default(),
+            modem: crate::modem::ModemService::new(),
+            sms_sender: super::super::test_sms_sender(),
+            service_control: super::super::service::ServiceControl::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn revoked_session_closes_event_stream_before_sensitive_message_is_sent() {
+        let state = sse_test_state();
+        let token = state.sessions.create_session().await.unwrap();
+        let response = events(
+            State(state.clone()),
+            Extension(super::super::auth::AuthenticatedSession(token.clone())),
+        )
+        .await
+        .into_response();
+        let mut body = response.into_body().into_data_stream();
+        state.sessions.remove(&token).await.unwrap();
+        state.events.send(AppEvent::MessageCreated(Message {
+            id: 1,
+            direction: MessageDirection::Inbound,
+            phone_number: "+15551234567".to_string(),
+            body: "private body".to_string(),
+            timestamp: "2026-09-08T00:00:00Z".to_string(),
+            status: MessageStatus::Received,
+            source: MessageSource::Modem,
+            modem_sms_path: Some("/org/freedesktop/ModemManager1/SMS/1".to_string()),
+            read_at: None,
+            error: None,
+            created_at: "2026-09-08T00:00:00Z".to_string(),
+            updated_at: "2026-09-08T00:00:00Z".to_string(),
+            favorite_at: None,
+            delete_blocked: false,
+        }));
+
+        let chunk = tokio::time::timeout(Duration::from_secs(1), body.next())
+            .await
+            .expect("revoked event stream closes promptly");
+        assert!(chunk.is_none(), "revoked stream leaked an SSE event");
+    }
+
+    #[tokio::test]
+    async fn expired_session_closes_idle_event_stream() {
+        let state = sse_test_state();
+        let token = state.sessions.create_session().await.unwrap();
+        let response = events(
+            State(state.clone()),
+            Extension(super::super::auth::AuthenticatedSession(token.clone())),
+        )
+        .await
+        .into_response();
+        let mut body = response.into_body().into_data_stream();
+        state.sessions.expire_for_test(&token).await.unwrap();
+
+        let chunk = tokio::time::timeout(Duration::from_secs(1), body.next())
+            .await
+            .expect("expired idle event stream closes promptly");
+        assert!(chunk.is_none());
+    }
+
+    #[tokio::test]
+    async fn authenticated_router_event_stream_receives_events() {
+        use tower::ServiceExt;
+
+        let state = sse_test_state();
+        let token = state.sessions.create_session().await.unwrap();
+        let events = state.events.clone();
+        let response = super::super::router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/events")
+                    .header(
+                        header::COOKIE,
+                        format!("{}={token}", super::super::auth::SESSION_COOKIE),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        events.send(AppEvent::ConfigSaved);
+
+        let chunk = tokio::time::timeout(Duration::from_secs(1), body.next())
+            .await
+            .expect("authenticated event stream receives an event")
+            .expect("authenticated event stream remains open")
+            .unwrap();
+        let chunk = String::from_utf8_lossy(&chunk);
+        assert!(chunk.contains("event: config.saved"), "{chunk}");
+    }
 
     #[derive(Clone, Default)]
     struct RecordingSmsSender {

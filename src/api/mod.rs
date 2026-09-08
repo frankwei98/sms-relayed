@@ -175,7 +175,7 @@ pub fn router(state: ApiState) -> Router {
         .merge(modem::routes())
         .merge(forwarding::routes())
         .layer(middleware::from_fn(
-            move |req: axum::extract::Request, next: middleware::Next| {
+            move |mut req: axum::extract::Request, next: middleware::Next| {
                 let sessions = sessions.clone();
                 async move {
                     let token = auth::session_token(req.headers());
@@ -189,6 +189,8 @@ pub fn router(state: ApiState) -> Router {
                             return auth::session_storage_error(error).into_response();
                         }
                     }
+                    req.extensions_mut()
+                        .insert(auth::AuthenticatedSession(token));
                     next.run(req).await
                 }
             },
