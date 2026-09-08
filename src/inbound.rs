@@ -244,7 +244,7 @@ impl InboundWorker {
                     continue;
                 }
                 joined = children.join_next(), if !children.is_empty() => {
-                    report_child_result(joined);
+                    report_child_result(joined)?;
                     continue;
                 }
                 sms = subscription.next_sms() => sms?,
@@ -349,16 +349,18 @@ impl InboundWorker {
     }
 }
 
-fn report_child_result(joined: Option<Result<Result<()>, tokio::task::JoinError>>) {
+fn report_child_result(joined: Option<Result<Result<()>, tokio::task::JoinError>>) -> Result<()> {
     match joined {
-        Some(Ok(Ok(()))) | None => {}
+        Some(Ok(Ok(()))) | None => Ok(()),
         Some(Ok(Err(error))) => {
             error!("incoming SMS processing task failed: {error:#}");
             report_child_failure();
+            Err(error).context("incoming SMS processing failed; rebuilding subscription")
         }
         Some(Err(error)) => {
             error!("incoming SMS processing task failed to join: {error}");
             report_child_failure();
+            Err(error).context("incoming SMS processing task failed; rebuilding subscription")
         }
     }
 }
@@ -374,7 +376,7 @@ async fn wait_for_reconnect(delay: Duration, children: &mut JoinSet<Result<()>>)
         tokio::select! {
             _ = &mut sleep => return,
             joined = children.join_next(), if !children.is_empty() => {
-                report_child_result(joined);
+                let _ = report_child_result(joined);
             }
         }
     }
@@ -883,15 +885,19 @@ mod tests {
     }
 
     struct ScriptedSource {
-        subscription: Mutex<Option<Box<dyn InboundSubscriptionAdapter>>>,
+        subscriptions: Mutex<VecDeque<Box<dyn InboundSubscriptionAdapter>>>,
         subscribed: Arc<Notify>,
         subscribed_paths: Arc<Mutex<Vec<String>>>,
     }
 
     impl ScriptedSource {
         fn new(subscription: impl InboundSubscriptionAdapter + 'static) -> Self {
+            Self::with_subscriptions(vec![Box::new(subscription)])
+        }
+
+        fn with_subscriptions(subscriptions: Vec<Box<dyn InboundSubscriptionAdapter>>) -> Self {
             Self {
-                subscription: Mutex::new(Some(Box::new(subscription))),
+                subscriptions: Mutex::new(subscriptions.into()),
                 subscribed: Arc::new(Notify::new()),
                 subscribed_paths: Arc::new(Mutex::new(Vec::new())),
             }
@@ -907,7 +913,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(modem_path.to_string());
-            let subscription = self.subscription.lock().unwrap().take();
+            let subscription = self.subscriptions.lock().unwrap().pop_front();
             self.subscribed.notify_one();
             Box::pin(async move {
                 subscription.ok_or_else(|| anyhow::anyhow!("scripted subscription exhausted"))
@@ -1255,6 +1261,63 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].body, "arrived while offline");
+        run.abort();
+        let _ = run.await;
+    }
+
+    #[tokio::test]
+    async fn terminal_property_failure_rebuilds_subscription_and_recovers_from_snapshot() {
+        let terminal_actions = (0..MAX_PROPERTY_READ_ATTEMPTS)
+            .map(|attempt| {
+                PropertyAction::Return(Err(anyhow::anyhow!("temporary GetAll failure {attempt}")))
+            })
+            .collect();
+        let source = Arc::new(ScriptedSource::with_subscriptions(vec![
+            Box::new(SnapshotSubscription {
+                initial_messages: vec![Box::new(ScriptedSms::new(SMS_PATH, terminal_actions))],
+                live_messages: VecDeque::new(),
+                live_reads: Arc::new(AtomicUsize::new(0)),
+            }),
+            Box::new(SnapshotSubscription {
+                initial_messages: vec![Box::new(ScriptedSms::new(
+                    SMS_PATH,
+                    vec![PropertyAction::Return(Ok(properties(
+                        "recovered after GetAll failure",
+                        StorageType::Me as u32,
+                    )))],
+                ))],
+                live_messages: VecDeque::new(),
+                live_reads: Arc::new(AtomicUsize::new(0)),
+            }),
+        ]));
+        let subscribed_paths = source.subscribed_paths.clone();
+        let store = Store::open_in_memory().unwrap();
+        store
+            .set_modem_fingerprint("property-recovery-fingerprint".to_string())
+            .await
+            .unwrap();
+        let query = messaging(store.clone());
+        let worker = worker(store, source, settings(Vec::new(), Vec::new()));
+
+        let run = tokio::spawn(async move {
+            let mut children = JoinSet::new();
+            loop {
+                worker
+                    .run_subscription(MODEM_PATH, &mut children)
+                    .await
+                    .unwrap_err();
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+
+        let messages = wait_for_messages(&query).await;
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].body, "recovered after GetAll failure");
+        assert_eq!(
+            subscribed_paths.lock().unwrap().as_slice(),
+            [MODEM_PATH, MODEM_PATH]
+        );
         run.abort();
         let _ = run.await;
     }
